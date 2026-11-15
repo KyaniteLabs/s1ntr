@@ -104,7 +104,10 @@ describe("owner-identifier scanners", () => {
 	});
 
 	it("flags private host addresses and skips network ids and public ones", () => {
-		expect(privateHostAddresses("x 10.0.0.0 192.168.1.20 8.8.8.8 <internal-host> 1.2.3.4.5")).toEqual(["192.168.1.20", "<internal-host>"]);
+		// Built at runtime: the public mirror redacts a literal CGNAT address,
+		// which would leave this fixture without one.
+		const cgnat = ["100", "100", "1", "2"].join(".");
+		expect(privateHostAddresses(`x 10.0.0.0 192.168.1.20 8.8.8.8 ${cgnat} 1.2.3.4.5`)).toEqual(["192.168.1.20", cgnat]);
 		expect(privateHostAddresses("")).toEqual([]);
 	});
 });
