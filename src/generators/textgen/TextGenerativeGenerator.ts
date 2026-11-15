@@ -1,0 +1,256 @@
+/**
+ * TextGenerativeGenerator - Experimental text-based generative art
+ *
+ * Unlike ASCIIArtGenerator which uses character density for visual patterns,
+ * TextGenerativeGenerator produces freeform text: concrete poetry, word art,
+ * experimental typography, and semantic visual compositions.
+ *
+ * Key differences from ASCIIArtGenerator:
+ * - No fixed grid (freeform output)
+ * - No character restrictions (any text valid)
+ * - Focus on semantic/playful creativity vs visual density
+ * - Optimized for small/fast models (1.2B+)
+ *
+ * @example
+ *   Input: "dripping water"
+ *   Output:
+ *     d
+ *      r
+ *       i
+ *        p
+ *         p
+ *          i
+ *           n
+ *            g
+ *
+ * @example
+ *   Input: "neon city in words"
+ *   Output:
+ *     ╔══════════════════╗
+ *     ║  N  E  O  N      ║
+ *     ║    C  I  T  Y    ║
+ *     ║      G  L  O  W  ║
+ *     ╚══════════════════╝
+ *
+ * @since 2.2.0
+ * @author Sinter Team
+ */
+
+import { TierBasedGenerator, type TierBasedGeneratorOptions } from '../TierBasedGenerator.js';
+
+/** Available text generative forms */
+export type TextGenForm =
+  | 'concrete'      // Visual poetry using word arrangement
+  | 'cascade'       // Words flow/drip down the page
+  | 'radial'        // Words radiate from center
+  | 'interwoven'    // Overlapping text layers
+  | 'typographic'   // Letter-as-shape compositions
+  | 'ascii-poem'    // ASCII art meets poetry
+  | 'freeform';     // No constraints, pure experimentation
+
+/** Style modifiers for text generation */
+export type TextGenStyle =
+  | 'minimal'       // Sparse, lots of whitespace
+  | 'dense'         // Packed, overlapping
+  | 'chaotic'       // Random, energetic
+  | 'meditative'    // Slow, rhythmic
+  | 'punk'          // Raw, aggressive
+  | 'ethereal';     // Light, floating quality
+
+/**
+ * Options for text generative generation
+ */
+export interface TextGenOptions extends TierBasedGeneratorOptions {
+  /** The compositional form */
+  form?: TextGenForm;
+  /** Stylistic modifier */
+  style?: TextGenStyle;
+  /** Maximum lines of output */
+  maxLines?: number;
+  /** Maximum characters per line */
+  maxWidth?: number;
+  /** Allow Unicode/emoji (true) or ASCII-only (false) */
+  unicode?: boolean;
+  /** Repeat pattern or single composition */
+  repeating?: boolean;
+}
+
+/**
+ * Generator for experimental text-based art
+ *
+ * Optimized for speed over complexity - works well with small models (1.2B+)
+ * due to the low token count of text outputs compared to code.
+ */
+export class TextGenerativeGenerator extends TierBasedGenerator {
+  constructor(llmOrConfig?: ConstructorParameters<typeof TierBasedGenerator>[1]) {
+    super('textgen', llmOrConfig);
+  }
+
+  /**
+   * Generate text-based art from a prompt
+   *
+   * @param prompt - The creative concept (e.g., "dripping water", "neon anxiety")
+   * @param options - Generation options
+   * @returns Formatted text composition
+   *
+   * @throws {GenerationError} If LLM returns invalid or empty output
+   */
+  async generate(prompt: string, options?: TextGenOptions): Promise<string> {
+    const textPrompt = [
+      prompt,
+      '',
+      'Return text art only: concrete poetry, word arrangement, typography, or ASCII-poem text.',
+      'Do not return HTML, SVG, CSS, JavaScript, markdown fences, placeholder comments, or DOM structure.',
+      'Use plain text lines that can be shown inside a <pre> element.',
+      'Compose a visible silhouette: vary line lengths deliberately (e.g., tapering, cascading, pyramidal, or radial) so the arrangement reads as a shape, not a flat list.',
+      'Use whitespace as a compositional element — leading spaces, short lines, and varying indentation are part of the artwork.',
+    ].join('\n');
+    const raw = await super.generate(textPrompt, {
+      ...options,
+      useGeneratorTools: options?.useGeneratorTools ?? false,
+    });
+    const validation = this.validateOutput(raw);
+    if (!validation.valid) {
+      throw new Error(validation.error);
+    }
+    return this.formatOutput(raw, options);
+  }
+
+  protected buildEmptyCodeRetrySystemPrompt(systemPrompt: string): string {
+    return [
+      systemPrompt,
+      '',
+      'TextGen contract: output raw text art, never program source.',
+      'Return only plain text lines suitable for a <pre> element.',
+      'No HTML, SVG, CSS, JavaScript, markdown fences, comments, explanations, or DOM structure.',
+    ].join('\n');
+  }
+
+  protected buildEmptyCodeRetryPrompt(originalPrompt: string, userPrompt: string): string {
+    return [
+      userPrompt,
+      '',
+      'The previous TextGen attempt returned empty output or failed validation.',
+      'Regenerate from scratch as raw text art only.',
+      'Use plain text lines with visible spatial arrangement: indentation, line-length variation, repetition, tapering, cascading, or radial placement.',
+      'Do not return source code, HTML, SVG, CSS, JavaScript, markdown fences, placeholder comments, or explanations.',
+      `Original request: ${originalPrompt}`,
+    ].join('\n');
+  }
+
+  /**
+   * Validate that output is appropriate text content
+   *
+   * Unlike ASCIIArtGenerator, we don't restrict characters.
+   * We only check that it's not empty and not code.
+   */
+  protected validateOutput(code: string): { valid: boolean; error?: string } {
+    // Strip code fences and comments before validation (mirrors formatOutput preprocessing)
+    const stripped = code
+      .split('\n')
+      .filter(line => !line.startsWith('```') && !line.startsWith('//'))
+      .join('\n')
+      .trim();
+
+    if (!stripped || stripped.length === 0) {
+      return { valid: false, error: 'Empty output' };
+    }
+
+    if (/<\/?(?:!doctype|html|head|body|script|style|div|canvas|svg|path|textpath|defs)\b/i.test(stripped) ||
+        /\/\*\s*CSS here\s*\*\//i.test(stripped) ||
+        /\/\/\s*JS here/i.test(stripped)) {
+      return { valid: false, error: 'Output appears to be HTML/code placeholder, not text art' };
+    }
+
+    const hasCodeSyntax = [
+      /\bfunction\s+[A-Za-z_$][\w$]*\s*\(/,
+      /\bclass\s+[A-Za-z_$][\w$]*(?:\s+extends\s+[A-Za-z_$][\w$]*)?\s*\{/,
+      /\b(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=/,
+      /\breturn\b[^\n;{}]*[;}]/,
+      /\b(?:if|for|while)\s*\([^\n)]*\)\s*\{\s*\n\s*(?:return|const|let|var|[A-Za-z_$][\w$]*(?:\.|\())/,
+      /\b(?:import|export)\s+.+\bfrom\b/,
+      /\b[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*\s*\(/,
+      /\b[A-Za-z_$][\w$]*\s*\([^)\n]*\)\s*;/,
+      /=>/,
+    ].some(pattern => pattern.test(stripped));
+    if (hasCodeSyntax) {
+      return { valid: false, error: 'Output appears to be code, not text art' };
+    }
+
+    return { valid: true };
+  }
+
+  /**
+   * Format and clean the generated text
+   *
+   * - Removes code block markers
+   * - Applies line/width constraints
+   * - Handles Unicode vs ASCII preference
+   */
+  private formatOutput(raw: string, options?: TextGenOptions): string {
+    let lines = raw
+      .split('\n')
+      .map(line => line.trimEnd())
+      .filter(line => {
+        // Remove markdown code blocks
+        if (line.startsWith('```')) return false;
+        // Remove comments
+        if (line.startsWith('//')) return false;
+        return line.trim().length > 0;
+      });
+
+    // Apply max lines constraint
+    const maxLines = options?.maxLines || 40;
+    lines = lines.slice(0, maxLines);
+
+    // Apply max width constraint
+    const maxWidth = options?.maxWidth || 80;
+    lines = lines.map(line => line.slice(0, maxWidth));
+
+    // Filter Unicode if requested
+    if (options?.unicode === false) {
+      // Filter to ASCII range (1-127), remove null bytes
+      lines = lines.map(line => line.replace(/[\u0080-\uFFFF]/g, '').replace(/\0/g, ''));
+    }
+
+    return lines.join('\n');
+  }
+
+  /**
+   * Get default options based on model tier
+   *
+   * Small models get simpler constraints to avoid confusion
+   */
+  protected getDefaultOptions(): Partial<TextGenOptions> {
+    if (this.tier === 'tiny') {
+      return {
+        form: 'concrete',
+        style: 'minimal',
+        maxLines: 20,
+        maxWidth: 40,
+        unicode: false,
+      };
+    }
+
+    if (this.tier === 'local') {
+      return {
+        form: 'freeform',
+        style: 'minimal',
+        maxLines: 30,
+        maxWidth: 60,
+        unicode: true,
+      };
+    }
+
+    // Flagship/Medium get full flexibility
+    return {
+      form: 'freeform',
+      style: 'ethereal',
+      maxLines: 40,
+      maxWidth: 80,
+      unicode: true,
+    };
+  }
+}
+
+export default TextGenerativeGenerator;

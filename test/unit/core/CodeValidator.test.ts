@@ -1,0 +1,1138 @@
+import { afterEach, describe, it, expect, vi } from 'vitest';
+import { CodeValidator } from '../../../src/core/CodeValidator.js';
+import { HydraValidator } from '../../../src/core/validators/HydraValidator.js';
+import { StrudelValidator } from '../../../src/core/validators/StrudelValidator.js';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+// Shared p5 code body that exceeds the 500-byte MIN_SIZE_REQUIREMENTS for p5 domain
+const P5_BODY = `particles = [];
+for (let i = 0; i < 50; i++) {
+  particles.push({ x: random(width), y: random(height), speed: random(1, 3), col: color(random(255), 100, random(255), 200) });
+}
+function draw() {
+  background(0, 0, 0, 25);
+  for (let p of particles) {
+    fill(p.col);
+    noStroke();
+    ellipse(p.x, p.y, 10, 10);
+    p.x += random(-p.speed, p.speed);
+    p.y += random(-p.speed, p.speed);
+    if (p.x < 0) p.x = width;
+    if (p.x > width) p.x = 0;
+    if (p.y < 0) p.y = height;
+    if (p.y > height) p.y = 0;
+  }
+}`;
+
+describe('CodeValidator', () => {
+  describe('stripReasoningText', () => {
+    it('should strip LLM reasoning preamble and return clean code', () => {
+      const input = `The user wants a p5.js sketch with particles.
+I'll create a simple particle system.
+Here's a p5.js sketch that does this:
+
+function setup() {
+  createCanvas(400, 400);
+  background(220);
+  ${P5_BODY}
+}`;
+
+      const result = CodeValidator.validate(input);
+      expect(result.valid).toBe(true);
+      expect(result.cleanedCode).toContain('function setup()');
+      expect(result.cleanedCode).toContain('function draw()');
+      expect(result.cleanedCode).not.toContain("The user wants");
+      expect(result.cleanedCode).not.toContain("I'll create");
+    });
+
+    it('should return invalid when code is ONLY reasoning text', () => {
+      const input = `The user wants a p5.js sketch with particles.
+I'll create a simple particle system with flowing colors.
+Key elements: setup, draw, particles, color.`;
+
+      const result = CodeValidator.validate(input);
+      expect(result.valid).toBe(false);
+      expect(result.errors.length).toBeGreaterThan(0);
+    });
+
+    it('should strip numbered list items with filler', () => {
+      const input = `1. The first thing to do
+2. A nice particle effect
+3. It should look good
+
+function setup() {
+  createCanvas(400, 400);
+  background(220);
+  ${P5_BODY}
+}`;
+
+      const result = CodeValidator.validate(input);
+      expect(result.valid).toBe(true);
+      expect(result.cleanedCode).not.toContain('1. The first');
+    });
+
+    it('should preserve code inside markdown fences', () => {
+      const input = `Here's a sketch:
+\`\`\`javascript
+function setup() {
+  createCanvas(400, 400);
+  background(220);
+  ${P5_BODY}
+}
+\`\`\``;
+
+      const result = CodeValidator.validate(input);
+      expect(result.valid).toBe(true);
+      expect(result.cleanedCode).toContain('function setup()');
+    });
+
+    it('preserves a text-art poem instead of emptying it under a misattributed domain', () => {
+      // A concrete poem is legitimate textgen output, but it has none of the code
+      // markers stripReasoningText looks for, so the code-oriented stripper reduces
+      // it to empty. When the domain is misattributed (the RalphLoop validate path
+      // falls back to 'p5'), this used to fail as "Code is empty after stripping LLM
+      // reasoning text", silently discarding the poem. The safety net now preserves it.
+      const poem = [
+        'moonlight spills across the tin roof',
+        'a slow tide of silver breathing',
+        'nothing here remembers the noise',
+        'only the long blue patience of dawn',
+        'and the cat that is not a cat',
+      ].join('\n');
+
+      const result = CodeValidator.validate(poem, 'p5');
+      expect(result.cleanedCode).toContain('moonlight spills across the tin roof');
+      expect(result.cleanedCode).toContain('long blue patience of dawn');
+      expect(result.errors).not.toContain('Code is empty after stripping LLM reasoning text');
+    });
+  });
+
+  describe('p5.js structural validation', () => {
+    it('should validate valid p5.js code with setup()', () => {
+      const code = `function setup() {
+  createCanvas(400, 400);
+  background(220);
+  ${P5_BODY}
+}`;
+      const result = CodeValidator.validate(code, 'p5');
+      expect(result.valid).toBe(true);
+    });
+
+    it('should reject p5.js code without setup/draw/createCanvas', () => {
+      const code = `console.log("hello");
+// This is not p5 code
+var x = 5;`;
+      const result = CodeValidator.validate(code, 'p5');
+      expect(result.valid).toBe(false);
+      expect(result.errors[0]).toContain('setup');
+    });
+
+    it('should accept code with only createCanvas', () => {
+      const code = `createCanvas(800, 600);
+background(100);
+particles = [];
+for (let i = 0; i < 50; i++) {
+  particles.push({ x: random(width), y: random(height), size: random(5, 30) });
+  rect(particles[i].x, particles[i].y, 20, 20);
+  line(particles[i].x, particles[i].y, random(width), random(height));
+}
+for (let p of particles) {
+  fill(color(random(255), random(255), random(255)));
+  noStroke();
+  ellipse(p.x, p.y, p.size);
+  p.x += random(-1, 1);
+  p.y += random(-1, 1);
+  if (p.x < 0) p.x = width;
+  if (p.x > width) p.x = 0;
+  if (p.y < 0) p.y = height;
+  if (p.y > height) p.y = 0;
+}`;
+      const result = CodeValidator.validate(code, 'p5');
+      expect(result.valid).toBe(true);
+    });
+
+    it('accepts common p5 globals used by generated sketches', () => {
+      const code = `
+function setup() {
+  createCanvas(400, 400);
+  textAlign(RIGHT, CENTER);
+  pixelDensity(1);
+}
+
+function draw() {
+  background(0);
+  loadPixels();
+  for (let i = 0; i < pixels.length; i += 4) {
+    pixels[i] = 255;
+    pixels[i + 1] = 100;
+    pixels[i + 2] = 180;
+    pixels[i + 3] = 255;
+  }
+  updatePixels();
+  drawingContext.shadowBlur = 12;
+  drawingContext.shadowColor = 'hotpink';
+  fill(255);
+  text('wild prompt', width - 20, height / 2);
+}`;
+
+      const result = CodeValidator.validate(code, 'p5');
+      expect(result.valid).toBe(true);
+    });
+  });
+
+  describe('GLSL structural validation', () => {
+    it('should validate valid GLSL fragment shader', () => {
+      const code = `precision mediump float;
+uniform vec2 u_resolution;
+uniform float u_time;
+uniform vec3 u_color;
+uniform vec2 u_mouse;
+
+float hash(vec2 p) {
+  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+}
+
+float noise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  float a = hash(i);
+  float b = hash(i + vec2(1.0, 0.0));
+  float c = hash(i + vec2(0.0, 1.0));
+  float d = hash(i + vec2(1.0, 1.0));
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
+}
+
+float fbm(vec2 p) {
+  float value = 0.0;
+  float amplitude = 0.5;
+  for (int i = 0; i < 5; i++) {
+    value += amplitude * noise(p);
+    p *= 2.0;
+    amplitude *= 0.5;
+  }
+  return value;
+}
+
+void main() {
+  vec2 uv = gl_FragCoord.xy / u_resolution;
+  vec2 mouse = u_mouse / u_resolution;
+  float n = fbm(uv * 4.0 + u_time * 0.3);
+  float dist = length(uv - mouse);
+  float glow = smoothstep(0.3, 0.0, dist);
+  vec3 col = vec3(n * u_color.r + glow, uv.y * u_color.g, sin(u_time + uv.x * 6.28) * 0.5 + 0.5);
+  gl_FragColor = vec4(col, 1.0);
+}`;
+      const result = CodeValidator.validate(code, 'shader');
+      expect(result.valid).toBe(true);
+    });
+
+    it('should reject non-GLSL code', () => {
+      const code = `function setup() { createCanvas(400,400); }`;
+      const result = CodeValidator.validate(code, 'shader');
+      expect(result.valid).toBe(false);
+      expect(result.errors[0]).toContain('void main');
+    });
+  });
+
+  describe('Three.js structural validation', () => {
+    it('should validate valid Three.js code', () => {
+      // Honest lit scene: MeshPhong + moderate lights. Must include ACES tone
+      // mapping so it satisfies the W6a exposure contract (lit + lights).
+      const code = `const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+document.body.appendChild(renderer.domElement);
+
+const geometry = new THREE.BoxGeometry(1, 1, 1);
+const material = new THREE.MeshPhongMaterial({ color: 0x00ff00, shininess: 100 });
+const cube = new THREE.Mesh(geometry, material);
+scene.add(cube);
+
+const light = new THREE.PointLight(0xffffff, 1, 100);
+light.position.set(5, 5, 5);
+scene.add(light);
+
+const ambient = new THREE.AmbientLight(0x404040, 0.4);
+scene.add(ambient);
+
+camera.position.z = 5;
+
+function animate() {
+  requestAnimationFrame(animate);
+  cube.rotation.x += 0.01;
+  cube.rotation.y += 0.01;
+  cube.position.x = Math.sin(Date.now() * 0.001) * 2;
+  renderer.render(scene, camera);
+}
+animate();`;
+      const result = CodeValidator.validate(code, 'three');
+      expect(result.valid).toBe(true);
+    });
+
+    it('should reject code without THREE references', () => {
+      const code = `const scene = {};
+const camera = {};`;
+      const result = CodeValidator.validate(code, 'three');
+      expect(result.valid).toBe(false);
+    });
+
+    it('should reject Three.js code with invalid JavaScript syntax', () => {
+      const code = `const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const geometry = new THREE.BoxGeometry(1, 1, 1);
+const material = ;
+const cube = new THREE.Mesh(geometry, material);
+scene.add(cube);
+
+const light = new THREE.PointLight(0xffffff, 1, 100);
+light.position.set(5, 5, 5);
+scene.add(light);
+
+const ambient = new THREE.AmbientLight(0x404040);
+scene.add(ambient);
+
+camera.position.z = 5;
+
+function animate() {
+  requestAnimationFrame(animate);
+  cube.rotation.x += 0.01;
+  cube.rotation.y += 0.01;
+  cube.position.x = Math.sin(Date.now() * 0.001) * 2;
+  renderer.render(scene, camera);
+}
+animate();`;
+      const result = CodeValidator.validate(code, 'three');
+      expect(result.valid).toBe(false);
+      expect(result.errors.join('\n')).toContain('invalid JavaScript syntax');
+    });
+  });
+
+  describe('Guaranteed runtime throw validation', () => {
+    it('should reject generated sketches with explicit throw statements', () => {
+      const code = `let particles = [];
+function setup() {
+  createCanvas(400, 400);
+  for (let i = 0; i < 30; i++) {
+    particles.push({ x: random(width), y: random(height), hue: random(360) });
+  }
+}
+function draw() {
+  throw new Error("generated sketch exploded before drawing");
+  background(0);
+  for (const p of particles) {
+    stroke(p.hue, 80, 95);
+    line(width / 2, height / 2, p.x, p.y);
+  }
+}`;
+      const result = CodeValidator.validate(code, 'p5');
+      expect(result.valid).toBe(false);
+      expect(result.errors.join('\n')).toContain('explicit throw');
+    });
+  });
+
+  describe('Strudel structural validation', () => {
+    it('should validate valid Strudel code', () => {
+      const code = `
+$: s("bd sd")
+$: s("hh*4")
+$: note("c3 eb3 g3").s("sawtooth")
+$: s("cp").rarely(x => x.rev())
+$: stack(s("bd*2"), note("c3 eb3"))
+  .slow(2)
+  .gain(0.8)
+bpm(120)
+setcps(0.5)
+      `;
+      const result = CodeValidator.validate(code, 'strudel');
+      expect(result.valid).toBe(true);
+    });
+
+    it('should reject non-Strudel code', () => {
+      const code = `function setup() { createCanvas(400,400); }`;
+      const result = CodeValidator.validate(code, 'strudel');
+      expect(result.valid).toBe(false);
+      expect(result.errors[0]).toContain('pattern functions');
+    });
+
+    it('should reject Strudel code with non-ASCII characters', () => {
+      const code = `
+$: s("鼓 鈸")
+$: note("c3")
+      `;
+      const result = CodeValidator.validate(code, 'strudel');
+      expect(result.valid).toBe(false);
+      expect(result.errors.some(e => e.includes('Strudel code contains non-ASCII characters'))).toBe(true);
+    });
+  });
+
+  describe('Hydra structural validation', () => {
+    it('should validate valid Hydra code', () => {
+      const code = `
+osc(10, 0.1, 0.8)
+  .color(1, 0.2, 0.5)
+  .rotate(() => time * 0.1)
+  .modulate(noise(3))
+  .out()
+
+gradient(0.5)
+  .color(0.2, 0.8, 1)
+  .diff(osc(5))
+  .out(o1)
+
+shape(4, 0.5)
+  .repeat(3, 3)
+  .rotate(0.5)
+  .out(o2)
+
+render(o0)
+      `;
+      const result = CodeValidator.validate(code, 'hydra');
+      expect(result.valid).toBe(true);
+    });
+
+    it('should reject Hydra scale() with a zero multiplier (collapses an axis, renders black)', () => {
+      // W5 campaign run2: this exact chain rendered a black frame.
+      const code = `osc(6, 0.12, 1.0).kaleid(8).color(0.92, 0.42, 0.38).modulate(noise(4, 0.15), 0.22).rotate(0, 0.06).scale(1.02, 0, 0.08).blend(voronoi(7, 0.25, 0.3).color(0.18, 0.16, 0.28), 0.35).contrast(1.55).brightness(0.38).out(o0)`;
+      const result = CodeValidator.validate(code, 'hydra');
+      expect(result.valid).toBe(false);
+      expect(result.errors.some((e: string) => e.includes('zero multiplier'))).toBe(true);
+    });
+
+    it('should accept Hydra scale() with non-zero multipliers', () => {
+      const code = `osc(6, 0.12, 1.0).kaleid(8).color(0.92, 0.42, 0.38).modulate(noise(4, 0.15), 0.22).rotate(0, 0.06).scale(1.02, 1, 0.08).contrast(1.55).brightness(0.38).out(o0)`;
+      const result = CodeValidator.validate(code, 'hydra');
+      expect(result.valid).toBe(true);
+    });
+
+    it('should accept Hydra scale() with dynamic expressions (not literal zeros)', () => {
+      // scale with a dynamic expression is valid — only literal zeros trigger the
+      // zero-multiplier rule (W5 campaign run2 fix). Arrow functions in scale()
+      // are evaluated at runtime; the validator must not flag them as zeros.
+      const code = `osc(6, 0.12, 1.0).kaleid(4).color(0.5, 0.3, 0.8).rotate(0.2).contrast(1.1).scale(() => 1.5, 1, 1).blend(noise(2, 0.1)).brightness(0.9).saturate(1.1).out(o0)`;
+      const result = CodeValidator.validate(code, 'hydra');
+      expect(result.valid).toBe(true);
+      expect(result.errors.some((e: string) => e.includes('zero multiplier'))).toBe(false);
+    });
+    it('should reject Hydra code without .out()', () => {
+      const code = `
+// This is hydra code without output
+osc(10, 0.1, 0.5)
+  .color(1, 0.5, 0.2)
+  .rotate(0.5)
+      `;
+      const result = CodeValidator.validate(code, 'hydra');
+      expect(result.errors).toContain('Hydra code MUST end with .out() to render');
+    });
+
+    it('should reject Hydra code without source function', () => {
+      const code = `/* Hydra Validation Test */
+// This Hydra code is missing a source function
+// It tries to use color without osc, noise, gradient, etc.
+.color(1, 0, 0)
+  .rotate(0.5)
+  .brightness(0.5)
+  .out()
+// The validator should catch this error
+      `;
+      const result = CodeValidator.validate(code, 'hydra');
+      expect(result.errors).toContain('Hydra code should use a source function: osc(), src(), noise(), shape(), gradient(), solid(), voronoi()');
+    });
+  });
+
+  describe('Tone.js structural validation', () => {
+    it('should validate valid Tone.js code', () => {
+      const code = `
+const synth = new Tone.Synth({
+  oscillator: { type: 'triangle' },
+  envelope: { attack: 0.1, decay: 0.2, sustain: 0.5, release: 1 }
+}).toDestination();
+
+const reverb = new Tone.Reverb(2).toDestination();
+synth.connect(reverb);
+
+synth.triggerAttackRelease("C4", "8n");
+      `;
+      const result = CodeValidator.validate(code, 'tone');
+      expect(result.valid).toBe(true);
+    });
+
+    it('should reject Tone.js code without Tone reference', () => {
+      const code = `
+// This code doesn't reference Tone
+const synth = {};
+const audio = new AudioContext();
+      `;
+      const result = CodeValidator.validate(code, 'tone');
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContain('Tone.js code must reference Tone object or import from "tone"');
+    });
+
+    it('should reject invalid Tone.js classes', () => {
+      const code = `
+const synth = new Tone.InvalidSynth();
+const reverb = new Tone.FakeReverb();
+      `;
+      const result = CodeValidator.validate(code, 'tone');
+      expect(result.valid).toBe(false);
+      expect(result.errors[0]).toContain('Invalid class');
+    });
+
+    it('should validate complete HTML-wrapped Tone.js from CDN output', () => {
+      const code = `html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ambient Drone Synthesizer</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+</head>
+<body>
+  <button id="start">Start</button>
+  <script>
+    const reverb = new Tone.Reverb(4).toDestination();
+    const delay = new Tone.FeedbackDelay("8n", 0.4).connect(reverb);
+    const synth = new Tone.PolySynth(Tone.Synth).connect(delay);
+    const loop = new Tone.Loop((time) => {
+      synth.triggerAttackRelease(["C3", "G3", "D4"], "2n", time);
+    }, "1m").start(0);
+    document.getElementById('start').addEventListener('click', async () => {
+      await Tone.start();
+      Tone.Transport.start();
+    });
+  </script>
+</body>
+</html>`;
+      const result = CodeValidator.validate(code);
+      expect(result.valid).toBe(true);
+      expect(result.cleanedCode).toContain('<!DOCTYPE html>');
+      expect(result.cleanedCode).not.toMatch(/^html\s*$/m);
+    });
+  });
+
+  describe('HTML structural validation', () => {
+    it('should validate valid HTML document', () => {
+      const code = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Test Page - A Comprehensive HTML Document Example</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; padding: 20px; }
+    h1 { color: #333; }
+    .container { max-width: 800px; margin: 0 auto; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Hello World</h1>
+    <p>This is a comprehensive HTML document with sufficient content to pass validation.</p>
+    <main>
+      <article>
+        <h2>Article Title</h2>
+        <p>Article content goes here with more text to ensure proper size.</p>
+      </article>
+    </main>
+    <footer>
+      <p>&copy; 2024 Test Page. All rights reserved.</p>
+    </footer>
+  </div>
+  <script>
+    console.log('Page loaded successfully');
+    document.addEventListener('DOMContentLoaded', function() {
+      console.log('DOM ready');
+    });
+  </script>
+</body>
+</html>`;
+      const result = CodeValidator.validate(code, 'html');
+      expect(result.valid).toBe(true);
+    });
+
+    it('should reject HTML without DOCTYPE', () => {
+      const code = `<html><head><title>Test</title></head><body><h1>Hello</h1></body></html>`;
+      const result = CodeValidator.validate(code, 'html');
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContain('HTML document must start with <!DOCTYPE html>');
+    });
+
+    it('should reject HTML with eval()', () => {
+      const code = `<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>Test</title></head>
+<body>
+  <script>eval('alert(1)');</script>
+</body>
+</html>`;
+      const result = CodeValidator.validate(code, 'html');
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContain('HTML Security: Dangerous eval() detected');
+    });
+  });
+
+  describe('ASCII structural validation', () => {
+    it('should validate valid ASCII art', () => {
+      const code = `/* ASCII Art */
+   _____    _____
+  /     \\  /     \\
+ |  o o  ||  o o  |
+ |   <   ||   <   |
+ |  \_/  ||  \_/  |
+  \_____/  \_____/
+    | |      | |
+    | |      | |
+   _| |_    _| |_
+  |     |  |     |
+  |_____|  |_____|
+     ASCII ART EXAMPLE
+    `;
+      const result = CodeValidator.validate(code, 'ascii');
+      expect(result.valid).toBe(true);
+    });
+
+    it('should preserve raw ASCII art that starts with punctuation', () => {
+      const code = `.  *  .    *    .   *   .
+       *       ___     *
+    .     *   /   \\    .
+   *   .     /     \\      .
+        __/         \\__
+====/==================\\========
+   /|  |   .   *  . |  \\
+  / |  |  .  *   .  |   \\
+ /  |  |    .    .   |    \\
+~~~~~~  ~~~~~~~~~~~~  ~~~~~`;
+
+      const result = CodeValidator.validate(code, 'ascii');
+      expect(result.valid).toBe(true);
+      expect(result.cleanedCode).toContain('___');
+      expect(result.cleanedCode).toContain('~~~~~~');
+    });
+
+    it('should not preserve ASCII-looking reasoning as raw art', () => {
+      const code = `We need to output ASCII art of a mountain landscape.
+- Exactly 30 lines.
+Let's design a simple mountain scene.
+Allowed characters are plain ASCII.`;
+
+      const result = CodeValidator.validate(code, 'ascii');
+      expect(result.valid).toBe(false);
+      expect(result.cleanedCode).not.toContain('We need');
+    });
+
+    it('should sanitize ASCII art with Unicode instead of rejecting it (df3b1f73 follow-up)', () => {
+      const code = `/* ASCII Art with Unicode */
++------+------+
+|  世界 |      |
++------+------+
+| Hello|こん  |
++------+------+
+| \u25C9\u25AE   |      |
++------+------+
+      `;
+      const result = CodeValidator.validate(code, 'ascii');
+      expect(result.valid).toBe(true);
+      expect(result.cleanedCode).not.toMatch(/[世界こん\u25C9\u25AE]/);
+      expect(result.cleanedCode).toContain('| Hello|**  |'); // CJK → single-width fallback, alignment kept
+      expect(result.cleanedCode).toContain('| \u25CF*   |');
+    });
+
+    it('should reject ASCII art with only whitespace', () => {
+      const code = `
+
+
+
+      `;
+      const result = CodeValidator.validate(code, 'ascii');
+      expect(result.valid).toBe(false);
+    });
+  });
+
+  describe('domain detection precedence', () => {
+    it('routes Strudel audio with shape/out chains to the Strudel validator before Hydra', () => {
+      const code = `bpm(132)
+stack(
+  s("bd hh*2").shape(0.35).gain(0.8).out(),
+  note("c3 eb3 g3 bb3").s("sawtooth").slow(2).out()
+)
+.room(0.3)
+.size(0.6)`;
+      const strudelValidate = vi.spyOn(StrudelValidator, 'validate');
+      const hydraValidate = vi.spyOn(HydraValidator, 'validate');
+
+      expect(CodeValidator.detectDomain(code)).toBe('strudel');
+
+      const result = CodeValidator.validate(code);
+      expect(result.valid).toBe(true);
+      expect(strudelValidate).toHaveBeenCalledOnce();
+      expect(hydraValidate).not.toHaveBeenCalled();
+    });
+
+    it('keeps real visual domains on their canonical routes', () => {
+      const cases = [
+        {
+          domain: 'hydra',
+          code: `src(o0)
+  .modulate(osc(6, 0.08, 0.4))
+  .blend(shape(4, 0.35).rotate(0.3))
+  .out(o0)`,
+        },
+        {
+          domain: 'p5',
+          code: `function setup() {
+  createCanvas(640, 480);
+  colorMode(HSB, 360, 100, 100, 1);
+}
+function draw() {
+  background(220, 30, 8, 0.2);
+  for (let i = 0; i < 80; i++) {
+    stroke((frameCount + i * 4) % 360, 80, 95, 0.6);
+    line(width / 2, height / 2, noise(i, frameCount * 0.01) * width, i * 6);
+  }
+}`,
+        },
+        {
+          domain: 'shader',
+          code: `precision mediump float;
+uniform vec2 u_resolution;
+uniform float u_time;
+void main() {
+  vec2 uv = gl_FragCoord.xy / u_resolution.xy;
+  float pulse = sin(u_time + uv.x * 12.0) * 0.5 + 0.5;
+  gl_FragColor = vec4(uv.x, pulse, uv.y, 1.0);
+}`,
+        },
+        {
+          domain: 'three',
+          code: `import * as THREE from 'three';
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 100);
+const renderer = new THREE.WebGLRenderer();
+const mesh = new THREE.Mesh(new THREE.TorusKnotGeometry(1, 0.2, 96, 12), new THREE.MeshNormalMaterial());
+scene.add(mesh);
+renderer.render(scene, camera);`,
+        },
+      ];
+
+      for (const { domain, code } of cases) {
+        expect(CodeValidator.detectDomain(code)).toBe(domain);
+      }
+    });
+
+    it('does not classify multi-line Hydra chains as ASCII art', () => {
+      const code = `osc(4, 0.1, 1)
+.add(noise(3, 0.2))
+.blend(voronoi(5, 0.3, 0.2))
+.color(1, 0.2, 0.8)
+.kaleid(6)
+.rotate(0.2)
+.scale(1.05)
+.scrollX(0.05)
+.scrollY(-0.03)
+.out(o0)
+render(o0)`;
+
+      expect(CodeValidator.detectDomain(code)).toBe('hydra');
+      expect(CodeValidator.validate(code).valid).toBe(true);
+    });
+  });
+
+  describe('Music structural validation', () => {
+    it('should validate Strudel music code', () => {
+      const code = `$: s("bd sd").slow(2)
+$: s("hh").fast(4)
+$: s("bd [sd bd]").gain(0.8)
+$: note("c3 eb3 g3 bb3").s("sawtooth").decay(0.2)
+$: s("cp").rarely(x => x.rev())
+bpm(120)
+setcps(0.5)`;
+      const result = CodeValidator.validate(code, 'music');
+      expect(result.valid).toBe(true);
+    });
+
+    it('should validate Hydra visual code', () => {
+      const code = `osc(10, 0.1, 0.5).out()
+s0.initCam()
+src(s0).modulate(osc(5, 0.1)).out(o1)
+render()
+setResolution(1920, 1080)
+solid(1, 0, 0).diff(osc(3)).out()`;
+      const result = CodeValidator.validate(code, 'music');
+      expect(result.valid).toBe(true);
+    });
+
+    it('should reject non-music code', () => {
+      const code = `function setup() { createCanvas(400,400); }`;
+      const result = CodeValidator.validate(code, 'music');
+      expect(result.valid).toBe(false);
+    });
+  });
+
+  describe('Self-contained HTML check', () => {
+    it('should validate HTML-wrapped p5.js with CDN', () => {
+      const code = `<!DOCTYPE html>
+<html>
+<head>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.js"></script>
+</head>
+<body>
+<script>
+function setup() {
+  createCanvas(400, 400);
+  background(220);
+  ${P5_BODY}
+}
+</script>
+</body>
+</html>`;
+      const result = CodeValidator.validate(code);
+      expect(result.valid).toBe(true);
+    });
+
+    it('should reject HTML-wrapped p5.js without CDN', () => {
+      const code = `<!DOCTYPE html>
+<html>
+<head></head>
+<body>
+<script>
+function setup() {
+  createCanvas(400, 400);
+  background(220);
+  ${P5_BODY}
+}
+</script>
+</body>
+</html>`;
+      const result = CodeValidator.validate(code);
+      // Without p5 CDN, detected as HTML - should fail HTML validation
+      expect(result.valid).toBe(false);
+      // Should have HTML-related errors (missing title, charset)
+      expect(result.errors.some(e => e.includes('title') || e.includes('charset'))).toBe(true);
+    });
+
+    it('should pass raw JS without self-contained check', () => {
+      const code = `function setup() {
+  createCanvas(400, 400);
+  background(220);
+  ${P5_BODY}
+}`;
+      const result = CodeValidator.validate(code);
+      expect(result.valid).toBe(true);
+    });
+
+    it('should auto-detect Shadertoy mainImage shaders as GLSL instead of p5', () => {
+      const code = `precision mediump float;
+uniform float iTime;
+uniform vec2 iResolution;
+
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+  vec2 uv = fragCoord / iResolution.xy;
+  float wave = sin(uv.x * 12.0 + iTime) * 0.5 + 0.5;
+  fragColor = vec4(mix(vec3(0.1, 0.2, 0.9), vec3(1.0, 0.4, 0.2), wave), 1.0);
+}`;
+      const result = CodeValidator.validate(code);
+      expect(CodeValidator.detectDomain(code)).toBe('shader');
+      expect(result.valid).toBe(true);
+      expect(result.errors.join('\n')).not.toContain('p5.js');
+    });
+
+    it('should validate HTML-wrapped WebGL shaders without parsing wrapper JavaScript as GLSL', () => {
+      const code = `<!DOCTYPE html>
+<html><body><canvas id="c"></canvas><script>
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl');
+const fsSource = \`precision mediump float;
+uniform float u_time;
+uniform vec2 u_resolution;
+void main(){
+  vec2 uv = gl_FragCoord.xy / u_resolution.xy;
+  gl_FragColor = vec4(mix(vec3(0.1,0.2,0.9), vec3(1.0,0.3,0.6), sin(u_time + uv.x)), 1.0);
+}\`;
+function render(){ requestAnimationFrame(render); }
+</script></body></html>`;
+
+      const result = CodeValidator.validate(code);
+      expect(CodeValidator.detectDomain(code)).toBe('shader');
+      expect(result.valid).toBe(true);
+      expect(result.errors.join('\n')).not.toContain('Undefined function');
+    });
+  });
+
+  describe('SVG validation', () => {
+    it('should validate raw SVG as a first-class creative artifact', () => {
+      const code = '<svg viewBox="0 0 64 64"><circle cx="32" cy="32" r="18" fill="blue"/></svg>';
+      const result = CodeValidator.validate(code);
+
+      expect(result.valid).toBe(true);
+      expect(result.cleanedCode).toContain('<svg');
+      expect(result.cleanedCode).toContain('<circle');
+    });
+  });
+
+  describe('Domain auto-detection', () => {
+    it('should auto-detect p5 domain', () => {
+      const code = `function setup() { createCanvas(400,400); }`;
+      expect(CodeValidator.detectDomain(code)).toBe('p5');
+    });
+
+    it('should auto-detect glsl domain', () => {
+      const code = `void main() { gl_FragColor = vec4(1.0); }`;
+      expect(CodeValidator.detectDomain(code)).toBe('shader');
+    });
+
+    it('should auto-detect three domain', () => {
+      const code = `import * as THREE from 'three'; const scene = new THREE.Scene();`;
+      expect(CodeValidator.detectDomain(code)).toBe('three');
+    });
+
+    it('should auto-detect strudel domain', () => {
+      const code = `$: s("bd sd")`;
+      expect(CodeValidator.detectDomain(code)).toBe('strudel');
+    });
+
+    it('should auto-detect hydra domain', () => {
+      const code = `osc(10).out()`;
+      expect(CodeValidator.detectDomain(code)).toBe('hydra');
+    });
+
+    it('should auto-detect tone domain', () => {
+      const code = `const synth = new Tone.Synth();`;
+      expect(CodeValidator.detectDomain(code)).toBe('tone');
+    });
+
+    it('should auto-detect revideo domain', () => {
+      const code = `import { makeScene, useTime } from '@revideo/core';`;
+      expect(CodeValidator.detectDomain(code)).toBe('revideo');
+    });
+
+    it('should auto-detect html domain', () => {
+      const code = `<!DOCTYPE html><html><body></body></html>`;
+      expect(CodeValidator.detectDomain(code)).toBe('html');
+    });
+
+    it('should auto-detect svg domain', () => {
+      const code = '<svg viewBox="0 0 64 64"><circle cx="32" cy="32" r="18" fill="blue"/></svg>';
+      expect(CodeValidator.detectDomain(code)).toBe('svg');
+    });
+
+    it('should auto-detect ascii domain', () => {
+      const code = `
+  /\\
+ /  \\
+/____\\
+      `;
+      expect(CodeValidator.detectDomain(code)).toBe('ascii');
+    });
+
+    it('auto-detects and validates Unicode-near-miss ASCII art even without an explicit domain', () => {
+      const code = `
+  ◈   ◈   ◈   ◈
+   ◉     ◉     ◉
+    ◡◡◡◡◡◡◡
+     ◆◇◆◇◆◇
+  ◈◈◈◈◈◈◈◈◈◈◈◈◈
+      `;
+      expect(CodeValidator.detectDomain(code)).toBe('ascii');
+      const result = CodeValidator.validate(code);
+      expect(result.valid).toBe(true);
+      expect(result.cleanedCode).not.toMatch(/◈/);
+      expect(result.cleanedCode).not.toMatch(/◉/);
+    });
+
+    it('auto-detects star-glyph near-miss art as ASCII instead of misrouting to p5 (2026-06-17)', () => {
+      const code = `
+  ✦   ✧   ✦   ✧
+   ✧     ✦     ✦
+    ✦✦✦✦✦✦✦
+     ✧✦✧✦✧✦
+  ✦✦✦✦✦✦✦✦✦✦✦✦✦
+      `;
+      expect(CodeValidator.detectDomain(code)).toBe('ascii');
+      const result = CodeValidator.validate(code);
+      expect(result.valid).toBe(true);
+      expect(result.errors.join('\n')).not.toContain('p5.js');
+      expect(result.cleanedCode).not.toMatch(/✦/);
+      expect(result.cleanedCode).not.toMatch(/✧/);
+    });
+  });
+
+  describe('Edge cases', () => {
+    it('should handle empty string', () => {
+      const result = CodeValidator.validate('');
+      expect(result.valid).toBe(false);
+    });
+
+    it('should handle null/undefined', () => {
+      expect(CodeValidator.validate(null as any).valid).toBe(false);
+      expect(CodeValidator.validate(undefined as any).valid).toBe(false);
+    });
+
+    it('should handle whitespace-only code', () => {
+      const result = CodeValidator.validate('   \n\t\n  ');
+      expect(result.valid).toBe(false);
+    });
+
+    it('should get minimum sizes for all domains', () => {
+      expect(CodeValidator.getMinSize('p5')).toBe(120);
+      expect(CodeValidator.getMinSize('shader')).toBe(300);
+      expect(CodeValidator.getMinSize('three')).toBe(800);
+      expect(CodeValidator.getMinSize('strudel')).toBe(1);
+      expect(CodeValidator.getMinSize('hydra')).toBe(150);
+      expect(CodeValidator.getMinSize('tone')).toBe(100);
+      expect(CodeValidator.getMinSize('revideo')).toBe(500);
+      expect(CodeValidator.getMinSize('html')).toBe(200);
+      expect(CodeValidator.getMinSize('ascii')).toBe(50);
+      expect(CodeValidator.getMinSize('svg')).toBe(40);
+    });
+  });
+
+  // F3: the dangerous-pattern security screen used to run only for the html
+  // domain. p5/three/hydra/shader/tone/strudel/kinetic JS also runs in a
+  // browser and must be screened too. Before the fix these samples were ALLOWED.
+  describe('executable-JS security screen (F3)', () => {
+    it('flags eval() in a p5 sketch', () => {
+      const code = `function setup() {
+  createCanvas(400, 400);
+}
+function draw() {
+  background(0);
+  const f = eval("alert(1)");
+  ellipse(200, 200, f, f);
+}`;
+      const result = CodeValidator.validate(code, 'p5');
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContain('JS Security: Dangerous eval() detected');
+    });
+
+    it('flags new Function() in a three.js scene', () => {
+      const code = `import * as THREE from 'three';
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(75, 1, 0.1, 1000);
+const renderer = new THREE.WebGLRenderer();
+const geometry = new THREE.BoxGeometry();
+const material = new THREE.MeshBasicMaterial({ color: 0x00ff00 });
+const cube = new THREE.Mesh(geometry, material);
+scene.add(cube);
+const sneaky = new Function('return process')();
+function animate() {
+  requestAnimationFrame(animate);
+  cube.rotation.x += 0.01;
+  renderer.render(scene, camera);
+}
+animate();`;
+      const result = CodeValidator.validate(code, 'three');
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContain('JS Security: Dangerous new Function() detected');
+    });
+
+    it('flags eval() in a hydra patch', () => {
+      const code = `osc(10, 0.1, 0.8).rotate(0.5).kaleid(4).color(1, 0.5, 0.2).out();
+const payload = eval(atob("YWxlcnQoMSk="));`;
+      const result = CodeValidator.validate(code, 'hydra');
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContain('JS Security: Dangerous eval() detected');
+    });
+
+    it('does not flag a clean p5 sketch with a variable named like an event handler', () => {
+      // ` one =` must NOT trip the markup on*= rule for raw JS.
+      const code = `function setup() {
+  createCanvas(400, 400);
+}
+function draw() {
+  background(20);
+  let one = 1;
+  let online = 2;
+  ellipse(width / 2, height / 2, one * 50, online * 50);
+}`;
+      const result = CodeValidator.validate(code, 'p5');
+      expect(result.errors.filter(e => e.startsWith('JS Security:'))).toEqual([]);
+    });
+  });
+
+  // F5: ImportValidator was a dead control (never invoked). It is now wired into
+  // the live validation path so disallowed imports in generated art are rejected.
+  describe('import-source security wiring (F5)', () => {
+    it('rejects a node-builtin import in p5 art through the live validate() path', () => {
+      const code = `import fs from 'fs';
+function setup() {
+  createCanvas(400, 400);
+}
+function draw() {
+  background(0);
+  ellipse(200, 200, 40, 40);
+}`;
+      const result = CodeValidator.validate(code, 'p5');
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContain(
+        'Import Security: disallowed module import "fs" - node/runtime modules are not available in browser art'
+      );
+    });
+
+    it('rejects a node: scheme import in a hydra patch', () => {
+      const code = `import cp from 'node:child_process';
+osc(20, 0.1, 0.9).color(0.8, 0.2, 0.5).out();`;
+      const result = CodeValidator.validate(code, 'hydra');
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContain(
+        'Import Security: disallowed module import "node:child_process" - node/runtime modules are not available in browser art'
+      );
+    });
+
+    it('rejects a relative import that traverses out of the artifact root', () => {
+      const code = `import secret from '../../../etc/passwd';
+function setup() { createCanvas(400, 400); }
+function draw() { background(0); ellipse(200, 200, 40, 40); }`;
+      const result = CodeValidator.validate(code, 'p5');
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContain(
+        'Import Security: import path "../../../etc/passwd" escapes the artifact root'
+      );
+    });
+
+    it('allows a legitimate bare-package import (three) through the live path', () => {
+      const code = `import * as THREE from 'three';
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(75, 1, 0.1, 1000);
+const renderer = new THREE.WebGLRenderer();
+const geometry = new THREE.SphereGeometry(1, 32, 32);
+const material = new THREE.MeshStandardMaterial({ color: 0x3366ff });
+const mesh = new THREE.Mesh(geometry, material);
+scene.add(mesh);
+function animate() {
+  requestAnimationFrame(animate);
+  mesh.rotation.y += 0.01;
+  renderer.render(scene, camera);
+}
+animate();`;
+      const result = CodeValidator.validate(code, 'three');
+      expect(result.errors.filter(e => e.startsWith('Import Security:'))).toEqual([]);
+    });
+  });
+});
+
+describe('S4 completion — theory assessment consumer chain', () => {
+  it('carries the strudel theory assessment on the validation result (was dropped inside the validator)', async () => {
+    const { CodeValidator } = await import('../../../src/core/CodeValidator.js');
+    const code = `s("bd hh").slow(2)\nscale("c minor")\n$bass.note("c2 e2 g2")`;
+    const result = CodeValidator.validate(code, 'strudel');
+    expect(Array.isArray(result.theoryAssessment)).toBe(true);
+    expect(result.theoryAssessment!.length).toBeGreaterThan(0);
+    expect(result.theoryAssessment![0]).toContain('C minor');
+  });
+  it('omits the field for non-strudel domains', async () => {
+    const { CodeValidator } = await import('../../../src/core/CodeValidator.js');
+    const result = CodeValidator.validate('function setup(){}\nfunction draw(){}', 'p5');
+    expect(result.theoryAssessment).toBeUndefined();
+  });
+});

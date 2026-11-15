@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "domains": [
+    {
+      "name": "p5",
+      "requiredModalities": ["visual"]
+    },
+    {
+      "name": "tone",
+      "requiredModalities": ["audio"]
+    }
+  ],
+  "evidence": [
+    {
+      "ref": "contact-sheet.png",
+      "kind": "image",
+      "modalities": ["visual"],
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "bytes": 100
+    }
+  ],
+  "verdicts": {
+    "technical": {
+      "status": "pass",
+      "evidenceRefs": ["contact-sheet.png"]
+    },
+    "coordination": {
+      "status": "not-evaluated",
+      "evidenceRefs": []
+    },
+    "creativeQuality": {
+      "status": "not-evaluated",
+      "evidenceRefs": []
+    }
+  },
+  "requestedClaims": {
+    "technicalSuccess": true,
+    "coordinationImproved": false,
+    "creativeQualityImproved": false
+  }
+}

@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "issue": 401,
+  "seat": "harness",
+  "batteryId": "harness-v1",
+  "reasoningLevel": "high",
+  "description": "Harness battery: multi-level dogfood + self-improvement findings. Wave 4 default seat is Sol high (see freeze.wave4). Diagnose-plan tasks remain mutation-forbidden; self-improve tasks may verified-edit when seated model allows.",
+  "wave4BriefRef": "docs/agents/waves/wave-4-seat-briefs.md#harness--sol-high-wave-4",
+  "tasks": [
+    {
+      "id": "harness-compound-diagnose-plan",
+      "kind": "diagnose",
+      "forbidMutations": true,
+      "requiresMutation": false,
+      "brief": "WAVE 4+ HARNESS DOGFOOD (multi-level) + SELF-IMPROVEMENT FINDINGS. ARCHITECT DIAGNOSE ONLY \u2014 no product mutations. HARD RULES: (1) No applyEdit/writeFile/createBackup/restoreBackup. (2) Tools: readFile, search, searchCode, searchDocs, listDir, gitStatus, gitLog, gitDiff, typeCheck, runBuild, runTests, runFocusedTests, runLint, lsp, astValidate, importGuard, executeSkill. (3) LOAD SKILLS EARLY: executeSkill {\"name\":\"comorbidity-check\"} then executeSkill {\"name\":\"systematic-debugging\"}. (4) ALREADY SHIPPED (do not re-open without new HEAD evidence): SelfImproveCompoundLoop feed-forward, withLearnedGuidance, receipts/*-plan.md, tip/spend ledger, host-identity canonicalizeHost. (5) MULTI-LEVEL AUDIT (observed>inferred>guessed, cite paths): MAKE (gen empty-artifact / domain gates), SEE (eval/vision honesty), TALK (chat/studio DX), FIX SYSTEM (harness tools/compound/operator paths), COMPOUND (adaptation inject consumers). Prefer compounding product fixes over laundry lists. (6) If ## Learned from prior runs is present, CITE [adaptation:id] and build on it. (7) complete(params.plan)\u2265200: BLUF; multi-level findings; comorbidity; systematic root causes; ranked P0\u2013P3 Interwave backlog with owner/acceptance/blast/rollback; SELF-IMPROVEMENT FINDINGS section; re-verify protocol. No implement. ANTI-GOAL: scoreboard theater; beauty unpark; dirty WIP as mutation targets; instrument-only essays.",
+      "successCriteria": [
+        "no-mutations",
+        "inspection-performed",
+        "full-plan-in-complete-params"
+      ],
+      "maxSteps": 28
+    },
+    {
+      "id": "harness-compound-requeue-dogfood",
+      "kind": "diagnose",
+      "forbidMutations": true,
+      "requiresMutation": false,
+      "compoundRequeue": true,
+      "brief": "COMPOUND REQUEUE DOGFOOD (not MECE single-shot). ARCHITECT DIAGNOSE ONLY \u2014 no product mutations. This seat is attempt 2 of a recursive improvement path: assume attempt 1 failed with a retryable provider-timeout or similar and left prior envelope guidance. Deliver complete(params.plan)\u2265200 focused on ONE residual that compounds from prior failure (timeout taxonomy, continuity proof, or publisher discipline) \u2014 not a full-system laundry list. HARD: no applyEdit/writeFile. Prefer short BLUF + max 3 P0 residuals with acceptance.",
+      "successCriteria": [
+        "no-mutations",
+        "inspection-performed",
+        "full-plan-in-complete-params",
+        "compound-requeue-path"
+      ],
+      "maxSteps": 20
+    },
+    {
+      "id": "harness-tighten-packet-shaping",
+      "kind": "self-improve",
+      "productCandidate": true,
+      "wave1Residual": "W1-H2",
+      "brief": "W1-H2 REQUEUE: Sol failed this self-improve (no verified-edit, tierStoppedAt=1). Product target: bounded packet shaping so focus files and verification targets stay aligned. Preferred surfaces: src/harness/agent/LLMModeAgent.ts (packet/preflight/mutation gate), src/harness/SelfImproveCompoundLoop.ts, CompoundRunEnvelope timeout taxonomy (single writer with classifyTimeoutError). ONE coherent patch + runFocusedTests or typeCheck. No speculative refactors. No beauty/artifacts.",
+      "successCriteria": [
+        "verified-edit-landed",
+        "build-or-typecheck-invoked",
+        "rollback-available-on-failure",
+        "packet-or-timeout-taxonomy-improved"
+      ],
+      "maxSteps": 24
+    },
+    {
+      "id": "harness-fix-one-lint-class",
+      "kind": "self-improve",
+      "productCandidate": true,
+      "wave1Residual": "W1-H1",
+      "brief": "W1-H1 REQUEUE: Sol failed (build+test invoked, no verified-edit). Fix exactly one real lint class in a scoped src/ or scripts/ set — prefer eslint-rules/ or a file with clear lint debt. Must land applyEdit/writeFile, re-run lint or focused tests, leave no style-only churn. If no lint debt found, fix one weak assertion (toBeDefined-only) in a related test — still a verified edit.",
+      "successCriteria": [
+        "verified-edit-landed",
+        "lint-or-focused-test-invoked",
+        "rollback-available-on-failure",
+        "single-class-scope"
+      ],
+      "maxSteps": 24
+    },
+    {
+      "id": "harness-add-one-guarded-test",
+      "kind": "self-improve",
+      "brief": "Add one guarded unit test for an existing pure helper; assert a concrete expected value (no toBeDefined-only).",
+      "successCriteria": [
+        "verified-edit-landed",
+        "runFocusedTests-or-runTests-invoked",
+        "rollback-available-on-failure"
+      ],
+      "maxSteps": 20
+    },
+    {
+      "id": "harness-resume-from-suspend",
+      "kind": "resume",
+      "brief": "Leg 1e: runtime was suspended at 20 steps \u2014 can the harness resume cleanly without duplicating edits or losing ledger correlation?",
+      "successCriteria": [
+        "resume-accepted",
+        "no-duplicate-episode",
+        "ledger-continuity"
+      ],
+      "suspendAtSteps": 20
+    }
+  ],
+  "optionalJudges": {
+    "glmCrossReview": {
+      "required": false,
+      "description": "Proposal quality scored by GLM as external judge. Degrade gracefully if unreachable."
+    }
+  },
+  "batteryVersion": 3
+}

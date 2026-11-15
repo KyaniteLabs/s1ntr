@@ -1,0 +1,195 @@
+/**
+ * Vendored browser asset registry — single source of truth for the locally
+ * hosted libraries that wrapped artifacts load (issue #924).
+ *
+ * Artifacts reference these files via ROOT-ABSOLUTE paths (`/vendor/...`) so
+ * they resolve on any static server whose docroot contains the repo's
+ * `vendor/` directory (fleet-server serves the repo root at `/`; artifact
+ * cache roots mirror `vendor/`). Zero CDN: there is no remote fallback. A
+ * missing vendor file throws — loud failure at render setup, never a silent
+ * blank canvas.
+ *
+ * `inlineVendorAssets` exists for the in-process render path only:
+ * `page.setContent` runs the page at about:blank where root-absolute URLs
+ * never resolve, so scripts must be inlined and import maps rewritten to
+ * data: URLs before `setContent`. Artifacts served over HTTP keep the file
+ * references untouched.
+ */
+
+import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+
+export const VENDOR_BASE_PATH = '/vendor';
+
+/** Root-absolute URL paths for every vendored library (see vendor/manifest.json). */
+export const VENDOR_ASSETS = {
+  p5: '/vendor/p5/1.9.0/p5.min.js',
+  p5Sound: '/vendor/p5/1.9.0/p5.sound.min.js',
+  threeGlobal: '/vendor/three/r128/three.min.js',
+  threeModule: '/vendor/three/0.160.0/three.module.js',
+  threeOrbitControls: '/vendor/three/0.160.0/examples/jsm/controls/OrbitControls.js',
+  tone: '/vendor/tone/14.8.49/Tone.js',
+  hydra: '/vendor/hydra-synth/1.3.10/hydra-synth.js',
+  strudel: '/vendor/strudel-web/1.3.0/strudel-web.js',
+  strudelClockworker: '/vendor/strudel-web/1.3.0/assets/clockworker-ZDiUtESR.js',
+  d3: '/vendor/d3/7.9.0/d3.min.js',
+  gsap: '/vendor/gsap/3.15.0/gsap.min.js',
+} as const;
+
+export type VendorAssetPath = (typeof VENDOR_ASSETS)[keyof typeof VENDOR_ASSETS];
+
+const VENDOR_ASSET_PATHS: ReadonlySet<string> = new Set(Object.values(VENDOR_ASSETS));
+
+/** True when the path is one of the registered vendored asset URLs. */
+export function isVendorAssetPath(path: string): boolean {
+  return VENDOR_ASSET_PATHS.has(path);
+}
+
+/** Repo `vendor/` directory — resolves from src/ (dev) and dist/ (built). */
+export function vendorRoot(): string {
+  return fileURLToPath(new URL('../../vendor/', import.meta.url));
+}
+
+const assetCache = new Map<string, Promise<string>>();
+
+/**
+ * Read a vendored asset by its absolute URL path (e.g. `/vendor/p5/1.9.0/p5.min.js`).
+ * Rejects LOUDLY when the file is missing — artifacts must never fall back to CDNs.
+ */
+export function readVendorAsset(urlPath: string): Promise<string> {
+  if (!urlPath.startsWith(`${VENDOR_BASE_PATH}/`)) {
+    return Promise.reject(new Error(`vendorAssets: not a ${VENDOR_BASE_PATH}/ path: ${urlPath}`));
+  }
+  if (!isVendorAssetPath(urlPath)) {
+    return Promise.reject(new Error(`vendorAssets: unregistered vendored asset: ${urlPath}`));
+  }
+  let cached = assetCache.get(urlPath);
+  if (!cached) {
+    const rel = urlPath.slice(VENDOR_BASE_PATH.length + 1);
+    cached = readFile(`${vendorRoot()}${rel}`, 'utf8').catch((err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `vendorAssets: vendored asset missing on disk: ${urlPath} (${message}). ` +
+        'Artifacts must not fall back to CDNs — restore the vendor/ file.',
+      );
+    });
+    assetCache.set(urlPath, cached);
+  }
+  return cached;
+}
+
+const VENDOR_SCRIPT_SRC_RE = /<script\b[^>]*\bsrc\s*=\s*(["'])((?:\/vendor\/)[^"']+)\1[^>]*>\s*<\/script>/gi;
+const IMPORT_MAP_RE = /<script\b[^>]*type="importmap"[^>]*>([\s\S]*?)<\/script>/gi;
+
+function escapeScriptClose(source: string): string {
+  return source.replace(/<\/script/gi, '<\\/script');
+}
+
+/** sha256 of a vendored body — the renderer's pinned-asset evidence unit. */
+function vendoredDigest(body: string): string {
+  return createHash('sha256').update(body).digest('hex');
+}
+
+/** Convert a vendored file to a data: URL for import maps (about:blank pages). */
+async function vendorDataUrl(urlPath: string, onInlineAsset?: (digest: string) => void): Promise<string> {
+  const body = await readVendorAsset(urlPath);
+  onInlineAsset?.(vendoredDigest(body));
+  return `data:text/javascript;base64,${Buffer.from(body, 'utf8').toString('base64')}`;
+}
+
+/**
+ * Rewrite an artifact HTML for the embedded (setContent) render path:
+ * - `<script src="/vendor/...">` tags become inline script bodies.
+ * - Import map entries mapping an exact specifier to a `/vendor/...` URL are
+ *   rewritten to data: URLs; prefix mappings pointing into `/vendor/` are
+ *   dropped (they cannot be expressed as data: URLs; addon imports are banned
+ *   by generator validation anyway).
+ * Non-vendor URLs are left untouched — the renderer request policy governs them.
+ *
+ * Each vendored body that is inlined (script tag) or re-encoded (import map
+ * entry) is reported through the optional observer as its sha256 digest — the
+ * same evidence unit the renderer's network-route fallback records. Without
+ * this, the embedded path could never prove a pinned runtime was loaded, and
+ * the RENDER_PINNED_RUNTIME_ASSET_REQUIRED guard fired on every correctly
+ * vendored piece (#924 regression).
+ */
+/** True when an import map in the page maps a specifier into `/vendor/`. */
+export function hasVendorImportMap(html: string): boolean {
+  return [...html.matchAll(IMPORT_MAP_RE)].some(m => m[1].includes(`"${VENDOR_BASE_PATH}/`));
+}
+
+export async function inlineVendorAssets(
+  html: string,
+  onInlineAsset?: (digest: string) => void,
+  options: { keepImportMaps?: boolean } = {},
+): Promise<string> {
+  // HyperFrames previews put the composition in an escaped srcdoc iframe.
+  // Its /vendor URLs also inherit about:blank and need inline bodies.
+  const entities: Record<string, string> = {
+    amp: '&', quot: '"', '#39': "'", lt: '<', gt: '>',
+  };
+  let embedded = html;
+  const frames = [...html.matchAll(/<iframe\b[^>]*\bsrcdoc="([^"]*)"[^>]*>/gi)];
+  for (const frame of frames) {
+    const source = frame[1].replace(/&(amp|quot|#39|lt|gt);/g,
+      (_entity, name: string) => entities[name]);
+    const body = await inlineVendorAssets(source, onInlineAsset);
+    const escaped = body.replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    embedded = embedded.replace(frame[0], () => frame[0].replace(
+      /\bsrcdoc="[^"]*"/i, () => `srcdoc="${escaped}"`));
+  }
+  // Inline plain script tags (p5, tone, hydra, strudel, d3, gsap).
+  const scriptMatches = [...embedded.matchAll(VENDOR_SCRIPT_SRC_RE)];
+  let inlined = embedded;
+  if (scriptMatches.length > 0) {
+    const replacements = await Promise.all(scriptMatches.map(async (match) => {
+      const body = await readVendorAsset(match[2]);
+      onInlineAsset?.(vendoredDigest(body));
+      return { match, inline: `<script>${escapeScriptClose(body)}</script>` };
+    }));
+    for (const { match, inline } of replacements) {
+      inlined = inlined.replace(match[0], () => inline);
+    }
+  }
+
+  // Rewrite import map mappings (three module). A page the renderer serves
+  // from its own origin keeps the /vendor/ URLs: the wrapper CSP allows
+  // 'self' but not data:, so a data: module would never load.
+  if (options.keepImportMaps) return inlined;
+  const importMaps = [...inlined.matchAll(IMPORT_MAP_RE)];
+  for (const mapMatch of importMaps) {
+    let mapJson: Record<string, unknown>;
+    try {
+      mapJson = JSON.parse(mapMatch[1]) as Record<string, unknown>;
+    } catch {
+      continue; // Not valid JSON — leave untouched; the page will fail visibly.
+    }
+    const imports = mapJson.imports;
+    if (!imports || typeof imports !== 'object') continue;
+    const next: Record<string, string> = {};
+    let changed = false;
+    for (const [specifier, target] of Object.entries(imports as Record<string, unknown>)) {
+      if (typeof target !== 'string' || !target.startsWith(`${VENDOR_BASE_PATH}/`)) {
+        next[specifier] = String(target);
+        continue;
+      }
+      if (specifier.endsWith('/')) {
+        changed = true; // Prefix mapping into /vendor: drop (cannot be a data: URL).
+        continue;
+      }
+      next[specifier] = await vendorDataUrl(target, onInlineAsset);
+      changed = true;
+    }
+    if (changed) {
+      mapJson.imports = next;
+      inlined = inlined.replace(
+        mapMatch[0],
+        () => `<script type="importmap">${JSON.stringify(mapJson)}</script>`,
+      );
+    }
+  }
+
+  return inlined;
+}

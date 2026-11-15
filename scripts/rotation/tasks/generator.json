@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "issue": 401,
+  "seat": "generator",
+  "batteryId": "generator-v1",
+  "reasoningLevel": "medium",
+  "fixedEvaluatorSeat": "gemini-3.1-pro-low",
+  "description": "6 tasks = 3 domains (p5, hydra, kinetic) x 2 difficulty tiers. Gates: parse/render/nonblank. Blind eval by fixed evaluator seat. Wave 4+: empty artifact = failed dogfood; seat must leave self-improvement product findings (see wave-4-seat-briefs.md).",
+  "wave4BriefRef": "docs/agents/waves/wave-4-seat-briefs.md#generator--kimi-k3-high-wave-4",
+  "dogfoodSuffix": " WAVE4 DOGFOOD: Output complete runnable craft only. Empty/placeholder code fails. If blocked by Sinter (gate/prompt/tool), say BLOCKED with product defect path. Also give one generator-pipeline self-improvement idea (product, not taste).",
+  "tasks": [
+    {
+      "id": "gen-p5-easy",
+      "domain": "p5",
+      "tier": "easy",
+      "prompt": "Target creative domain: p5. Generate a runnable p5.js sketch with setup(), draw(), createCanvas(400,400), and slow orbiting dots on a dark background. Keep it simple and self-contained. WAVE4 DOGFOOD: complete runnable craft only; empty/placeholder fails; if blocked by Sinter name the product defect; add one pipeline self-improvement idea (product not taste).",
+      "maxAttempts": 3
+    },
+    {
+      "id": "gen-p5-hard",
+      "domain": "p5",
+      "tier": "hard",
+      "prompt": "Target creative domain: p5. Generate a runnable p5.js sketch: layered particle field with trail fade, two independent attractors, noise-modulated color that never washes to pure white, and a prefers-reduced-motion static fallback frame. setup/draw required; no external assets. WAVE4 DOGFOOD: complete runnable craft only; empty/placeholder fails; if blocked by Sinter name the product defect; add one pipeline self-improvement idea (product not taste).",
+      "maxAttempts": 3
+    },
+    {
+      "id": "gen-hydra-easy",
+      "domain": "hydra",
+      "tier": "easy",
+      "prompt": "Target creative domain: Hydra. Generate runnable hydra-synth code using osc(), color(), and out(o0). Calm blue-green palette. Self-contained. WAVE4 DOGFOOD: complete runnable craft only; empty/placeholder fails; if blocked by Sinter name the product defect; add one pipeline self-improvement idea (product not taste).",
+      "maxAttempts": 3
+    },
+    {
+      "id": "gen-hydra-hard",
+      "domain": "hydra",
+      "tier": "hard",
+      "prompt": "Target creative domain: Hydra. Generate runnable hydra-synth: nested modulate chains (osc + noise + shape), kaleid feedback that stays legible, color() that avoids washout, and a second output o1 used as texture source. Must call out(o0). WAVE4 DOGFOOD: complete runnable craft only; empty/placeholder fails; if blocked by Sinter name the product defect; add one pipeline self-improvement idea (product not taste).",
+      "maxAttempts": 3
+    },
+    {
+      "id": "gen-kinetic-easy",
+      "domain": "kinetic",
+      "tier": "easy",
+      "prompt": "CSS-only kinetic type: one word that slowly breathes via @keyframes scale/opacity, prefers-reduced-motion freezes to still, pure HTML+CSS, dark background, no JS. WAVE4 DOGFOOD: complete runnable craft only; empty/placeholder fails; if blocked by Sinter name the product defect; add one pipeline self-improvement idea (product not taste).",
+      "maxAttempts": 3
+    },
+    {
+      "id": "gen-kinetic-hard",
+      "domain": "kinetic",
+      "tier": "hard",
+      "prompt": "CSS-only kinetic poster: four independent @keyframes layers (type, grid, particle-dots as pure CSS, parallax field) with staggered phase offsets, prefers-reduced-motion fallback that freezes to a still composition, no JS, no external assets, viewport-filling, type must remain legible at 320px width. WAVE4 DOGFOOD: complete runnable craft only; empty/placeholder fails; if blocked by Sinter name the product defect; add one pipeline self-improvement idea (product not taste).",
+      "maxAttempts": 3
+    }
+  ],
+  "batteryVersion": 1
+}

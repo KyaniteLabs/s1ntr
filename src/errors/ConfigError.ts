@@ -1,0 +1,16 @@
+import { SinterError } from './base.js';
+
+/**
+ * Error for configuration-related issues.
+ * Used when configuration files are invalid, missing, or contain errors.
+ */
+export class ConfigError extends SinterError {
+  constructor(
+    message: string,
+    context?: Record<string, unknown> & { code?: string }
+  ) {
+    const code = context?.code ?? 'ERR_CONFIG';
+    const { code: _, ...restContext } = context ?? {};
+    super(message, code, Object.keys(restContext).length > 0 ? restContext : undefined);
+  }
+}

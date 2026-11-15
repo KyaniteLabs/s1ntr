@@ -1,22 +1,118 @@
-# S1NTR
+# Sinter
 
-**Sinter is a creative-coding studio.** Describe a piece in plain language, and Sinter writes it as code across many visual and audio forms, then fuses them into one layered work.
+Sinter is a TypeScript creative-coding studio and CLI that turns prompts into visual, audio, and motion pieces, then lets you preview them locally. It routes work to a configured language model and supports local models through OpenAI-compatible endpoints.
 
-*To sinter:* to fire many separate particles into one solid form, the way a kiln fuses grains of clay into a single vessel.
+## Install
 
-## What it makes
+The npm package name is `s1ntr`; the CLI command is still `sinter`. Once the npm release ships:
 
-p5.js sketches, SVG, GLSL shaders, Three.js scenes, Hydra visuals, Strudel and Tone.js music, video compositions, ASCII and kinetic type, and generated text. You can use it from a chat-first Studio, a CLI or a TUI. It works with whichever LLM provider you choose and learns your taste as you work with it.
+```bash
+npm install -g s1ntr
+sinter --version
+```
 
-## Where to start
+Until then, install it from a checkout of this repository:
 
-- **Docs:** [docs.s1ntr.com](https://docs.s1ntr.com/)
-- **Site:** [s1ntr.com](https://s1ntr.com/)
+```bash
+pnpm install
+pnpm build
+pnpm link --global
+sinter --version
+```
 
-## Source
+Sinter requires Node.js 20 or newer.
 
-This is Sinter's official GitHub home. Development happens elsewhere, and the source isn't published here yet. Watch this repo to hear when it is.
+`pnpm install` runs install scripts: Sinter's own `postinstall` (`scripts/packaging/postinstall.mjs`, which runs `npm run build` when `dist/` is missing) and those of its dependencies. To review them first, install with `pnpm install --ignore-scripts`, read the scripts, then run `pnpm rebuild`.
 
-## License
+## Quick start
 
-Business Source License 1.1. Copyright (c) 2026 Simon Gonzalez de Cruz.
+```bash
+# Configure a provider (the default setup uses Anthropic).
+sinter --configure
+
+# Make a first piece. Generation uses your configured provider.
+sinter --prompt "A quiet field of blue particles, moving like grass in wind"
+
+# Start the local preview server and open its printed address.
+sinter serve
+```
+
+Sinter saves generated files under `~/.sinter/output` by default. Pass `--output ./my-art` to choose another folder. `sinter serve` starts the local preview server and loads the latest saved piece. The Studio GUI is available from a repository checkout with dependencies installed.
+
+## Main commands
+
+- `sinter --help` lists commands and common options.
+- `sinter --version` prints the installed version.
+- `sinter --prompt "..."` or `sinter "..."` generates a piece. A generation may use paid provider calls.
+- `pnpm gui` (or `sinter studio`) opens the Studio GUI workbench from your checkout.
+- `sinter serve [port]` starts the local preview server (default port `3456`).
+- `sinter provider help` explains provider setup; `sinter provider list` lists configured provider types.
+- `sinter list` lists saved sketches.
+
+See the full [CLI reference](docs/cli-reference.md) and [getting-started guide](docs/getting-started.md) for command syntax.
+
+## Creative domains
+
+- **Shared creative domains** — p5.js, SVG, GLSL, Three.js, Hydra, Strudel, Tone.js, Revideo, HyperFrames, ASCII, Kinetic, TextGen
+  Host-specific domains (for example HTML or DataViz on one lineage) stay documented in that host's architecture surface rather than as universal totals.
+- **CreativeBoard critique** — 3-agent board (Minimalist / Expressionist / Technician) deliberates on output
+- **Swarm generation** (`--use-swarm`) — 5 default runtime personas (Kai / Nova / Rex / Sam / Max).
+  Five default personas (Kai, Nova, Rex, Sam, Max) generate in parallel and vote on best.
+
+Prompt routing selects a domain automatically; use `--domain` to request one explicitly.
+
+## Ready-to-show market path
+
+Use this path when you want to try Sinter as a product instead of asking an agent to babysit a proof run. It keeps the shared creative surface in scope: p5, SVG, GLSL, Three.js, Hydra, Strudel, Tone.js, Revideo, HyperFrames, ASCII, Kinetic, and TextGen. Individual host lineages may expose additional generators (for example HTML or DataViz) ahead of the other mirror.
+
+```bash
+# 1. Install and build
+pnpm install
+pnpm build
+
+# 2. Configure a provider (or run sinter --configure)
+export SINTER_LLM_PROVIDER=glm
+export GLM_API_KEY=your-key
+
+# 3. Generate from natural language
+sinter "a luminous blue-green particle garden"
+
+# 4. Launch Studio for chat, same-screen preview, revision, and optional details
+pnpm gui
+
+# 5. Studio smoke (same-screen preview path)
+pnpm proof:studio-smoke
+
+# 6. Refresh the live provider receipt used by the market gate
+pnpm run proof:live-provider-smoke -- --provider=glm --timeout-ms=120000
+
+# 7. Sweep every launch creative domain with the active live provider
+pnpm proof:live-creative-domains -- --provider=glm --all --timeout-ms=120000 --out=.omx/proof/live-creative-domains
+
+# 8. Ask the app for the plain answer
+sinter market status
+```
+
+Expected current result: `sinter market status` prints the release-truth report as JSON and exits 0 only when `ownerReleaseReady` is true (otherwise 2). The current launch-candidate proof also includes Studio p5 generation, same-screen preview, revision, microphone preview smoke, and permission-denied UX receipts summarized in `docs/launch/launch-candidate-2026-04-30.md`. Strudel patterns are saved with an external playback link, Tone.js saves playable HTML, HyperFrames saves HTML/GSAP composition artifacts, and Revideo saves composition source/HTML; mp4 export is attempted as a non-blocking video artifact and should be checked explicitly when a rendered file is required. Passing the smoke steps above does not by itself establish launch approval — launch readiness is tracked separately in [`docs/launch/launch-decision-packet-2026-09.md`](./docs/launch/launch-decision-packet-2026-09.md).
+
+## Local models
+
+Sinter can call local OpenAI-compatible servers such as LM Studio. For a local LFM3 model, start the model server, then set its endpoint and served model name:
+
+```bash
+sinter provider set-key lmstudio --base-url http://localhost:1234/v1 --model LFM3 --use
+```
+
+Replace `LFM3` with the model identifier exposed by your server. Sinter handles LFM3's final answer for both streamed and non-streamed responses.
+
+## Project `.env` files
+
+When you run `sinter` in a folder with a `.env` file, Sinter reads only API keys (`*_API_KEY`), model names (`*_MODEL`) and `SINTER_LOG_LEVEL` from it, and never replaces a value your shell already set. Anything else, such as a base URL, a browser path, `NODE_OPTIONS` or a sandbox switch, is ignored with a one-line warning, so a `.env` in a downloaded folder cannot redirect your key or change what runs. Export those settings in your shell instead, or run with `SINTER_TRUST_DOTENV=1` to load the whole file.
+
+## Where to go next
+
+- [Getting started](docs/getting-started.md): configure a provider, generate a piece, and open its preview.
+- [CLI reference](docs/cli-reference.md): commands and flags parsed by the current CLI.
+- [Documentation index](docs/README.md): current core docs and historical material.
+- [Composition API](docs/composition-api.md): composition input and output formats.
+- [Changelog](CHANGELOG.md): release history.

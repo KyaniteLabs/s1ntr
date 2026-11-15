@@ -1,0 +1,354 @@
+/**
+ * MiniMax Provider Tests
+ *
+ * Tests the MiniMax-specific provider implementation including:
+ * - OpenAI-compatible and Anthropic-compatible endpoint handling
+ * - Response parsing
+ * - Empty response handling
+ * - Capture reasoning_content without treating it as final content
+ */
+
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { MiniMaxProvider } from '../../src/llm/providers/MiniMaxProvider.js';
+import type { ProviderConfig } from '../../src/llm/ProviderTypes.js';
+
+describe('MiniMaxProvider', () => {
+  const mockConfig: ProviderConfig = {
+    baseUrl: 'https://api.minimaxi.com/v1',
+    model: 'MiniMax-M2.7',
+    apiKey: 'test-api-key',
+    temperature: 0.7,
+    maxTokens: 4096,
+    timeout: 120000,
+  };
+
+  let provider: MiniMaxProvider;
+  let originalFetch: typeof global.fetch;
+
+  beforeEach(() => {
+    provider = new MiniMaxProvider(mockConfig);
+    originalFetch = global.fetch;
+    vi.resetAllMocks();
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  describe('provider info', () => {
+    it('should have correct name', () => {
+      expect(provider.name).toBe('minimax');
+    });
+
+    it('should return correct model', () => {
+      expect(provider.getModel()).toBe('MiniMax-M2.7');
+    });
+
+    it('should support streaming', () => {
+      expect(provider.supportsStreaming()).toBe(true);
+    });
+  });
+
+  describe('generate', () => {
+    it('should handle successful response with content', async () => {
+      const mockResponse = {
+        choices: [{
+          message: {
+            content: 'function setup() { createCanvas(400, 400); }',
+          },
+        }],
+        model: 'MiniMax-M2.7',
+        usage: {
+          prompt_tokens: 10,
+          completion_tokens: 20,
+        },
+      };
+
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockResponse),
+      });
+
+      const result = await provider.generate({
+        systemPrompt: 'You are a code generator.',
+        userPrompt: 'Generate a p5.js sketch',
+      });
+
+      expect(result.isOk()).toBe(true);
+      expect(result.value.success).toBe(true);
+      expect(result.value.content).toBe('function setup() { createCanvas(400, 400); }');
+      expect(result.value.model).toBe('MiniMax-M2.7');
+      expect(result.value.usage).toEqual({
+        inputTokens: 10,
+        outputTokens: 20,
+      });
+    });
+
+    it('should not treat reasoning_content as final content when content is empty', async () => {
+      const mockResponse = {
+        choices: [{
+          message: {
+            content: '',
+            reasoning_content: 'function setup() { createCanvas(400, 400); }',
+          },
+        }],
+        model: 'MiniMax-M2.7',
+        usage: {
+          prompt_tokens: 10,
+          completion_tokens: 20,
+        },
+      };
+
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockResponse),
+      });
+
+      const result = await provider.generate({
+        systemPrompt: 'You are a code generator.',
+        userPrompt: 'Generate a p5.js sketch',
+      });
+
+      expect(result.isOk()).toBe(true);
+      expect(result.value.success).toBe(false);
+      expect(result.value.content).toBe('');
+      expect(result.value.thinking?.text).toBe('function setup() { createCanvas(400, 400); }');
+      expect(result.value.thinking?.source).toBe('reasoning_content');
+    });
+
+    it('names the cause when an Anthropic-wire reply spends max_tokens on reasoning (GLM implicit thinking)', async () => {
+      const anthropicProvider = new MiniMaxProvider({ ...mockConfig, baseUrl: 'https://api.z.ai/api/anthropic', model: 'glm-5.3' });
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({
+          model: 'glm-5.3',
+          stop_reason: 'max_tokens',
+          content: [{ type: 'thinking', thinking: 'planning the sliders...' }],
+          usage: { input_tokens: 51, output_tokens: 4096 },
+        }),
+      });
+
+      const result = await anthropicProvider.generate({ systemPrompt: 's', userPrompt: 'u', maxTokens: 4096 });
+
+      expect(result.isOk()).toBe(true);
+      expect(result.value.success).toBe(false);
+      expect(result.value.finishReason).toBe('length');
+      expect(result.value.error).toBe(
+        'glm-5.3 spent the whole max_tokens budget (4096) on reasoning and returned no text; raise maxTokens for this seat',
+      );
+    });
+
+    it('should mark response as failed when content is empty and no reasoning_content', async () => {
+      const mockResponse = {
+        choices: [{
+          message: {
+            content: '',
+          },
+        }],
+        model: 'MiniMax-M2.7',
+      };
+
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockResponse),
+      });
+
+      const result = await provider.generate({
+        systemPrompt: 'You are a code generator.',
+        userPrompt: 'Generate a p5.js sketch',
+      });
+
+      expect(result.isOk()).toBe(true);
+      expect(result.value.success).toBe(false);
+      expect(result.value.content).toBe('');
+    });
+
+    it('should handle API error response', async () => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+        text: () => Promise.resolve('Invalid API key'),
+      });
+
+      const result = await provider.generate({
+        systemPrompt: 'You are a code generator.',
+        userPrompt: 'Generate a p5.js sketch',
+      });
+
+      expect(result.isErr()).toBe(true);
+      expect(result.error.message).toContain('401');
+      expect(result.error.message).toContain('Invalid API key');
+    });
+
+    it('should handle network error', async () => {
+      global.fetch = vi.fn().mockRejectedValue(new Error('Network error'));
+
+      const result = await provider.generate({
+        systemPrompt: 'You are a code generator.',
+        userPrompt: 'Generate a p5.js sketch',
+      });
+
+      expect(result.isErr()).toBe(true);
+      expect(result.error.message).toContain('Network error');
+    });
+
+    it('should include Authorization header with Bearer token', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({
+          choices: [{ message: { content: 'test' } }],
+          model: 'MiniMax-M2.7',
+        }),
+      });
+      global.fetch = mockFetch;
+
+      await provider.generate({
+        systemPrompt: 'System prompt',
+        userPrompt: 'User prompt',
+      });
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://api.minimaxi.com/v1/chat/completions',
+        expect.objectContaining({
+          method: 'POST',
+          headers: expect.objectContaining({
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer test-api-key',
+          }),
+        })
+      );
+    });
+
+    it('should use correct URL from config', async () => {
+      const customProvider = new MiniMaxProvider({
+        ...mockConfig,
+        baseUrl: 'https://custom.minimax.endpoint/v1',
+      });
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({
+          choices: [{ message: { content: 'test' } }],
+          model: 'MiniMax-M2.7',
+        }),
+      });
+      global.fetch = mockFetch;
+
+      await customProvider.generate({
+        systemPrompt: 'System prompt',
+        userPrompt: 'User prompt',
+      });
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://custom.minimax.endpoint/v1/chat/completions',
+        expect.any(Object)
+      );
+    });
+
+    it('should handle response with thinking content', async () => {
+      const mockResponse = {
+        choices: [{
+          message: {
+            content: 'function setup() {}',
+            reasoning_content: 'Let me create a simple setup function',
+          },
+        }],
+        model: 'MiniMax-M2.7',
+      };
+
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockResponse),
+      });
+
+      const result = await provider.generate({
+        systemPrompt: 'You are a code generator.',
+        userPrompt: 'Generate code',
+      });
+
+      expect(result.isOk()).toBe(true);
+      expect(result.value.success).toBe(true);
+      expect(result.value.content).toBe('function setup() {}');
+      expect(result.value.thinking?.text).toBe('Let me create a simple setup function');
+      expect(result.value.thinking?.source).toBe('reasoning_content');
+    });
+  });
+
+  describe('streaming', () => {
+    it('should handle streaming response', async () => {
+      const mockReader = {
+        read: vi.fn()
+          .mockResolvedValueOnce({
+            done: false,
+            value: new TextEncoder().encode('data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n'),
+          })
+          .mockResolvedValueOnce({
+            done: false,
+            value: new TextEncoder().encode('data: {"choices":[{"delta":{"content":" World"}}]}\n\n'),
+          })
+          .mockResolvedValueOnce({
+            done: true,
+          }),
+        releaseLock: vi.fn(),
+      };
+
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        body: {
+          getReader: () => mockReader,
+        },
+      });
+
+      const events: Array<{ type: string; content?: string }> = [];
+      const stream = provider.stream({
+        systemPrompt: 'System',
+        userPrompt: 'User',
+      });
+
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      const contentEvents = events.filter(e => e.type === 'content');
+      expect(contentEvents).toHaveLength(2);
+      expect(contentEvents[0].content).toBe('Hello');
+      expect(contentEvents[1].content).toBe(' World');
+    });
+
+    it('should handle streaming error', async () => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 500,
+        statusText: 'Internal Server Error',
+      });
+
+      const events: Array<{ type: string; error?: string }> = [];
+      const stream = provider.stream({
+        systemPrompt: 'System',
+        userPrompt: 'User',
+      });
+
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      const errorEvent = events.find(e => e.type === 'error');
+      expect(errorEvent?.type).toBe('error');
+      expect(errorEvent?.error).toContain('500');
+    });
+  });
+});
+
+describe('MiniMax URL Configuration', () => {
+  it('documents the preferred international Anthropic-compatible endpoint', () => {
+    const preferredInternationalUrl = 'https://api.minimax.io/anthropic';
+    const legacyOpenAiCompatibleUrl = 'https://api.minimax.io/v1';
+    const domesticOpenAiCompatibleUrl = 'https://api.minimaxi.com/v1';
+
+    expect(preferredInternationalUrl).toContain('/anthropic');
+    expect(legacyOpenAiCompatibleUrl).toContain('api.minimax.io');
+    expect(domesticOpenAiCompatibleUrl).toContain('api.minimaxi.com');
+  });
+});

@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "issue": 401,
+  "note": "Pinned planted-defect fixtures for evaluator battery. Prefer real .quality/audition-379 artifacts when present; these synthetics fill gaps for CI and dry runs.",
+  "screenshotPolicy": {
+    "blank-screenshot": "1x1 transparent PNG or missing → treat as blank evidence",
+    "swapped-screenshot": "reuse a different-domain fixture thumbnail when available",
+    "clean-control": "optional real screenshot from generator seat; null ok for code-only dry judge"
+  },
+  "files": [
+    "clean-p5-orbit.js",
+    "clean-hydra-osc.js",
+    "clean-kinetic-breathing.js",
+    "friction-blank-shot.js",
+    "friction-off-brief.js",
+    "friction-subtle-syntax.js",
+    "friction-rubric-gaming.js"
+  ]
+}

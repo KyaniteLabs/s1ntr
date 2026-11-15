@@ -1,0 +1,614 @@
+/**
+ * SeedBank — persistent storage for promoted creative seeds.
+ * All Sinter functions draw from this seed bank.
+ * Now with semantic search using embeddings.
+ */
+
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import type { CompostConfig, Seed, SeedReuseStage } from './types.js';
+import { safeJsonParse, SeedSchema } from '../security/JsonSchemas.js';
+import { Logger } from '../utils/Logger.js';
+import {
+  EmbeddingService,
+  type EmbeddingResult,
+} from '../embeddings/EmbeddingService.js';
+import { cosineSimilarity } from '../utils/vectors.js';
+import { normalizeCompostProvenance } from './CompostProvenance.js';
+import { writeFileAtomic } from '../utils/atomicWrite.js';
+
+/** Seed with embedded vector for semantic search */
+export interface EmbeddedSeed extends Seed {
+  /** Optional embedding vector for semantic search */
+  embedding?: number[];
+  /** Model used to generate the embedding */
+  embeddingModel?: string;
+  /** When the embedding was generated */
+  embeddedAt?: string;
+}
+
+export class SeedBank {
+  private seedDir: string;
+  private retentionDays: number;
+  private seedsPath: string;
+  private latestDir: string;
+  private seeds: EmbeddedSeed[] = [];
+  private loading: Promise<void> | null = null;
+  private embeddingService: EmbeddingService | null = null;
+  private embeddingEnabled = false;
+
+  constructor(
+    config: CompostConfig,
+    embeddingService?: EmbeddingService
+  ) {
+    this.seedDir = config.seedDir;
+    this.retentionDays = config.nuggetRetentionDays;
+    this.seedsPath = path.join(this.seedDir, 'seeds.json');
+    this.latestDir = path.join(this.seedDir, 'latest');
+
+    if (embeddingService) {
+      this.embeddingService = embeddingService;
+      this.embeddingEnabled = true;
+    }
+  }
+
+  /** Enable embedding support with an embedding service. */
+  setEmbeddingService(service: EmbeddingService): void {
+    this.embeddingService = service;
+    this.embeddingEnabled = true;
+  }
+
+  /** Check if embedding support is enabled. */
+  isEmbeddingEnabled(): boolean {
+    return this.embeddingEnabled && this.embeddingService !== null;
+  }
+
+  /** Ensure directories exist and load seeds from disk. */
+  private ensureLoaded(): Promise<void> {
+    // One shared in-flight load: concurrent callers await the same promise, so
+    // nothing mutates this.seeds before the disk load assigns it.
+    this.loading ??= this.load();
+    return this.loading;
+  }
+
+  private async load(): Promise<void> {
+    await fs.mkdir(this.latestDir, { recursive: true });
+
+    try {
+      const raw = await fs.readFile(this.seedsPath, 'utf-8');
+      this.seeds =
+        safeJsonParse(raw, SeedSchema.array(), 'SeedBank') ?? [];
+    } catch (err: unknown) {
+      const code = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
+      if (code === 'ENOENT') {
+        Logger.debug('SeedBank', 'No saved seeds found, starting empty');
+      } else {
+        Logger.error('SeedBank', 'Seed file corrupted or unreadable, starting empty:', err instanceof Error ? err.message : err);
+      }
+      this.seeds = [];
+    }
+  }
+
+  /** Persist seeds to disk. */
+  private async save(): Promise<void> {
+    try {
+      await fs.mkdir(this.seedDir, { recursive: true });
+      // Atomic replace (#1302): a crash mid-save can no longer truncate the bank.
+      await writeFileAtomic(this.seedsPath, JSON.stringify(this.seeds, null, 2));
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(`Failed to save seeds: ${message}`);
+    }
+  }
+
+  /** Add a seed to the bank. */
+  async add(seed: EmbeddedSeed): Promise<void> {
+    await this.ensureLoaded();
+    seed.provenance ??= normalizeCompostProvenance(seed);
+
+    // Generate embedding if service is available
+    if (this.embeddingEnabled && this.embeddingService) {
+      try {
+        const embedding = await this.embed(seed.content);
+        // eslint-disable-next-line require-atomic-updates -- seed is the caller's single-use argument; this call is the only writer of its embedding fields
+        seed.embedding = embedding.vector;
+        // eslint-disable-next-line require-atomic-updates -- seed is the caller's single-use argument; this call is the only writer of its embedding fields
+        seed.embeddingModel = embedding.model;
+        // eslint-disable-next-line require-atomic-updates -- seed is the caller's single-use argument; this call is the only writer of its embedding fields
+        seed.embeddedAt = new Date().toISOString();
+      } catch (error) {
+        Logger.warn(
+          'SeedBank',
+          'Failed to generate embedding for seed:',
+          error
+        );
+      }
+    }
+
+    this.seeds.push(seed);
+
+    // Save markdown file to latest/
+    const safeName = seed.id.replace(/[^a-zA-Z0-9-_]/g, '_');
+    const mdContent = `# ${seed.id}\n\n**Score:** ${seed.score}\n\n${seed.content}\n\n---\n\nSources: ${seed.source.domains.join(', ')}\nCollision: ${seed.source.collisionType}\nPromoted: ${seed.promotedAt}\n`;
+    await fs.writeFile(
+      path.join(this.latestDir, `${safeName}.md`),
+      mdContent,
+      'utf-8'
+    );
+
+    await this.save();
+  }
+
+  /** Get all seeds sorted by score descending. */
+  async getAll(): Promise<EmbeddedSeed[]> {
+    await this.ensureLoaded();
+    return [...this.seeds].sort((a, b) => b.score - a.score);
+  }
+
+  /** Get top N seeds by score. */
+  async getTop(n: number): Promise<EmbeddedSeed[]> {
+    const all = await this.getAll();
+    return all.slice(0, n);
+  }
+
+  /** Get seeds filtered by source domain. */
+  async getByDomain(domain: string): Promise<EmbeddedSeed[]> {
+    await this.ensureLoaded();
+    return this.seeds.filter((s) => s.source.domains.includes(domain));
+  }
+
+  /** Mark a seed as used by a function. */
+  async markUsed(
+    seedId: string,
+    functionName: string
+  ): Promise<void> {
+    await this.ensureLoaded();
+    const seed = this.seeds.find((s) => s.id === seedId);
+    if (!seed) return;
+    seed.useCount++;
+    seed.lastUsedAt = new Date().toISOString();
+    if (!seed.usedBy.includes(functionName)) {
+      seed.usedBy.push(functionName);
+    }
+    await this.save();
+  }
+
+  /**
+   * Record one reuse-funnel observation (#1301). Counts are deduplicated per
+   * (stage, attributionId) so a retried run cannot inflate them. Returns
+   * false when the seed is unknown or the observation was already counted.
+   * Only 'injected' marks the seed used for retention; nothing here changes
+   * the seed's score.
+   */
+  async recordReuse(seedIds: readonly string[], stage: SeedReuseStage,
+    attributionId: string): Promise<number> {
+    if (!attributionId) throw new Error('SEED_REUSE_ATTRIBUTION_REQUIRED');
+    await this.ensureLoaded();
+    const key = `${stage}:${attributionId}`;
+    let counted = 0;
+    const now = new Date().toISOString();
+    for (const id of new Set(seedIds)) {
+      const seed = this.seeds.find((s) => s.id === id);
+      if (!seed) continue;
+      seed.reuse ??= { retrieved: 0, injected: 0, helpful: 0, harmful: 0, attributions: [] };
+      if (seed.reuse.attributions.includes(key)) continue;
+      seed.reuse.attributions.push(key);
+      seed.reuse[stage]++;
+      if (stage === 'injected') seed.lastUsedAt = now;
+      counted++;
+    }
+    if (counted > 0) await this.save();
+    return counted;
+  }
+
+  /**
+   * Reuse-rate metric over the whole bank. `injectionRate` is the share of
+   * available seeds injected at least once; `verifiedHelpfulRate` only counts
+   * independently verified outcomes and is null without any. Reuse alone is
+   * not quality.
+   */
+  async reuseMetrics(): Promise<{ available: number; retrieved: number; injected: number;
+    injectionRate: number; helpful: number; harmful: number; verifiedHelpfulRate: number | null }> {
+    await this.ensureLoaded();
+    const available = this.seeds.length;
+    const sum = (k: SeedReuseStage) => this.seeds.filter(s => (s.reuse?.[k] ?? 0) > 0).length;
+    const helpful = this.seeds.reduce((n, s) => n + (s.reuse?.helpful ?? 0), 0);
+    const harmful = this.seeds.reduce((n, s) => n + (s.reuse?.harmful ?? 0), 0);
+    const injected = sum('injected');
+    return {
+      available, retrieved: sum('retrieved'), injected,
+      injectionRate: available === 0 ? 0 : injected / available,
+      helpful, harmful,
+      verifiedHelpfulRate: helpful + harmful === 0 ? null : helpful / (helpful + harmful),
+    };
+  }
+
+  /**
+   * Remove seeds with no activity within retentionDays. Activity is the later of
+   * promotedAt and lastUsedAt, so use extends retention but never exempts a seed
+   * forever. Seeds used before lastUsedAt existed age from promotedAt.
+   */
+  async pruneOld(retentionDays?: number): Promise<void> {
+    await this.ensureLoaded();
+    const days = retentionDays ?? this.retentionDays;
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - days);
+
+    const before = this.seeds.length;
+    this.seeds = this.seeds.filter((s) => {
+      const lastActivity = Math.max(
+        new Date(s.promotedAt).getTime(),
+        s.lastUsedAt ? new Date(s.lastUsedAt).getTime() : Number.NEGATIVE_INFINITY,
+      );
+      // NaN (unparseable dates) keeps the seed rather than silently deleting it.
+      return Number.isNaN(lastActivity) || lastActivity >= cutoff.getTime();
+    });
+
+    if (this.seeds.length !== before) {
+      await this.save();
+    }
+  }
+
+  /** Return total seed count. */
+  async count(): Promise<number> {
+    await this.ensureLoaded();
+    return this.seeds.length;
+  }
+
+  /** Get a random full Seed object (with lir if available). */
+  async getRandomSeed(): Promise<EmbeddedSeed | undefined> {
+    await this.ensureLoaded();
+    if (this.seeds.length === 0) return undefined;
+    const idx = Math.floor(Math.random() * this.seeds.length);
+    return this.seeds[idx];
+  }
+
+  /** Backward compat: return just the content string of a random seed. */
+  async getRandomContent(): Promise<string | undefined> {
+    const seed = await this.getRandomSeed();
+    return seed?.content;
+  }
+
+  /**
+   * Generate embedding for text using the configured embedding service.
+   * @param text - Text to embed
+   * @returns Embedding result
+   */
+  async embed(text: string): Promise<EmbeddingResult> {
+    if (!this.embeddingService) {
+      throw new Error(
+        'Embedding service not configured. ' +
+          'Call setEmbeddingService() first.'
+      );
+    }
+    return this.embeddingService.embed(text);
+  }
+
+  /**
+   * Retrieve seeds relevant to a prompt using semantic similarity.
+   * Uses cosine similarity between embeddings when available,
+   * falls back to keyword matching otherwise.
+   *
+   * Diagnostic only (#1302): neither path is an admitted BM25 index over
+   * allowlisted, content-addressed seed manifests, so results must not be
+   * injected as admitted lessons.
+   * @param prompt - The prompt to match against
+   * @param topK - Number of seeds to return
+   * @returns Array of seeds sorted by relevance
+   */
+  async retrieveRelevantSeeds(
+    prompt: string,
+    topK: number
+  ): Promise<EmbeddedSeed[]> {
+    await this.ensureLoaded();
+    if (this.seeds.length === 0) return [];
+
+    // Use semantic search if embeddings are available
+    if (this.embeddingEnabled && this.embeddingService) {
+      return this.retrieveSemanticSeeds(prompt, topK);
+    }
+
+    // Fall back to keyword matching
+    return this.retrieveKeywordSeeds(prompt, topK);
+  }
+
+  /**
+   * Semantic seed retrieval using embeddings and cosine similarity.
+   * @param prompt - The prompt to match against
+   * @param topK - Number of seeds to return
+   * @returns Array of seeds sorted by semantic similarity
+   */
+  private async retrieveSemanticSeeds(
+    prompt: string,
+    topK: number
+  ): Promise<EmbeddedSeed[]> {
+    if (!this.embeddingService) {
+      throw new Error('Embedding service not available');
+    }
+
+    // Generate embedding for the prompt
+    const promptEmbedding = await this.embed(prompt);
+
+    // Calculate similarity scores for seeds with embeddings
+    const scored = this.seeds.map((seed) => {
+      if (seed.embedding && seed.embedding.length > 0) {
+        // Use cosine similarity
+        const similarity = cosineSimilarity(
+          promptEmbedding.vector,
+          seed.embedding
+        );
+        return { seed, score: similarity };
+      } else {
+        // Fall back to keyword matching for seeds without embeddings
+        const keywordScore = this.calculateKeywordScore(
+          prompt,
+          seed.content
+        );
+        return { seed, score: keywordScore * 0.5 }; // Weight down keyword matches
+      }
+    });
+
+    return scored
+      .sort((a, b) => b.score - a.score)
+      .slice(0, topK)
+      .map((s) => s.seed);
+  }
+
+  /**
+   * Keyword-based seed retrieval (fallback method).
+   * @param prompt - The prompt to match against
+   * @param topK - Number of seeds to return
+   * @returns Array of seeds sorted by keyword overlap
+   */
+  private async retrieveKeywordSeeds(
+    prompt: string,
+    topK: number
+  ): Promise<EmbeddedSeed[]> {
+    const promptWords = this.extractKeywords(prompt);
+    if (promptWords.length === 0) {
+      return this.getTop(topK);
+    }
+
+    const scored = this.seeds.map((seed) => {
+      const score = this.calculateKeywordScore(prompt, seed.content);
+      return { seed, score };
+    });
+
+    return scored
+      .sort((a, b) => b.score - a.score)
+      .slice(0, topK)
+      .map((s) => s.seed);
+  }
+
+  /**
+   * Calculate keyword-based relevance score.
+   * @param prompt - The prompt text
+   * @param content - The seed content
+   * @returns Relevance score between 0 and 1
+   */
+  private calculateKeywordScore(
+    prompt: string,
+    content: string
+  ): number {
+    const promptWords = this.extractKeywords(prompt);
+    const seedWords = this.extractKeywords(content);
+
+    if (promptWords.length === 0 || seedWords.length === 0) {
+      return 0;
+    }
+
+    // Calculate word overlap
+    let overlap = 0;
+    for (const word of promptWords) {
+      if (seedWords.includes(word)) overlap++;
+    }
+
+    return overlap / Math.max(promptWords.length, seedWords.length);
+  }
+
+  /** Extract meaningful keywords from text (lowercase, filtered) */
+  private extractKeywords(text: string): string[] {
+    const stopWords = new Set([
+      'a',
+      'an',
+      'the',
+      'is',
+      'are',
+      'was',
+      'were',
+      'be',
+      'been',
+      'being',
+      'have',
+      'has',
+      'had',
+      'do',
+      'does',
+      'did',
+      'will',
+      'would',
+      'could',
+      'should',
+      'may',
+      'might',
+      'must',
+      'shall',
+      'can',
+      'need',
+      'dare',
+      'ought',
+      'used',
+      'to',
+      'of',
+      'in',
+      'for',
+      'on',
+      'with',
+      'at',
+      'by',
+      'from',
+      'as',
+      'into',
+      'through',
+      'during',
+      'before',
+      'after',
+      'above',
+      'below',
+      'between',
+      'under',
+      'again',
+      'further',
+      'then',
+      'once',
+      'here',
+      'there',
+      'when',
+      'where',
+      'why',
+      'how',
+      'all',
+      'each',
+      'few',
+      'more',
+      'most',
+      'other',
+      'some',
+      'such',
+      'no',
+      'nor',
+      'not',
+      'only',
+      'own',
+      'same',
+      'so',
+      'than',
+      'too',
+      'very',
+      'just',
+      'and',
+      'but',
+      'if',
+      'or',
+      'because',
+      'until',
+      'while',
+      'this',
+      'that',
+      'these',
+      'those',
+      'i',
+      'me',
+      'my',
+      'myself',
+      'we',
+      'our',
+      'ours',
+      'ourselves',
+      'you',
+      'your',
+      'yours',
+      'yourself',
+      'yourselves',
+      'he',
+      'him',
+      'his',
+      'himself',
+      'she',
+      'her',
+      'hers',
+      'herself',
+      'it',
+      'its',
+      'itself',
+      'they',
+      'them',
+      'their',
+      'theirs',
+      'themselves',
+      'what',
+      'which',
+      'who',
+      'whom',
+      'create',
+      'make',
+      'generate',
+      'build',
+      'using',
+      'use',
+      'using',
+      'based',
+      'following',
+    ]);
+
+    return text
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter((word) => word.length > 2 && !stopWords.has(word));
+  }
+
+  /**
+   * Update embeddings for all seeds without embeddings.
+   * Useful for batch updating after enabling embedding support.
+   * @returns Number of seeds updated
+   */
+  async updateMissingEmbeddings(): Promise<number> {
+    if (!this.embeddingEnabled || !this.embeddingService) {
+      throw new Error('Embedding service not configured');
+    }
+
+    await this.ensureLoaded();
+
+    let updatedCount = 0;
+    for (const seed of this.seeds) {
+      if (!seed.embedding || seed.embedding.length === 0) {
+        try {
+          const embedding = await this.embed(seed.content);
+          seed.embedding = embedding.vector;
+          seed.embeddingModel = embedding.model;
+          seed.embeddedAt = new Date().toISOString();
+          updatedCount++;
+        } catch (error) {
+          Logger.warn(
+            'SeedBank',
+            `Failed to embed seed ${seed.id}:`,
+            error
+          );
+        }
+      }
+    }
+
+    if (updatedCount > 0) {
+      await this.save();
+    }
+
+    return updatedCount;
+  }
+
+  /**
+   * Get seeds sorted by semantic similarity to a query embedding.
+   * @param queryEmbedding - Query embedding vector
+   * @param topK - Number of seeds to return
+   * @returns Seeds sorted by similarity
+   */
+  async findSimilarByEmbedding(
+    queryEmbedding: number[],
+    topK: number
+  ): Promise<EmbeddedSeed[]> {
+    await this.ensureLoaded();
+
+    const scored = this.seeds
+      .filter((s) => s.embedding && s.embedding.length > 0)
+      .map((seed) => ({
+        seed,
+        similarity: cosineSimilarity(queryEmbedding, seed.embedding!),
+      }));
+
+    return scored
+      .sort((a, b) => b.similarity - a.similarity)
+      .slice(0, topK)
+      .map((s) => s.seed);
+  }
+}

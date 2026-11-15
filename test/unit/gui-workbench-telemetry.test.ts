@@ -1,0 +1,791 @@
+import { describe, expect, it } from 'vitest';
+import { latestBridgePreview, latestClarificationRequest, latestCognitiveReceipt, latestRunReceipt, summarizeImproveLane, summarizeWorkbenchBridge } from '../../gui/src/gui/workbenchTelemetry';
+
+describe('workbenchTelemetry', () => {
+  it('summarizes bridge generation progress for the workbench shell', () => {
+    const now = Date.parse('2026-04-22T12:02:00.000Z');
+    const startedAt = '2026-04-22T12:00:00.000Z';
+
+    const summary = summarizeWorkbenchBridge([
+      { type: 'generation.domain_plan', domains: ['three', 'p5'], startedAt, timeoutMinutes: 5, candidateCount: 3 },
+      { type: 'generation.attempt.started', domain: 'three', attempt: 1, attemptTotal: 2, startedAt, timeoutMinutes: 5, candidateCount: 3 },
+    ], now);
+
+    expect(summary.active).toBe(true);
+    expect(summary.phase).toBe('waiting on model');
+    expect(summary.stageTitle).toBe('waiting on model');
+    expect(summary.timelinePrimary).toBe('three');
+    expect(summary.timelineSecondary).toContain('up to');
+    expect(summary.processSteps.map((step) => [step.id, step.status])).toEqual([
+      ['intent', 'done'],
+      ['route', 'done'],
+      ['draft', 'active'],
+      ['preview', 'pending'],
+      ['ready', 'pending'],
+    ]);
+  });
+
+  it('keeps long-running model calls visibly alive in the Studio summary', () => {
+    const now = Date.parse('2026-05-08T12:03:15.000Z');
+    const startedAt = '2026-05-08T12:00:00.000Z';
+
+    const summary = summarizeWorkbenchBridge([
+      {
+        type: 'status.updated',
+        status: {
+          sessionId: 'studio-long-run',
+          provider: 'lmstudio',
+          model: 'repo-pipeline-qwen35-q8-prod',
+          roles: {
+            generator: {
+              role: 'generator',
+              provider: 'lmstudio',
+              model: 'repo-pipeline-qwen35-q8-prod',
+              source: 'active-provider',
+              multimodal: 'unknown',
+              purpose: 'Writes the creative code candidates.',
+            },
+          },
+        },
+      },
+      { type: 'generation.domain_plan', domains: ['glsl'], startedAt, timeoutMinutes: 5, candidateCount: 1, executionMode: 'draft' },
+      { type: 'generation.attempt.started', domain: 'glsl', attempt: 1, attemptTotal: 1, startedAt, timeoutMinutes: 5, candidateCount: 1, executionMode: 'draft' },
+    ], now);
+
+    expect(summary.liveRun).toMatchObject({
+      statusLabel: 'Still working',
+      providerModel: 'lmstudio / repo-pipeline-qwen35-q8-prod',
+      activeDomain: 'glsl',
+      elapsedLabel: '3m 15s',
+      etaLabel: 'up to 1m 45s left',
+      attemptLabel: 'Attempt 1 of 1',
+      timeoutLabel: '5m 0s timeout budget',
+      showSlowNotice: true,
+    });
+    expect(summary.liveRun?.detail).toContain('generating glsl');
+    expect(summary.liveRun?.reassurance).toContain('Still connected');
+  });
+
+  it('surfaces route selection and verified preview receipts in the workbench timeline', () => {
+    const summary = summarizeWorkbenchBridge([
+      { type: 'generation.intent_brief', userRequest: 'p5 fireflies', requirements: ['Primary request: p5 fireflies'], missingDetails: [], questions: [], willClarify: false },
+      { type: 'generation.route.selected', domain: 'p5', domains: ['p5', 'three'], executionMode: 'draft', candidateCount: 1, timeoutMinutes: 1 },
+      { type: 'generation.attempt.started', domain: 'p5', attempt: 1, attemptTotal: 2, executionMode: 'draft' },
+      { type: 'artifact.found', artifactLabel: 'p5 HTML preview', artifactPath: '.omx/proof/live-previews/p5.html' },
+      { type: 'preview.completed', previewType: 'image', content: 'ZmFrZQ==', imageUrl: '.omx/proof/live-previews/p5.png' },
+      { type: 'preview.verified', previewType: 'image', artifactPath: '.omx/proof/live-previews/p5.png', checks: ['html artifact written', 'screenshot rendered'] },
+    ]);
+
+    expect(summary.recentActivity.map((item) => item.label)).toContain('Medium chosen');
+    expect(summary.recentActivity.map((item) => item.label)).toContain('Preview verified');
+    expect(summary.processSteps.find((step) => step.id === 'route')).toMatchObject({
+      status: 'done',
+      detail: 'selected p5; backup domains if needed: three',
+    });
+    expect(summary.processSteps.find((step) => step.id === 'preview')).toMatchObject({
+      status: 'done',
+      detail: 'verified image preview (p5)',
+    });
+  });
+
+
+  it('builds a Studio run receipt for a p5 prompt-to-preview route without default-flow jargon', () => {
+    const events = [
+      {
+        type: 'status.updated',
+        status: {
+          sessionId: 'studio-1',
+          provider: 'openai',
+          model: 'gpt-5.4-mini',
+          roles: {
+            generator: {
+              role: 'generator',
+              provider: 'openai',
+              model: 'gpt-5.4-mini',
+              source: 'active-provider',
+              multimodal: 'unknown',
+              purpose: 'Writes the creative code candidates.',
+            },
+          },
+        },
+      },
+      { type: 'generation.intent_brief', userRequest: 'p5 fireflies', requirements: ['Primary request: p5 fireflies'], missingDetails: [], questions: [], willClarify: false },
+      { type: 'generation.route.selected', domain: 'p5', domains: ['p5'], executionMode: 'draft', candidateCount: 1, timeoutMinutes: 1 },
+      { type: 'generation.attempt.started', domain: 'p5', attempt: 1, attemptTotal: 1, executionMode: 'draft' },
+      { type: 'artifact.found', artifactLabel: 'p5 HTML preview', artifactPath: '.omx/proof/live-previews/p5-studio-1.html' },
+      {
+        type: 'preview.completed',
+        previewType: 'html',
+        content: '<!doctype html><script src="https://cdn.jsdelivr.net/npm/p5"></script>',
+        artifactPath: '.omx/proof/live-previews/p5-studio-1.html',
+        requestedDomain: 'p5',
+        generatedDomain: 'p5',
+        previewDomain: 'p5',
+      },
+      { type: 'generation.complete', iterations: 1, finalScore: 0, duration: 1200, model: 'gpt-5.4-mini', reason: 'generated artifact ready (unscored)', qualityState: 'unscored', executionMode: 'draft' },
+    ];
+
+    const summary = summarizeWorkbenchBridge(events);
+    const receipt = latestRunReceipt(events);
+    const artistCopy = [
+      ...summary.processSteps.map((step) => `${step.label} ${step.detail}`),
+      ...summary.recentActivity.map((item) => `${item.label} ${item.detail}`),
+    ].join(' ');
+
+    expect(receipt).toMatchObject({
+      heading: 'Run receipt',
+      phase: 'complete',
+      creativeDomain: 'p5',
+      provider: 'openai',
+      model: 'gpt-5.4-mini',
+      artifact: {
+        label: 'p5 HTML preview',
+        path: '.omx/proof/live-previews/p5-studio-1.html',
+      },
+      preview: {
+        type: 'html',
+        inline: true,
+        path: '.omx/proof/live-previews/p5-studio-1.html',
+      },
+    });
+    expect(receipt?.details.join(' ')).toContain('provider/model: openai / gpt-5.4-mini');
+    expect(receipt?.details.join(' ')).toContain('artifact: p5 HTML preview .omx/proof/live-previews/p5-studio-1.html');
+    expect(summary.processSteps.map((step) => step.label)).toEqual(['Brief', 'Medium', 'Generate', 'Preview', 'Ready']);
+    expect(artistCopy).not.toMatch(/harness|proof/i);
+  });
+
+
+  it('builds a stopped run receipt without inventing an artifact', () => {
+    const receipt = latestRunReceipt([
+      { type: 'generation.intent_brief', userRequest: 'p5 fireflies', requirements: ['Primary request: p5 fireflies'], missingDetails: [], questions: [], willClarify: false },
+      { type: 'generation.route.selected', domain: 'p5', domains: ['p5'], executionMode: 'draft' },
+      { type: 'generation.attempt.started', domain: 'p5', attempt: 1, attemptTotal: 1, executionMode: 'draft' },
+      { type: 'generation.cancelled', reason: 'operator-stop', cancelledAt: '2026-04-29T03:00:00.000Z', message: 'Generation stopped by operator.' },
+    ]);
+
+    expect(receipt).toMatchObject({
+      phase: 'stopped',
+      outcome: 'stopped',
+      creativeDomain: 'p5',
+    });
+    expect(receipt?.artifact).toBeUndefined();
+    expect(receipt?.preview).toBeUndefined();
+    expect(receipt?.details.join(' ')).toContain('stopped: Generation stopped by operator.');
+  });
+
+  it('builds a failed run receipt with provider provenance and no fake artifact', () => {
+    const receipt = latestRunReceipt([
+      { type: 'generation.route.selected', domain: 'hydra', domains: ['hydra'], executionMode: 'draft' },
+      { type: 'generation.attempt.started', domain: 'hydra', attempt: 1, attemptTotal: 1, executionMode: 'draft' },
+      {
+        type: 'generation.attempt.failed',
+        domain: 'hydra',
+        attempt: 1,
+        attemptTotal: 1,
+        error: 'LLM generation failed: OpenAI API error 429: rate limited',
+        provider: 'openai',
+        model: 'gpt-5.4-mini',
+        endpoint: 'https://api.openai.com/v1/chat/completions',
+        statusCode: 429,
+        retryable: true,
+        responseBody: '{"error":"rate limited"}',
+      },
+    ]);
+
+    expect(receipt).toMatchObject({
+      phase: 'fallback',
+      outcome: 'failed',
+      creativeDomain: 'hydra',
+      provider: 'openai',
+      model: 'gpt-5.4-mini',
+      failure: {
+        message: 'LLM generation failed: OpenAI API error 429: rate limited',
+        provider: 'openai',
+        model: 'gpt-5.4-mini',
+        endpoint: 'https://api.openai.com/v1/chat/completions',
+        statusCode: 429,
+        retryable: true,
+      },
+    });
+    expect(receipt?.artifact).toBeUndefined();
+    expect(receipt?.preview).toBeUndefined();
+    expect(receipt?.details.join(' ')).toContain('HTTP 429');
+  });
+
+  it('does not reuse an older artifact as the current artifact after a later failure', () => {
+    const receipt = latestRunReceipt([
+      { type: 'generation.route.selected', domain: 'p5', domains: ['p5'], executionMode: 'draft' },
+      { type: 'artifact.found', artifactLabel: 'p5 HTML preview', artifactPath: '.omx/proof/live-previews/old.html' },
+      { type: 'preview.completed', previewType: 'html', content: '<html></html>', artifactPath: '.omx/proof/live-previews/old.html', previewDomain: 'p5' },
+      { type: 'generation.complete', iterations: 1, finalScore: 0, duration: 1000, model: 'qwen', reason: 'ready', executionMode: 'draft' },
+      { type: 'generation.route.selected', domain: 'hydra', domains: ['hydra'], executionMode: 'draft' },
+      { type: 'generation.attempt.started', domain: 'hydra', attempt: 1, attemptTotal: 1, executionMode: 'draft' },
+      { type: 'generation.attempt.failed', domain: 'hydra', attempt: 1, attemptTotal: 1, error: 'provider down', provider: 'openai', model: 'gpt-5.4-mini' },
+    ]);
+
+    expect(receipt).toMatchObject({ outcome: 'failed', creativeDomain: 'hydra' });
+    expect(receipt?.artifact).toBeUndefined();
+    expect(receipt?.preview).toBeUndefined();
+  });
+
+  it('links revision receipts back to the prior artifact', () => {
+    const receipt = latestRunReceipt([
+      {
+        type: 'generation.receipt.linked',
+        revisionKind: 'polish',
+        priorPhase: 'complete',
+        priorDomain: 'p5',
+        priorArtifactLabel: 'p5 HTML preview',
+        priorArtifactPath: '.omx/proof/live-previews/p5-original.html',
+        priorPreviewType: 'html',
+      },
+      { type: 'generation.route.selected', domain: 'p5', domains: ['p5'], executionMode: 'prove' },
+      { type: 'generation.attempt.started', domain: 'p5', attempt: 1, attemptTotal: 1, executionMode: 'prove' },
+      { type: 'artifact.found', artifactLabel: 'p5 HTML preview', artifactPath: '.omx/proof/live-previews/p5-polished.html' },
+      { type: 'preview.completed', previewType: 'html', content: '<html></html>', artifactPath: '.omx/proof/live-previews/p5-polished.html', previewDomain: 'p5' },
+      { type: 'generation.complete', iterations: 1, finalScore: 0.82, duration: 1200, model: 'qwen', reason: 'accepted', qualityState: 'scored', executionMode: 'prove' },
+    ]);
+
+    expect(receipt).toMatchObject({
+      outcome: 'completed',
+      prior: {
+        revisionKind: 'polish',
+        phase: 'complete',
+        creativeDomain: 'p5',
+        artifact: {
+          label: 'p5 HTML preview',
+          path: '.omx/proof/live-previews/p5-original.html',
+        },
+        previewType: 'html',
+      },
+    });
+    expect(receipt?.details.join(' ')).toContain('prior polish: p5 HTML preview .omx/proof/live-previews/p5-original.html');
+  });
+
+  it('surfaces provider failure provenance in workbench activity', () => {
+    const summary = summarizeWorkbenchBridge([
+      { type: 'generation.intent_brief', userRequest: 'hydra storm', requirements: ['Primary request: hydra storm'], missingDetails: [], questions: [], willClarify: false },
+      { type: 'generation.route.selected', domain: 'hydra', domains: ['hydra'], executionMode: 'draft', candidateCount: 1, timeoutMinutes: 1 },
+      { type: 'generation.attempt.started', domain: 'hydra', attempt: 1, attemptTotal: 1, executionMode: 'draft' },
+      {
+        type: 'generation.attempt.failed',
+        domain: 'hydra',
+        attempt: 1,
+        attemptTotal: 1,
+        error: 'LLM generation failed: OpenAI API error 429: rate limited',
+        provider: 'openai',
+        model: 'gpt-5.4-mini',
+        endpoint: 'https://api.openai.com/v1/chat/completions',
+        statusCode: 429,
+        retryable: true,
+        responseBody: '{"error":"rate limited"}',
+      },
+    ]);
+
+    const latest = summary.recentActivity.at(-1);
+    expect(latest).toMatchObject({ label: 'Provider failure', status: 'failed' });
+    expect(latest?.detail).toContain('openai / gpt-5.4-mini');
+    expect(latest?.detail).toContain('https://api.openai.com/v1/chat/completions');
+    expect(latest?.detail).toContain('HTTP 429');
+    expect(latest?.detail).toContain('retryable');
+    expect(latest?.detail).toContain('body: {"error":"rate limited"}');
+    expect(summary.active).toBe(false);
+    expect(summary.processSteps.find((step) => step.id === 'draft')).toMatchObject({ status: 'failed' });
+    expect(summary.processSteps.find((step) => step.id === 'ready')).toMatchObject({
+      status: 'failed',
+      detail: 'stopped before preview; use Try again, Polish safely, or Switch medium',
+    });
+    expect(summary.humanReview.checks.find((check) => check.label === 'Machine blockers')?.detail).toContain('HTTP 429');
+  });
+
+  it('treats failed run lifecycle events as visible recovery receipts', () => {
+    const events = [
+      { type: 'generation.route.selected', domain: 'glsl', domains: ['glsl'], executionMode: 'draft', candidateCount: 1, timeoutMinutes: 1 },
+      { type: 'generation.attempt.started', domain: 'glsl', attempt: 1, attemptTotal: 1, executionMode: 'draft' },
+      {
+        type: 'run.lifecycle',
+        run: {
+          runId: 'run-1',
+          kind: 'creative',
+          phase: 'failed',
+          label: 'Creative draft needs recovery',
+          startedAt: '2026-05-06T12:00:00.000Z',
+          updatedAt: '2026-05-06T12:01:00.000Z',
+          failedAt: '2026-05-06T12:01:00.000Z',
+          outcome: 'failed',
+          error: "GLSL validation failed: Undefined function 'utilities()'",
+          executionMode: 'draft',
+          provider: 'openai',
+          model: 'gpt-5.4-mini',
+        },
+      },
+    ];
+
+    const summary = summarizeWorkbenchBridge(events);
+    const receipt = latestRunReceipt(events);
+
+    expect(summary.processSteps.find((step) => step.id === 'draft')).toMatchObject({
+      status: 'failed',
+      detail: expect.stringContaining("Undefined function 'utilities()'"),
+    });
+    expect(receipt).toMatchObject({
+      outcome: 'failed',
+      creativeDomain: 'glsl',
+      failure: {
+        message: "GLSL validation failed: Undefined function 'utilities()'",
+        provider: 'openai',
+        model: 'gpt-5.4-mini',
+      },
+    });
+  });
+
+  it('does not imply a completed explicit p5 draft fell through to another generator', () => {
+    const summary = summarizeWorkbenchBridge([
+      { type: 'generation.intent_brief', userRequest: 'p5 fireflies', requirements: ['Primary request: p5 fireflies'], missingDetails: [], questions: [], willClarify: false },
+      { type: 'generation.route.selected', domain: 'p5', domains: ['p5'], executionMode: 'draft', candidateCount: 1, timeoutMinutes: 1 },
+      { type: 'generation.domain_plan', domains: ['p5'], executionMode: 'draft', candidateCount: 1, timeoutMinutes: 1 },
+      { type: 'generation.attempt.started', domain: 'p5', attempt: 1, attemptTotal: 1, executionMode: 'draft' },
+      { type: 'artifact.found', artifactLabel: 'p5 HTML preview', artifactPath: '.omx/proof/live-previews/p5.html' },
+      { type: 'preview.completed', previewType: 'image', content: 'ZmFrZQ==', imageUrl: '.omx/proof/live-previews/p5.png' },
+      { type: 'generation.complete', finalScore: 0, duration: 1200, model: 'GLM-4.5-air', reason: 'draft artifact ready', executionMode: 'draft' },
+    ]);
+
+    expect(summary.processSteps.find((step) => step.id === 'route')).toMatchObject({
+      status: 'done',
+      detail: 'selected p5; no backup domain used',
+    });
+    expect(summary.processSteps.find((step) => step.id === 'draft')).toMatchObject({
+      status: 'done',
+      detail: 'preview ready: selected p5; no backup used',
+    });
+    expect(summary.processSteps.map((step) => step.detail).join(' ')).not.toMatch(/fallback/i);
+  });
+
+  it('keeps completed draft routing honest when a backup domain actually succeeds', () => {
+    const events = [
+      { type: 'generation.intent_brief', userRequest: 'fireflies', requirements: ['Primary request: fireflies'], missingDetails: [], questions: [], willClarify: false },
+      { type: 'generation.route.selected', domain: 'p5', domains: ['p5', 'three'], executionMode: 'draft', candidateCount: 1, timeoutMinutes: 1 },
+      { type: 'generation.domain_plan', domains: ['p5', 'three'], executionMode: 'draft', candidateCount: 1, timeoutMinutes: 1 },
+      { type: 'generation.attempt.started', domain: 'p5', attempt: 1, attemptTotal: 2, executionMode: 'draft' },
+      { type: 'generation.attempt.failed', domain: 'p5', attempt: 1, attemptTotal: 2, error: 'Generation produced no code' },
+      { type: 'generation.attempt.started', domain: 'three', attempt: 2, attemptTotal: 2, executionMode: 'draft' },
+      { type: 'artifact.found', artifactLabel: 'three HTML preview', artifactPath: '.omx/proof/live-previews/three.html' },
+      { type: 'preview.completed', previewType: 'image', content: 'ZmFrZQ==', imageUrl: '.omx/proof/live-previews/three.png' },
+      { type: 'generation.complete', finalScore: 0, duration: 1200, model: 'GLM-4.5-air', reason: 'draft artifact ready', executionMode: 'draft' },
+    ];
+    const summary = summarizeWorkbenchBridge(events);
+    const receipt = latestRunReceipt(events);
+
+    expect(summary.processSteps.find((step) => step.id === 'route')).toMatchObject({
+      status: 'done',
+      detail: 'selected three; backup domain used after p5 did not complete',
+    });
+    expect(summary.processSteps.find((step) => step.id === 'draft')).toMatchObject({
+      status: 'done',
+      detail: 'preview ready: selected three; backup used',
+    });
+    expect(receipt).toMatchObject({
+      outcome: 'completed',
+      creativeDomain: 'three',
+    });
+    expect(receipt?.failure).toBeUndefined();
+    expect(receipt?.details.join(' ')).toContain('recovered failures: Generation produced no code');
+  });
+
+  it('does not report backup usage without a failed attempt event', () => {
+    const summary = summarizeWorkbenchBridge([
+      { type: 'generation.intent_brief', userRequest: 'three orbit sculpture', requirements: ['Primary request: three orbit sculpture'], missingDetails: [], questions: [], willClarify: false },
+      { type: 'generation.route.selected', domain: 'three', domains: ['p5', 'three'], executionMode: 'draft', candidateCount: 1, timeoutMinutes: 1 },
+      { type: 'generation.domain_plan', domains: ['p5', 'three'], executionMode: 'draft', candidateCount: 1, timeoutMinutes: 1 },
+      { type: 'generation.attempt.started', domain: 'three', attempt: 1, attemptTotal: 2, executionMode: 'draft' },
+      { type: 'artifact.found', artifactLabel: 'three HTML preview', artifactPath: '.omx/proof/live-previews/three.html' },
+      { type: 'preview.completed', previewType: 'image', content: 'ZmFrZQ==', imageUrl: '.omx/proof/live-previews/three.png' },
+      { type: 'generation.complete', finalScore: 0, duration: 1200, model: 'GLM-4.5-air', reason: 'draft artifact ready', executionMode: 'draft' },
+    ]);
+
+    expect(summary.processSteps.find((step) => step.id === 'route')).toMatchObject({
+      status: 'done',
+      detail: 'selected three; no backup domain used',
+    });
+    expect(summary.processSteps.find((step) => step.id === 'draft')).toMatchObject({
+      status: 'done',
+      detail: 'preview ready: selected three; no backup used',
+    });
+  });
+
+  it('does not treat an empty event history as disconnected', () => {
+    const summary = summarizeWorkbenchBridge([]);
+
+    expect(summary.phase).toBe('idle');
+    expect(summary.stageTitle).toBe('ready');
+    expect(summary.processSteps.find((step) => step.id === 'ready')).toMatchObject({
+      status: 'pending',
+      detail: 'not ready yet',
+    });
+  });
+
+  it('marks stopped runs as inactive and visible in the timeline', () => {
+    const summary = summarizeWorkbenchBridge([
+      { type: 'generation.intent_brief', userRequest: 'fireflies', requirements: ['Primary request: fireflies'], missingDetails: [], questions: [], willClarify: false },
+      { type: 'generation.route.selected', domain: 'p5', domains: ['p5'], executionMode: 'draft' },
+      { type: 'generation.attempt.started', domain: 'p5', attempt: 1, attemptTotal: 1, executionMode: 'draft' },
+      { type: 'generation.cancelled', reason: 'operator-stop', cancelledAt: '2026-04-29T03:00:00.000Z' },
+    ]);
+
+    expect(summary.active).toBe(false);
+    expect(summary.phase).toBe('stopped');
+    expect(summary.stageTitle).toBe('stopped');
+    expect(summary.recentActivity.at(-1)).toMatchObject({
+      label: 'Stopped',
+      status: 'failed',
+    });
+    expect(summary.processSteps.find((step) => step.id === 'ready')).toMatchObject({
+      status: 'failed',
+      detail: 'stopped by operator',
+    });
+  });
+
+  it('derives a visible stopped receipt when status refresh is the only terminal signal', () => {
+    const events = [
+      { type: 'generation.intent_brief', userRequest: 'fireflies', requirements: ['Primary request: fireflies'], missingDetails: [], questions: [], willClarify: false },
+      { type: 'generation.route.selected', domain: 'p5', domains: ['p5'], executionMode: 'draft' },
+      { type: 'generation.attempt.started', domain: 'p5', attempt: 1, attemptTotal: 1, executionMode: 'draft' },
+      {
+        type: 'run.lifecycle',
+        sessionId: 'studio-stop-1',
+        run: {
+          runId: 'run-stop-1',
+          kind: 'creative',
+          phase: 'failed',
+          label: 'Generation stopped',
+          startedAt: '2026-05-07T20:30:00.000Z',
+          updatedAt: '2026-05-07T20:30:02.000Z',
+          failedAt: '2026-05-07T20:30:02.000Z',
+          outcome: 'cancelled',
+          error: 'Generation stopped by operator.',
+          executionMode: 'draft',
+          provider: 'lmstudio',
+          model: 'repo-pipeline-qwen35-q8-prod',
+        },
+      },
+    ];
+
+    const summary = summarizeWorkbenchBridge(events);
+    const receipt = latestRunReceipt(events);
+
+    expect(summary.active).toBe(false);
+    expect(summary.phase).toBe('stopped');
+    expect(summary.processSteps.find((step) => step.id === 'ready')).toMatchObject({
+      status: 'failed',
+      detail: 'stopped by operator',
+    });
+    expect(receipt).toMatchObject({
+      phase: 'stopped',
+      outcome: 'stopped',
+      creativeDomain: 'p5',
+      provider: 'lmstudio',
+      model: 'repo-pipeline-qwen35-q8-prod',
+    });
+    expect(receipt?.details.join(' ')).toContain('stopped: Generation stopped by operator.');
+    expect(receipt?.artifact).toBeUndefined();
+    expect(receipt?.preview).toBeUndefined();
+  });
+
+  it('surfaces missing previews and disconnected streams instead of pretending the stage is blank', () => {
+    const summary = summarizeWorkbenchBridge([
+      { type: 'generation.route.selected', domain: 'three', domains: ['three'], executionMode: 'draft' },
+      { type: 'artifact.found', artifactLabel: 'three HTML preview', artifactPath: '.omx/proof/live-previews/three.html' },
+      { type: 'preview.missing', previewType: 'image', reason: 'screenshot render failed', artifactPath: '.omx/proof/live-previews/three.html' },
+      { type: 'stream.disconnected', message: 'Workbench event stream disconnected; create a new session.' },
+    ]);
+
+    expect(summary.active).toBe(false);
+    expect(summary.phase).toBe('disconnected');
+    expect(summary.stageTitle).toBe('disconnected');
+    expect(summary.stageSubtitle).toContain('event stream disconnected');
+    expect(summary.processSteps.find((step) => step.id === 'preview')).toMatchObject({
+      status: 'failed',
+      detail: 'missing image preview: screenshot render failed',
+    });
+    expect(summary.recentActivity.map((item) => item.label)).toContain('Preview missing');
+    expect(summary.recentActivity.map((item) => item.label)).toContain('Disconnected');
+  });
+
+  it('does not latch a recovered SSE disconnect after later bridge events arrive', () => {
+    const summary = summarizeWorkbenchBridge([
+      { type: 'generation.route.selected', domain: 'three', domains: ['three'], executionMode: 'draft' },
+      { type: 'stream.disconnected', message: 'Workbench event stream disconnected; create a new session.' },
+      { type: 'preview.completed', previewType: 'code', content: 'function setup() {}' },
+      { type: 'generation.complete', finalScore: 0, duration: 1200, model: 'qwen', reason: 'draft artifact ready', executionMode: 'draft' },
+    ]);
+
+    expect(summary.active).toBe(false);
+    expect(summary.phase).toBe('complete');
+    expect(summary.stageTitle).toBe('complete');
+    expect(summary.stageSubtitle).not.toContain('event stream disconnected');
+    expect(summary.processSteps.find((step) => step.id === 'ready')).toMatchObject({
+      status: 'done',
+      detail: 'preview ready; waiting for your revise/new variation/polish choice',
+    });
+  });
+
+  it('surfaces intent brief and tool activity in the default timeline summary', () => {
+    const summary = summarizeWorkbenchBridge([
+      {
+        type: 'generation.intent_brief',
+        userRequest: 'make a purple alien dancing on a 4d flower',
+        requirements: ['Primary request: make a purple alien dancing on a 4d flower'],
+        missingDetails: [],
+        questions: [],
+        willClarify: false,
+      },
+      {
+        type: 'tool.started',
+        toolName: 'generator',
+        displayLabel: 'Generating 3 svg candidates',
+      },
+      {
+        type: 'generation.reasoning_trace',
+        source: 'generator',
+        phase: 'generator-thinking',
+        thought: 'The selected generator focused on the flower form.',
+      },
+    ]);
+
+    expect(summary.recentActivity.map((item) => item.label)).toEqual(['Creative brief', 'generator', 'generator Notes: generator-thinking']);
+    expect(summary.recentActivity[0].detail).toContain('purple alien');
+    expect(summary.timelineSecondary).toContain('The selected generator focused');
+  });
+
+  it('marks clarification requests as active work instead of silently generating', () => {
+    const summary = summarizeWorkbenchBridge([
+      {
+        type: 'generation.intent_brief',
+        userRequest: 'make it cooler',
+        requirements: ['Primary request: make it cooler'],
+        missingDetails: ['subject'],
+        questions: ['What should be cooler?'],
+        willClarify: true,
+      },
+      {
+        type: 'generation.clarification_needed',
+        questions: ['What should be cooler?'],
+        reason: 'Prompt is vague.',
+      },
+    ]);
+
+    expect(summary.recentActivity.at(-1)?.status).toBe('needs-input');
+    expect(summary.recentActivity.at(-1)?.detail).toContain('What should be cooler');
+    expect(summary.phase).toBe('clarifying intent');
+    expect(summary.processSteps[0]).toMatchObject({
+      id: 'intent',
+      status: 'needs-input',
+      detail: 'needs answer',
+    });
+  });
+
+  it('keeps the latest unresolved clarification available for the workbench form', () => {
+    const request = latestClarificationRequest([
+      {
+        type: 'generation.intent_brief',
+        userRequest: 'icebergs',
+        requirements: ['Primary request: icebergs'],
+        missingDetails: ['subject'],
+        questions: ['What is the main subject?'],
+        willClarify: true,
+      },
+      {
+        type: 'generation.clarification_needed',
+        questions: ['What is the main subject?'],
+        reason: 'Prompt is vague.',
+      },
+    ]);
+
+    expect(request).toEqual({
+      question: 'What is the main subject?',
+      reason: 'Prompt is vague.',
+    });
+  });
+
+  it('clears clarification once generation has moved on', () => {
+    const request = latestClarificationRequest([
+      {
+        type: 'generation.clarification_needed',
+        questions: ['What is the main subject?'],
+        reason: 'Prompt is vague.',
+      },
+      { type: 'generation.domain_plan', domains: ['three'] },
+    ]);
+
+    expect(request).toBeNull();
+  });
+
+  it('surfaces stage timing receipts after a draft run completes', () => {
+    const summary = summarizeWorkbenchBridge([
+      { type: 'generation.domain_plan', domains: ['three'], startedAt: '2026-04-22T12:00:00.000Z', timeoutMinutes: 1, candidateCount: 1, executionMode: 'draft' },
+      { type: 'generation.attempt.started', domain: 'three', attempt: 1, attemptTotal: 1, startedAt: '2026-04-22T12:00:05.000Z', timeoutMinutes: 1, candidateCount: 1, executionMode: 'draft' },
+      { type: 'preview.completed', previewType: 'code', content: 'function setup() {}', receivedAt: Date.parse('2026-04-22T12:00:09.000Z') },
+      { type: 'generation.complete', finalScore: 0, duration: 9000, model: 'qwen', reason: 'draft artifact ready (unscored)', qualityState: 'unscored', executionMode: 'draft', receivedAt: Date.parse('2026-04-22T12:00:09.000Z') },
+    ]);
+
+    expect(summary.recentActivity.at(-1)?.label).toBe('Preview ready');
+    expect(summary.active).toBe(false);
+    expect(summary.stageTimings).toEqual([
+      { label: 'Plan', durationLabel: '5s' },
+      { label: 'Generate', durationLabel: '4s' },
+    ]);
+    expect(summary.processSteps.map((step) => step.status)).toEqual(['done', 'done', 'done', 'done', 'done']);
+  });
+
+  // ADV-MISO-001 GUI: qualityState 'degraded' must never look like a real score.
+  it('renders generation.complete qualityState degraded as "degraded (no real score)"', () => {
+    const summary = summarizeWorkbenchBridge([
+      { type: 'generation.domain_plan', domains: ['p5'], startedAt: '2026-04-22T12:00:00.000Z', timeoutMinutes: 1, candidateCount: 1, executionMode: 'prove' },
+      { type: 'generation.attempt.started', domain: 'p5', attempt: 1, attemptTotal: 1, startedAt: '2026-04-22T12:00:01.000Z', timeoutMinutes: 1, candidateCount: 1, executionMode: 'prove' },
+      {
+        type: 'generation.complete',
+        iterations: 1,
+        finalScore: 0.61,
+        duration: 1200,
+        model: 'test-model',
+        reason: 'accepted',
+        qualityState: 'degraded',
+        executionMode: 'prove',
+        evaluationConfidence: 0,
+        evaluationFailureClass: 'scorer',
+        receivedAt: Date.parse('2026-04-22T12:00:02.000Z'),
+      },
+    ]);
+
+    const completeActivity = summary.recentActivity.find(item => item.label === 'Complete (degraded)');
+    expect(completeActivity).toEqual({
+      label: 'Complete (degraded)',
+      detail: 'degraded (no real score)',
+      status: 'warning',
+    });
+    // Must not present the fallback numeric score as a real fitness result.
+    expect(summary.recentActivity.some(item =>
+      item.label === 'Complete' && String(item.detail).includes('Score 0.61'),
+    )).toBe(false);
+  });
+
+  it('surfaces prove-mode generation, evaluation, and render timings separately', () => {
+    const summary = summarizeWorkbenchBridge([
+      { type: 'generation.domain_plan', domains: ['three'], startedAt: '2026-04-22T12:00:00.000Z', timeoutMinutes: 3, candidateCount: 1, executionMode: 'prove' },
+      { type: 'generation.attempt.started', domain: 'three', attempt: 1, attemptTotal: 1, startedAt: '2026-04-22T12:00:02.000Z', timeoutMinutes: 3, candidateCount: 1, executionMode: 'prove' },
+      {
+        type: 'generation.iteration',
+        iteration: 1,
+        score: 0.84,
+        code: 'function setup() {}',
+        stageTimings: [
+          { label: 'Generate', durationMs: 1800 },
+          { label: 'Evaluate', durationMs: 700 },
+        ],
+      },
+      { type: 'generation.complete', finalScore: 0.84, duration: 2500, model: 'qwen', reason: 'accepted', qualityState: 'scored', executionMode: 'prove', receivedAt: Date.parse('2026-04-22T12:00:05.000Z') },
+      { type: 'preview.completed', previewType: 'image', content: 'ZmFrZQ==', imageUrl: '/tmp/render.png', receivedAt: Date.parse('2026-04-22T12:00:06.200Z') },
+    ]);
+
+    expect(summary.stageTimings).toEqual([
+      { label: 'Plan', durationLabel: '2s' },
+      { label: 'Generate', durationLabel: '1.8s' },
+      { label: 'Evaluate', durationLabel: '700ms' },
+      { label: 'Render', durationLabel: '1.2s' },
+    ]);
+  });
+
+  it('extracts the latest image preview as a browser-renderable data URL', () => {
+    const preview = latestBridgePreview([
+      { type: 'preview.completed', previewType: 'code', content: 'function setup() {}' },
+      { type: 'preview.completed', previewType: 'image', content: 'ZmFrZS1wbmc=', previewDomain: 'p5', imageUrl: '/tmp/render.png' },
+    ]);
+
+    expect(preview?.type).toBe('image');
+    expect(preview?.src).toBe('data:image/png;base64,ZmFrZS1wbmc=');
+    // Caption is the creative domain, never the raw imageUrl path.
+    expect(preview?.label).toBe('p5 preview');
+    expect(preview?.label).not.toMatch(/\//);
+  });
+
+  it('uses the newest preview event instead of an older image preview', () => {
+    const preview = latestBridgePreview([
+      { type: 'preview.completed', previewType: 'image', content: 'b2xkLWltYWdl', imageUrl: '/tmp/old.png' },
+      { type: 'preview.completed', previewType: 'code', content: 'function setup() {}' },
+    ]);
+
+    expect(preview?.type).toBe('code');
+    expect(preview?.code).toContain('function setup');
+  });
+
+  it('extracts inline HTML and music previews with a clean caption — never the raw artifact path', () => {
+    const htmlPreview = latestBridgePreview([
+      { type: 'preview.completed', previewType: 'html', content: '<!doctype html><html><body>Hydra</body></html>', previewDomain: 'hydra', artifactPath: '/tmp/hydra.html' },
+    ]);
+    const musicPreview = latestBridgePreview([
+      { type: 'preview.completed', previewType: 'music', content: '<!doctype html><html><body>Tone</body></html>', artifactPath: '/tmp/tone.html' },
+    ]);
+
+    // Caption is the creative domain when known; the home-dir file path must never leak into the UI.
+    expect(htmlPreview).toMatchObject({ type: 'html', content: expect.stringContaining('Hydra'), label: 'hydra preview' });
+    expect(htmlPreview?.label).not.toMatch(/\//);
+    // No previewDomain on the event -> clean fallback, still never the path.
+    expect(musicPreview).toMatchObject({ type: 'music', content: expect.stringContaining('Tone'), label: 'Generated music preview' });
+    expect(musicPreview?.label).not.toMatch(/\//);
+  });
+
+  it('summarizes self-healing improvement proposal events for the Improve lane', () => {
+    const lane = summarizeImproveLane([
+      {
+        type: 'self_healing.proposal',
+        runType: 'improve',
+        proposalId: 'improve-preview-latency',
+        title: 'Reduce preview time',
+        category: 'performance optimization',
+        score: 88,
+        confidence: 'high',
+        risk: 'low',
+        measurableTarget: 'Reduce time to preview below 10s',
+        expectedVerification: ['pnpm test -- gui-workbench-telemetry'],
+      },
+    ]);
+
+    expect(lane.heading).toBe('Improve');
+    expect(lane.proposals).toHaveLength(1);
+    expect(lane.proposals[0]).toEqual(expect.objectContaining({
+      id: 'improve-preview-latency',
+      category: 'performance optimization',
+      score: 88,
+      measurableTarget: 'Reduce time to preview below 10s',
+    }));
+  });
+
+  it('extracts detailed cognitive receipt cards for what Sinter learned', () => {
+    const receipt = latestCognitiveReceipt([
+      {
+        type: 'generation.cognitive_receipt',
+        loop: 'creative',
+        receipts: [
+          { organ: 'memory', status: 'observed', detail: 'Stored generation episode ep-123 for future retrieval.' },
+          { organ: 'compost', status: 'observed', detail: 'Added generated artifact to compost heap.' },
+          { organ: 'dreaming', status: 'pending', detail: 'No dream slot was reclaimable; queued dreams must run before retry.' },
+        ],
+      },
+    ]);
+
+    expect(receipt?.heading).toBe('What Sinter learned');
+    expect(receipt?.items).toEqual([
+      { organ: 'memory', status: 'observed', detail: 'Stored generation episode ep-123 for future retrieval.' },
+      { organ: 'compost', status: 'observed', detail: 'Added generated artifact to compost heap.' },
+      { organ: 'dreaming', status: 'pending', detail: 'No dream slot was reclaimable; queued dreams must run before retry.' },
+    ]);
+    expect(receipt?.writeBackStatus).toBe('partial');
+    expect(receipt?.writeBackItems).toEqual([
+      { organ: 'memory', status: 'observed', detail: 'Stored generation episode ep-123 for future retrieval.' },
+      { organ: 'compost', status: 'observed', detail: 'Added generated artifact to compost heap.' },
+      { organ: 'dreaming', status: 'pending', detail: 'No dream slot was reclaimable; queued dreams must run before retry.' },
+    ]);
+    expect(receipt?.writeBackSummary).toContain('dreaming pending');
+  });
+
+});

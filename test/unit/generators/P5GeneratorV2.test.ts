@@ -1,0 +1,298 @@
+/**
+ * P5GeneratorV2 unit tests.
+ * Covers constructor, validateOutput, sound detection, and error paths.
+ */
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+const { mockIsConfigured, mockGenerate, mockGetConfig, LLMClientMock } = vi.hoisted(() => {
+  const mockIsConfigured = vi.fn().mockReturnValue(false);
+  const mockGenerate = vi.fn();
+  const mockGetConfig = vi.fn().mockReturnValue({ model: 'test-model', baseUrl: 'http://test', role: 'generator' });
+  const LLMClientMock = vi.fn(function(this: any) {
+    this.generate = mockGenerate;
+    this.generateWithToolLoop = vi.fn().mockImplementation(() =>
+      mockGenerate().then((r: any) => ({ content: r.code, toolCalls: [], success: r.success }))
+    );
+    this.getConfig = mockGetConfig;
+  });
+  (LLMClientMock as any).isConfigured = mockIsConfigured;
+  return { mockIsConfigured, mockGenerate, mockGetConfig, LLMClientMock };
+});
+
+vi.mock('../../../src/llm/LLMClient.js', () => ({
+  LLMClient: LLMClientMock,
+}));
+
+vi.mock('../../../src/config/ConfigLoader.js', () => ({
+  getEffectiveConfig: vi.fn().mockResolvedValue({ baseUrl: '', apiKey: '', model: '' }),
+}));
+
+vi.mock('../../../src/llm/PromptBuilder.js', () => ({
+  PromptBuilder: Object.assign(
+    vi.fn(function(this: any) {
+      this.build = vi.fn().mockReturnValue({ combined: 'test', system: 'sys', user: 'usr' });
+    }),
+    { loadContext: vi.fn().mockResolvedValue({}) }
+  ),
+}));
+
+vi.mock('../../../src/llm/ModelTier.js', () => ({
+  detectModelTier: vi.fn().mockReturnValue('medium'),
+  trimContext: vi.fn().mockReturnValue(''),
+}));
+
+vi.mock('../../../src/harness/HarnessMemory.js', () => ({
+  harnessMemory: {
+    getSuccessfulAdaptations: vi.fn().mockReturnValue([]),
+    getRecentEpisodes: vi.fn().mockReturnValue([]),
+    recordEpisode: vi.fn(),
+  },
+}));
+
+vi.mock('../../../src/harness/MetaHarnessIntegration.js', () => ({
+  metaHarness: {
+    onGenerationComplete: vi.fn(),
+  },
+}));
+
+import { P5GeneratorV2 } from '../../../src/generators/p5/P5GeneratorV2.js';
+import { GenerationError } from '../../../src/errors/GenerationError.js';
+
+const VALID_P5_CODE = `function setup() { createCanvas(400, 400); } function draw() { background(0); }`;
+const VALID_LLM_RESPONSE = {
+  code: VALID_P5_CODE,
+  success: true,
+  thinking: 'test thinking',
+  recoveredFromThinking: false,
+};
+
+describe('P5GeneratorV2', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetConfig.mockReturnValue({ model: 'test-model', baseUrl: 'http://test', role: 'generator' });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Constructor
+  // ---------------------------------------------------------------------------
+  describe('constructor', () => {
+    it('creates instance with no arguments', () => {
+      const gen = new P5GeneratorV2();
+      expect(gen).toBeInstanceOf(P5GeneratorV2);
+    });
+
+    it('creates instance with partial config', () => {
+      const gen = new P5GeneratorV2({ baseUrl: 'http://localhost', model: 'test' });
+      expect(gen).toBeInstanceOf(P5GeneratorV2);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Error paths
+  // ---------------------------------------------------------------------------
+  describe('error paths', () => {
+    it('throws GenerationError when LLM is not configured', async () => {
+      mockIsConfigured.mockReturnValue(false);
+      const gen = new P5GeneratorV2();
+      await expect(gen.generate('test')).rejects.toThrow(GenerationError);
+    });
+
+    it('throws with domain "p5"', async () => {
+      mockIsConfigured.mockReturnValue(false);
+      try {
+        const gen = new P5GeneratorV2();
+        await gen.generate('test');
+        expect.unreachable('Should have thrown');
+      } catch (err) {
+        const ge = err as GenerationError;
+        expect(ge.domain).toBe('p5');
+      }
+    });
+
+    it('throws when LLM returns empty code', async () => {
+      mockIsConfigured.mockReturnValue(true);
+      mockGenerate.mockResolvedValue({ code: '', success: true });
+      const gen = new P5GeneratorV2();
+      await expect(gen.generate('test')).rejects.toThrow(GenerationError);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // validateOutput via generate
+  // ---------------------------------------------------------------------------
+  describe('validateOutput (p5-specific)', () => {
+    it('accepts code with function setup()', async () => {
+      mockIsConfigured.mockReturnValue(true);
+      mockGenerate.mockResolvedValue(VALID_LLM_RESPONSE);
+      const gen = new P5GeneratorV2();
+      const result = await gen.generate('draw a circle');
+      expect(result).toBe(VALID_P5_CODE);
+    });
+
+    it('quotes bare hex color constants from local model output', async () => {
+      mockIsConfigured.mockReturnValue(true);
+      mockGenerate.mockResolvedValue({
+        code: 'const BG=#0d2031; let PRIMARY = color(243, 155, 159); function setup() { createCanvas(400, 400); background(BG); }',
+        success: true,
+      });
+      const gen = new P5GeneratorV2();
+      const result = await gen.generate('draw with launch palette');
+      expect(result).toContain("const BG='#0d2031';");
+      expect(result).toContain('let PRIMARY;');
+      expect(result).toContain('PRIMARY = color(243, 155, 159);');
+    });
+
+    it('extracts fenced p5 code from explanatory output', async () => {
+      mockIsConfigured.mockReturnValue(true);
+      mockGenerate.mockResolvedValue({
+        code: 'Reasoning first\n```javascript\nfunction setup() { createCanvas(400, 400); }\nfunction draw() { background(0); }\n```',
+        success: true,
+      });
+      const gen = new P5GeneratorV2();
+      const result = await gen.generate('draw with reasoning');
+      expect(result).toBe('function setup() { createCanvas(400, 400); }\nfunction draw() { background(0); }');
+    });
+
+    it('extracts unclosed fenced p5 code from explanatory output', async () => {
+      mockIsConfigured.mockReturnValue(true);
+      mockGenerate.mockResolvedValue({
+        code: 'Reasoning first\n```javascript\nfunction setup() { createCanvas(400, 400); }\nfunction draw() { background(0); }',
+        success: true,
+      });
+      const gen = new P5GeneratorV2();
+      const result = await gen.generate('draw with truncated fence');
+      expect(result).toBe('function setup() { createCanvas(400, 400); }\nfunction draw() { background(0); }');
+    });
+
+    it('accepts code with bare setup() call', async () => {
+      mockIsConfigured.mockReturnValue(true);
+      const bareSetupCode = 'setup(); function draw() {}';
+      mockGenerate.mockResolvedValue({ code: bareSetupCode, success: true });
+      const gen = new P5GeneratorV2();
+      const result = await gen.generate('test');
+      expect(result).toBe(bareSetupCode);
+    });
+
+    it('rejects code missing setup() function', async () => {
+      mockIsConfigured.mockReturnValue(true);
+      mockGenerate.mockResolvedValue({
+        code: 'function draw() { background(0); }',
+        success: true,
+      });
+      const gen = new P5GeneratorV2();
+      await expect(gen.generate('test')).rejects.toThrow('missing required setup()');
+    });
+
+    it('rejects placeholder ellipsis classes before preview rendering', async () => {
+      mockIsConfigured.mockReturnValue(true);
+      mockGenerate.mockResolvedValue({
+        code: 'function setup() { createCanvas(400, 400); } class Koi { ... }',
+        success: true,
+      });
+      const gen = new P5GeneratorV2();
+      await expect(gen.generate('test')).rejects.toThrow('placeholder ellipses');
+    });
+
+    it('retries instead of accepting oversized pale glow strokes that wash out screenshots', async () => {
+      mockIsConfigured.mockReturnValue(true);
+      const washedOutGlow = `
+        let rings = [];
+        function setup() {
+          createCanvas(800, 800);
+          colorMode(HSB, 360, 100, 100, 100);
+          noFill();
+        }
+        function draw() {
+          background(230, 85, 7);
+          translate(width / 2, height / 2);
+          for (let g = 5; g >= 1; g--) {
+            let gradR = 180 + g * 35;
+            let alpha = map(g, 5, 1, 4, 16);
+            stroke(200, 60, 95, alpha);
+            strokeWeight(gradR * 0.9);
+            ellipse(0, 0, gradR * 2, gradR * 2);
+          }
+        }
+      `;
+      mockGenerate
+        .mockResolvedValueOnce({ code: washedOutGlow, success: true })
+        .mockResolvedValueOnce(VALID_LLM_RESPONSE);
+
+      const gen = new P5GeneratorV2();
+      const result = await gen.generate('animated luminous contour rings');
+
+      expect(result).toBe(VALID_P5_CODE);
+      expect(mockGenerate).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Sound detection in generate
+  // ---------------------------------------------------------------------------
+  describe('sound detection', () => {
+    it('detects "sound" keyword in prompt', async () => {
+      mockIsConfigured.mockReturnValue(true);
+      mockGenerate.mockResolvedValue(VALID_LLM_RESPONSE);
+      const gen = new P5GeneratorV2();
+      // Should not throw; sound detection is informational only (logs)
+      const result = await gen.generate('sound waves visualization');
+      expect(result).toBe(VALID_P5_CODE);
+    });
+
+    it('detects "audio" keyword in prompt', async () => {
+      mockIsConfigured.mockReturnValue(true);
+      mockGenerate.mockResolvedValue(VALID_LLM_RESPONSE);
+      const gen = new P5GeneratorV2();
+      const result = await gen.generate('audio reactive sketch');
+      expect(result).toBe(VALID_P5_CODE);
+    });
+
+    it('detects "music" keyword in prompt', async () => {
+      mockIsConfigured.mockReturnValue(true);
+      mockGenerate.mockResolvedValue(VALID_LLM_RESPONSE);
+      const gen = new P5GeneratorV2();
+      const result = await gen.generate('music visualizer');
+      expect(result).toBe(VALID_P5_CODE);
+    });
+
+    it('detects "tone" keyword in prompt', async () => {
+      mockIsConfigured.mockReturnValue(true);
+      mockGenerate.mockResolvedValue(VALID_LLM_RESPONSE);
+      const gen = new P5GeneratorV2();
+      const result = await gen.generate('tone generator');
+      expect(result).toBe(VALID_P5_CODE);
+    });
+
+    it('handles prompt without sound keywords', async () => {
+      mockIsConfigured.mockReturnValue(true);
+      mockGenerate.mockResolvedValue(VALID_LLM_RESPONSE);
+      const gen = new P5GeneratorV2();
+      const result = await gen.generate('bouncing ball animation');
+      expect(result).toBe(VALID_P5_CODE);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // getTierInfo
+  // ---------------------------------------------------------------------------
+  describe('getTierInfo', () => {
+    it('returns tier info with p5 domain', () => {
+      const gen = new P5GeneratorV2();
+      const info = gen.getTierInfo();
+      expect(info.domain).toBe('p5');
+      expect(info.tier).toBe('medium');
+      expect(typeof info.budget).toBe('number');
+    });
+  });
+
+  describe('wrapForGallery', () => {
+    it('returns fenced full HTML as HTML instead of nesting it inside a script tag', () => {
+      const gen = new P5GeneratorV2();
+      const html = '<!DOCTYPE html><html><body><script>function setup(){createCanvas(10,10);}</script></body></html>';
+      const wrapped = gen.wrapForGallery(['```html', html, '```'].join('\n'));
+
+      expect(wrapped).toBe(html);
+      expect(wrapped).not.toContain('<script>\n<!DOCTYPE html>');
+    });
+  });
+});

@@ -1,0 +1,74 @@
+import { authorityRow, type ProductionAuthorityPath } from './types.js';
+
+/**
+ * Product-surface, projection, doctrine and classification authority rows.
+ * Add new rows here, one per line, instead of editing ProductionAuthorityRegistry.ts.
+ */
+export const surfaceAuthorityRows: readonly ProductionAuthorityPath[] = [
+  authorityRow(
+    'src/runtime-core/AuthoredCreativeDoctrine.ts:doctrine',
+    'doctrine',
+    'source-review-doctrine-authority',
+    'authoritative',
+  ),
+  authorityRow(
+    'src/runtime-core/CreativeInputClassification.ts:classification',
+    'classification',
+    'creative-input-classification-authority',
+    'authoritative',
+  ),
+  authorityRow(
+    'src/runtime-core/LiminalProductCommandPort.ts:product-surface',
+    'product-surface',
+    'liminal-product-command-authority',
+    'authoritative',
+  ),
+  authorityRow(
+    'src/runtime-core/CompoundCreateProofPort.ts:product-surface',
+    'product-surface',
+    'compound-create-proof-authority',
+    'authoritative',
+  ),
+  authorityRow(
+    'src/tui-bridge/TuiBridgeService.ts:product-surface',
+    'product-surface',
+    'liminal-command-submitter',
+    'authoritative',
+  ),
+  authorityRow(
+    '.quality/:projection',
+    'projection',
+    'receipt-projector',
+    'projection-only',
+  ),
+  authorityRow(
+    'src/index.ts:product-surface',
+    'product-surface',
+    'public-capability-projection',
+    'projection-only',
+  ),
+  authorityRow(
+    'src/compost/index.ts:product-surface',
+    'product-surface',
+    'compost-exploration-contract',
+    'authoritative',
+  ),
+  authorityRow(
+    'src/harness/index.ts:product-surface',
+    'product-surface',
+    'operational-memory-export',
+    'projection-only',
+  ),
+  authorityRow(
+    'src/learning/index.ts:product-surface',
+    'product-surface',
+    'governed-learning-contract',
+    'authoritative',
+  ),
+  authorityRow(
+    'src/render/index.ts:product-surface',
+    'product-surface',
+    'render-capability-projection',
+    'projection-only',
+  ),
+];

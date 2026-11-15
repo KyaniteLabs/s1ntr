@@ -1,0 +1,716 @@
+[
+ {
+  "locator": "src/llm/LLMClient.ts:provider",
+  "kind": "provider",
+  "owner": "role-and-capability-bound-transport",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/llm/ProviderFactory.ts:provider",
+  "kind": "provider",
+  "owner": "provider-adapter-factory",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/cli/LiminalAuthoritativeCreate.ts:provider",
+  "kind": "provider",
+  "owner": "liminal-effect-broker",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/cli/LiminalAuthoritativeCreate.ts:renderer",
+  "kind": "renderer",
+  "owner": "render-domain-authority",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/cli/LiminalAuthoritativeCreate.ts:evaluator",
+  "kind": "evaluator",
+  "owner": "evaluation-domain-authority",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/creative-run/OwnerReviewLifecycle.ts:review-writer",
+  "kind": "review-writer",
+  "owner": "owner-review-domain-authority",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/dreaming/research/DreamResearchController.ts:research-control",
+  "kind": "research-control",
+  "owner": "dream-research-policy-authority",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/dreaming/research/DreamKnowledgeActivation.ts:activation",
+  "kind": "activation",
+  "owner": "consolidate-activation-authority",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/learning/CreativeLabelAdmission.ts:activation",
+  "kind": "activation",
+  "owner": "creative-label-admission-authority",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/runtime-core/AuthoredCreativeDoctrine.ts:doctrine",
+  "kind": "doctrine",
+  "owner": "source-review-doctrine-authority",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/runtime-core/CreativeInputClassification.ts:classification",
+  "kind": "classification",
+  "owner": "creative-input-classification-authority",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/runtime-core/LiminalCommandFilePersistence.ts:journal",
+  "kind": "journal",
+  "owner": "operation-journal-authority",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "scripts/compact-liminal-journal.mjs:journal",
+  "kind": "journal",
+  "owner": "operation-journal-authority",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/runtime-core/LiminalProductCommandPort.ts:product-surface",
+  "kind": "product-surface",
+  "owner": "liminal-product-command-authority",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/runtime-core/CompoundCreateProofPort.ts:product-surface",
+  "kind": "product-surface",
+  "owner": "compound-create-proof-authority",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/runtime-core/LiminalOwnerReviewAuthority.ts:review-writer",
+  "kind": "review-writer",
+  "owner": "liminal-owner-review-receipt-authority",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/runtime-core/ProductionLiminalRuntime.ts:provider",
+  "kind": "provider",
+  "owner": "role-and-capability-bound-transport",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/runtime-core/ProductionLiminalRuntime.ts:renderer",
+  "kind": "renderer",
+  "owner": "render-domain-authority",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/runtime-core/ProductionLiminalRuntime.ts:journal",
+  "kind": "journal",
+  "owner": "operation-journal-authority",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/learning/QualityArchive.ts:archive",
+  "kind": "archive",
+  "owner": "exploration-archive-authority",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/harness/HarnessMemory.ts:memory",
+  "kind": "memory",
+  "owner": "operational-memory-authority",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/runtime-core/OperationalMemoryBoundary.ts:memory",
+  "kind": "memory",
+  "owner": "historical-memory-projection",
+  "disposition": "projection-only"
+ },
+ {
+  "locator": "src/compost/CompostMill.ts:compost",
+  "kind": "compost",
+  "owner": "compost-exploration-authority",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/compost/CompostProvenance.ts:compost",
+  "kind": "compost",
+  "owner": "compost-provenance-authority",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/evolution/MapElites.ts:evolution",
+  "kind": "evolution",
+  "owner": "evolution-exploration-authority",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/evolution/ExplorationDecisionAdmission.ts:evolution",
+  "kind": "evolution",
+  "owner": "exploration-decision-authority",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/routing/GeneratorBanditRouter.ts:routing",
+  "kind": "routing",
+  "owner": "routing-recommendation-authority",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/intuition/EvidenceConsolidationCoordinator.ts:activation",
+  "kind": "activation",
+  "owner": "evidence-analysis-only",
+  "disposition": "proposal-only"
+ },
+ {
+  "locator": "src/runtime-core/AutoresearchExperimentRunner.ts:source-change",
+  "kind": "source-change",
+  "owner": "autoresearch-proposal-authority",
+  "disposition": "proposal-only"
+ },
+ {
+  "locator": "src/runtime-core/ModelAssimilationGauntlet.ts:assimilation",
+  "kind": "assimilation",
+  "owner": "assimilation-recommendation-authority",
+  "disposition": "proposal-only"
+ },
+ {
+  "locator": "src/plugins/PluginLoader.ts:plugin",
+  "kind": "plugin",
+  "owner": "scoped-plugin-authority",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/autonomy/AutonomousGardener.ts:scheduler",
+  "kind": "scheduler",
+  "owner": "command-proposal-authority",
+  "disposition": "proposal-only"
+ },
+ {
+  "locator": "src/tui-bridge/TuiBridgeService.ts:product-surface",
+  "kind": "product-surface",
+  "owner": "liminal-command-submitter",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": ".quality/:projection",
+  "kind": "projection",
+  "owner": "receipt-projector",
+  "disposition": "projection-only"
+ },
+ {
+  "locator": "bin/sinter:provider",
+  "kind": "provider",
+  "owner": "legacy-role-bound-transport",
+  "disposition": "quarantined-history"
+ },
+ {
+  "locator": "bin/sinter:compost",
+  "kind": "compost",
+  "owner": "compost-exploration-authority",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "bin/sinter:scheduler",
+  "kind": "scheduler",
+  "owner": "command-proposal-authority",
+  "disposition": "proposal-only"
+ },
+ {
+  "locator": "src/aesthetic/AestheticStrategy.ts:provider",
+  "kind": "provider",
+  "owner": "legacy-role-bound-transport",
+  "disposition": "quarantined-history"
+ },
+ {
+  "locator": "src/composition/CompositionOrchestrator.ts:provider",
+  "kind": "provider",
+  "owner": "legacy-role-bound-transport",
+  "disposition": "quarantined-history"
+ },
+ {
+  "locator": "src/core/RalphLoop.ts:provider",
+  "kind": "provider",
+  "owner": "legacy-role-bound-transport",
+  "disposition": "quarantined-history"
+ },
+ {
+  "locator": "src/core/ScoringEngine.ts:provider",
+  "kind": "provider",
+  "owner": "legacy-role-bound-transport",
+  "disposition": "quarantined-history"
+ },
+ {
+  "locator": "src/generateVisuals.ts:provider",
+  "kind": "provider",
+  "owner": "legacy-role-bound-transport",
+  "disposition": "quarantined-history"
+ },
+ {
+  "locator": "src/generators/TierBasedGenerator.ts:provider",
+  "kind": "provider",
+  "owner": "legacy-role-bound-transport",
+  "disposition": "quarantined-history"
+ },
+ {
+  "locator": "src/generators/kinetic/KineticGenerator.ts:provider",
+  "kind": "provider",
+  "owner": "legacy-role-bound-transport",
+  "disposition": "quarantined-history"
+ },
+ {
+  "locator": "src/generators/p5/P5GeneratorLLM.ts:provider",
+  "kind": "provider",
+  "owner": "legacy-role-bound-transport",
+  "disposition": "quarantined-history"
+ },
+ {
+  "locator": "src/generators/tone/ToneGenerator.ts:provider",
+  "kind": "provider",
+  "owner": "legacy-role-bound-transport",
+  "disposition": "quarantined-history"
+ },
+ {
+  "locator": "src/guardrails/SemanticValidator.ts:provider",
+  "kind": "provider",
+  "owner": "legacy-role-bound-transport",
+  "disposition": "quarantined-history"
+ },
+ {
+  "locator": "src/harness/MetaHarnessIntegration.ts:provider",
+  "kind": "provider",
+  "owner": "legacy-role-bound-transport",
+  "disposition": "quarantined-history"
+ },
+ {
+  "locator": "src/improvement/requestImprovement.ts:provider",
+  "kind": "provider",
+  "owner": "legacy-role-bound-transport",
+  "disposition": "quarantined-history"
+ },
+ {
+  "locator": "src/music/generateMusic.ts:provider",
+  "kind": "provider",
+  "owner": "legacy-role-bound-transport",
+  "disposition": "quarantined-history"
+ },
+ {
+  "locator": "src/quality/GenerationRegressionHarness.ts:provider",
+  "kind": "provider",
+  "owner": "legacy-role-bound-transport",
+  "disposition": "quarantined-history"
+ },
+ {
+  "locator": "src/tui-bridge/TuiBridgeServer.ts:provider",
+  "kind": "provider",
+  "owner": "legacy-role-bound-transport",
+  "disposition": "quarantined-history"
+ },
+ {
+  "locator": "src/composition/LayerPngExporter.ts:renderer",
+  "kind": "renderer",
+  "owner": "render-observation-capability",
+  "disposition": "projection-only"
+ },
+ {
+  "locator": "src/core/RalphLoop.ts:renderer",
+  "kind": "renderer",
+  "owner": "render-observation-capability",
+  "disposition": "projection-only"
+ },
+ {
+  "locator": "src/creative-run/DreamAssimilationRun.ts:renderer",
+  "kind": "renderer",
+  "owner": "render-observation-capability",
+  "disposition": "projection-only"
+ },
+ {
+  "locator": "src/harness/tools/RenderArtifactTool.ts:renderer",
+  "kind": "renderer",
+  "owner": "render-observation-capability",
+  "disposition": "projection-only"
+ },
+ {
+  "locator": "src/learning/TasteLearningService.ts:renderer",
+  "kind": "renderer",
+  "owner": "render-observation-capability",
+  "disposition": "projection-only"
+ },
+ {
+  "locator": "src/render/HeadlessRenderer.ts:renderer",
+  "kind": "renderer",
+  "owner": "render-observation-capability",
+  "disposition": "projection-only"
+ },
+ {
+  "locator": "src/render/RenderAndScorePipeline.ts:renderer",
+  "kind": "renderer",
+  "owner": "render-observation-capability",
+  "disposition": "projection-only"
+ },
+ {
+  "locator": "scripts/audition-379.mjs:provider",
+  "kind": "provider",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "scripts/campaign-cloud.ts:provider",
+  "kind": "provider",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "scripts/campaign-local-resume.ts:provider",
+  "kind": "provider",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "scripts/campaign-local.ts:provider",
+  "kind": "provider",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "scripts/campaign-ollama-cloud.ts:provider",
+  "kind": "provider",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "scripts/debug-minimax.ts:provider",
+  "kind": "provider",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "scripts/dogfood-cloud-agent-b.ts:provider",
+  "kind": "provider",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "scripts/dogfood-cloud.ts:provider",
+  "kind": "provider",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "scripts/dogfood-glm.ts:provider",
+  "kind": "provider",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "scripts/dogfood-kimi.ts:provider",
+  "kind": "provider",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "scripts/dogfood-lmstudio.ts:provider",
+  "kind": "provider",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "scripts/dogfood-ollama-agent-a.ts:provider",
+  "kind": "provider",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "scripts/dogfood-ollama-agent-b.ts:provider",
+  "kind": "provider",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "scripts/dogfood-ollama.ts:provider",
+  "kind": "provider",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "scripts/dogfood-role-eval.ts:provider",
+  "kind": "provider",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "scripts/proof/creative-copilot-proof.ts:provider",
+  "kind": "provider",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "scripts/proof/live-provider-smoke.ts:provider",
+  "kind": "provider",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "scripts/proof/user-surface-observability.ts:provider",
+  "kind": "provider",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "scripts/resume-dogfood-campaign.ts:provider",
+  "kind": "provider",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "scripts/run-dogfood-campaign.ts:provider",
+  "kind": "provider",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "scripts/smoke-test-harness.mjs:provider",
+  "kind": "provider",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "scripts/testing/test-glsl-debug.ts:provider",
+  "kind": "provider",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "scripts/testing/test-llm-client.ts:provider",
+  "kind": "provider",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "scripts/testing/test-qwen-models.ts:provider",
+  "kind": "provider",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "scripts/ultra-supreme-dogfood.ts:provider",
+  "kind": "provider",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "scripts/ultra-supreme-lmstudio.ts:provider",
+  "kind": "provider",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "scripts/utils/generate-single.ts:provider",
+  "kind": "provider",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "scripts/quality/rescore-tops.mjs:renderer",
+  "kind": "renderer",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "scripts/p1-art-render-score.mjs:renderer",
+  "kind": "renderer",
+  "owner": "render-observation-capability",
+  "disposition": "projection-only"
+ },
+ {
+  "locator": "scripts/quality/wave8-transfer-oracle-live.ts:provider",
+  "kind": "provider",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "scripts/quality/wave8-transfer-oracle-live.ts:renderer",
+  "kind": "renderer",
+  "owner": "render-observation-capability",
+  "disposition": "projection-only"
+ },
+ {
+  "locator": "src/cli/LiminalAuthoritativeCreate.ts:journal",
+  "kind": "journal",
+  "owner": "operation-journal-authority",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/cli/LiminalRenderedEvidenceProof.ts:journal",
+  "kind": "journal",
+  "owner": "test-proof-journal",
+  "disposition": "projection-only"
+ },
+ {
+  "locator": "src/cli/LiminalProductionCompose.ts:provider",
+  "kind": "provider",
+  "owner": "liminal-effect-broker",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/cli/ReverseCli.ts:provider",
+  "kind": "provider",
+  "owner": "liminal-effect-broker",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/cli/ReverseFit.ts:renderer",
+  "kind": "renderer",
+  "owner": "render-observation-capability",
+  "disposition": "projection-only"
+ },
+ {
+  "locator": "src/cli/SwarmCli.ts:provider",
+  "kind": "provider",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "src/creative-run/CreativeRunCoordinatorBase.ts:review-writer",
+  "kind": "review-writer",
+  "owner": "campaign-review-authority",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/creative-run/OwnerQualityReview.ts:review-writer",
+  "kind": "review-writer",
+  "owner": "owner-review-domain-authority",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "scripts/quality/archive-measure.mjs:archive",
+  "kind": "archive",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "scripts/quality/rescore-tops.mjs:archive",
+  "kind": "archive",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "src/learning/ArchiveLearning.ts:archive",
+  "kind": "archive",
+  "owner": "quality-archive-projection",
+  "disposition": "projection-only"
+ },
+ {
+  "locator": "src/compost/openCompostMill.ts:compost",
+  "kind": "compost",
+  "owner": "compost-observation-projection",
+  "disposition": "projection-only"
+ },
+ {
+  "locator": "src/tui-bridge/PostGenerationCognitiveWriter.ts:compost",
+  "kind": "compost",
+  "owner": "compost-observation-projection",
+  "disposition": "projection-only"
+ },
+ {
+  "locator": "src/compost/CompostSoup.ts:evolution",
+  "kind": "evolution",
+  "owner": "exploration-evolution-input",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "src/core/LoopConfig.ts:evolution",
+  "kind": "evolution",
+  "owner": "exploration-configuration",
+  "disposition": "proposal-only"
+ },
+ {
+  "locator": "src/core/RalphLoop.ts:evolution",
+  "kind": "evolution",
+  "owner": "exploration-evolution-input",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "src/daemon/LivingSiteDaemon.ts:evolution",
+  "kind": "evolution",
+  "owner": "command-proposal-authority",
+  "disposition": "proposal-only"
+ },
+ {
+  "locator": "src/intuition/MemoryConsolidator.ts:activation",
+  "kind": "activation",
+  "owner": "legacy-semantic-history",
+  "disposition": "quarantined-history"
+ },
+ {
+  "locator": "scripts/quality/prove-wave5-evidence-consolidation.mjs:activation",
+  "kind": "activation",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "src/runtime-core/SealedIndependentReview.ts:source-change",
+  "kind": "source-change",
+  "owner": "autoresearch-review-authority",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "scripts/quality/prove-wave5-autoresearch-experiment.mjs:source-change",
+  "kind": "source-change",
+  "owner": "operator-exploration-boundary",
+  "disposition": "exploration-only"
+ },
+ {
+  "locator": "src/tui-bridge/TuiBridgeService.ts:scheduler",
+  "kind": "scheduler",
+  "owner": "command-proposal-authority",
+  "disposition": "proposal-only"
+ },
+ {
+  "locator": "src/index.ts:product-surface",
+  "kind": "product-surface",
+  "owner": "public-capability-projection",
+  "disposition": "projection-only"
+ },
+ {
+  "locator": "src/compost/index.ts:product-surface",
+  "kind": "product-surface",
+  "owner": "compost-exploration-contract",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/harness/index.ts:product-surface",
+  "kind": "product-surface",
+  "owner": "operational-memory-export",
+  "disposition": "projection-only"
+ },
+ {
+  "locator": "src/learning/index.ts:product-surface",
+  "kind": "product-surface",
+  "owner": "governed-learning-contract",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/render/index.ts:product-surface",
+  "kind": "product-surface",
+  "owner": "render-capability-projection",
+  "disposition": "projection-only"
+ },
+ {
+  "locator": "src/atelier/GuiEvolution.ts:evolution",
+  "kind": "evolution",
+  "owner": "gui-flywheel-mapelites-authority",
+  "disposition": "authoritative"
+ },
+ {
+  "locator": "src/atelier/HeadlessRendererAdaptor.ts:renderer",
+  "kind": "renderer",
+  "owner": "atelier-headless-render-authority",
+  "disposition": "authoritative"
+ }
+]

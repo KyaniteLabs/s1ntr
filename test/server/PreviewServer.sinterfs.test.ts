@@ -1,0 +1,175 @@
+/**
+ * TuiBridgeServer SinterFS endpoints (bridge-backed preview surface).
+ *
+ * Step 6 (issue #298): these tests now exercise `TuiBridgeServer` (which
+ * embeds `PreviewEndpoints`) directly instead of the Express `PreviewServer`.
+ * The SinterFS-backed gallery endpoints enumerated in the brief
+ * (`/api/sinter/gallery/:project`, `/api/sinter/gallery/:project/:version`)
+ * and their security/path-validation contracts are preserved 1:1.
+ */
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { TuiBridgeServer } from '../../src/tui-bridge/TuiBridgeServer.js';
+import { TuiBridgeService } from '../../src/tui-bridge/TuiBridgeService.js';
+import { SinterFS } from '../../src/fs/SinterFS.js';
+
+async function startOnEphemeralPort(server: TuiBridgeServer): Promise<number> {
+  await server.start();
+  const port = parseInt(new URL(server.address).port, 10);
+  if (!port) throw new Error('TuiBridgeServer did not expose an ephemeral port');
+  return port;
+}
+
+describe('TuiBridgeServer SinterFS endpoints (bridge-backed preview surface)', () => {
+  let server: TuiBridgeServer;
+  let projectRoot: string;
+  let originalCwd: typeof process.cwd;
+  let originalSinterRoot: string | undefined;
+
+  beforeEach(() => {
+    projectRoot = mkdtempSync(join(tmpdir(), 'sinter-preview-test-'));
+    originalCwd = process.cwd;
+    process.cwd = () => projectRoot;
+    // TuiBridgeServer/PreviewEndpoints resolves its SinterFS root via SINTER_PROJECT_ROOT
+    // (set by the global test setup). Point it at this test's projectRoot so the
+    // gallery endpoints read the fixtures written below.
+    originalSinterRoot = process.env.SINTER_PROJECT_ROOT;
+    process.env.SINTER_PROJECT_ROOT = projectRoot;
+    server = new TuiBridgeServer(new TuiBridgeService(), { port: 0 });
+  });
+
+  afterEach(async () => {
+    try {
+      await server.stop();
+    } catch {
+      // ignore
+    }
+    process.cwd = originalCwd;
+    if (originalSinterRoot !== undefined) {
+      process.env.SINTER_PROJECT_ROOT = originalSinterRoot;
+    } else {
+      delete process.env.SINTER_PROJECT_ROOT;
+    }
+    rmSync(projectRoot, { recursive: true, force: true });
+  });
+
+  it('GET /api/sinter/gallery/:project returns iterations from SinterFS refs', async () => {
+    const fs = SinterFS.open(projectRoot);
+    const ref1 = fs.writeArtifact({
+      kind: 'gallery-version',
+      content: 'function setup() {}',
+      filename: 'v1.js',
+      metadata: { project: 'demo', version: 1 },
+    });
+    fs.writeRef('gallery/demo/v1', ref1);
+    const ref2 = fs.writeArtifact({
+      kind: 'gallery-version',
+      content: 'function draw() {}',
+      filename: 'v2.js',
+      metadata: { project: 'demo', version: 2 },
+    });
+    fs.writeRef('gallery/demo/v2', ref2);
+    fs.close();
+
+    const port = await startOnEphemeralPort(server);
+
+    const res = await fetch(`http://localhost:${port}/api/sinter/gallery/demo`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.iterations).toHaveLength(2);
+    expect(body.iterations[0].version).toBe(1);
+    expect(body.iterations[0].code).toBe('function setup() {}');
+    expect(body.iterations[1].version).toBe(2);
+    expect(body.iterations[1].code).toBe('function draw() {}');
+  });
+
+  it('GET /api/sinter/gallery/:project returns organism iterations', async () => {
+    const fs = SinterFS.open(projectRoot);
+    const ref = fs.writeArtifact({
+      kind: 'organism',
+      content: JSON.stringify({ type: 'organism', musicCode: 'note("c3")', visualCode: 'osc(10)' }),
+      filename: 'v1.js',
+      metadata: { project: 'organism-demo', version: 1 },
+    });
+    fs.writeRef('gallery/organism-demo/v1', ref);
+    fs.close();
+
+    const port = await startOnEphemeralPort(server);
+
+    const res = await fetch(`http://localhost:${port}/api/sinter/gallery/organism-demo`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.iterations).toHaveLength(1);
+    expect(body.iterations[0].version).toBe(1);
+    expect(body.iterations[0].type).toBe('organism');
+    expect(body.iterations[0].musicCode).toBe('note("c3")');
+    expect(body.iterations[0].visualCode).toBe('osc(10)');
+  });
+
+  it('GET /api/sinter/gallery/:project/:version returns artifact content', async () => {
+    const fs = SinterFS.open(projectRoot);
+    const ref = fs.writeArtifact({
+      kind: 'gallery-version',
+      content: 'ellipse(50, 50, 20, 20);',
+      filename: 'v3.js',
+      metadata: { project: 'demo', version: 3 },
+    });
+    fs.writeRef('gallery/demo/v3', ref);
+    fs.close();
+
+    const port = await startOnEphemeralPort(server);
+
+    const res = await fetch(`http://localhost:${port}/api/sinter/gallery/demo/3`);
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toBe('ellipse(50, 50, 20, 20);');
+  });
+
+  it('GET /api/sinter/gallery/:project/:version returns 404 for missing version', async () => {
+    const port = await startOnEphemeralPort(server);
+
+    const res = await fetch(`http://localhost:${port}/api/sinter/gallery/demo/99`);
+    expect(res.status).toBe(404);
+  });
+
+  // ── Security tests ──
+
+  it('rejects path traversal in project name', async () => {
+    const port = await startOnEphemeralPort(server);
+
+    const res = await fetch(`http://localhost:${port}/api/sinter/gallery/..%2Fsecret`);
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects slash in project name', async () => {
+    const port = await startOnEphemeralPort(server);
+
+    const res = await fetch(`http://localhost:${port}/api/sinter/gallery/a%2Fb`);
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects non-numeric version', async () => {
+    const port = await startOnEphemeralPort(server);
+
+    const res = await fetch(`http://localhost:${port}/api/sinter/gallery/demo/abc`);
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects negative version', async () => {
+    const port = await startOnEphemeralPort(server);
+
+    const res = await fetch(`http://localhost:${port}/api/sinter/gallery/demo/-1`);
+    expect(res.status).toBe(400);
+  });
+
+  it('returns empty iterations for nonexistent project', async () => {
+    const port = await startOnEphemeralPort(server);
+
+    const res = await fetch(`http://localhost:${port}/api/sinter/gallery/nonexistent`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.iterations).toEqual([]);
+  });
+});

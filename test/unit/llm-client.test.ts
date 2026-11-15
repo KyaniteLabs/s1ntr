@@ -1,0 +1,191 @@
+// Allow localhost for tests
+process.env.LIMINAL_ALLOW_LOCALHOST_LLM = "true";
+
+// ============================================================================
+// SECURITY NOTICE
+// ============================================================================
+// All API keys in this file are FAKE test values used for unit testing only.
+// They are intentionally invalid and pose no security risk.
+// Do NOT use these values in production or with real APIs.
+// ============================================================================
+
+import { describe, it, expect, beforeEach, afterEach, test } from 'vitest';
+/**
+ * LLMClient tests - OpenAI-compatible API support
+ *
+ * Tests for LM Studio, Ollama, OpenAI, MiniMax, and Hybrid
+ */
+
+import { LLMClient } from '../../src/llm/LLMClient.js';
+
+function createFetchStub(response: any) {
+  let lastUrl: string = '';
+  let lastOpts: RequestInit = {};
+  const stub = (url: string, opts?: RequestInit) => {
+    lastUrl = url;
+    lastOpts = opts || {};
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve(response),
+    } as Response);
+  };
+  return { stub, getLastUrl: () => lastUrl, getLastOpts: () => lastOpts };
+}
+
+describe('LLMClient Configuration', () => {
+  const providerEnvKeys = [
+    'LIMINAL_LLM_BASE_URL',
+    'LIMINAL_LLM_API_KEY',
+    'ATELIER_LLM_API_KEY',
+    'OPENAI_API_KEY',
+    'MINIMAX_API_KEY',
+    'GLM_API_KEY',
+    'OPENROUTER_API_KEY',
+    'MOONSHOT_API_KEY',
+    'KIMI_API_KEY',
+    'ANTHROPIC_AUTH_TOKEN',
+  ];
+  let savedEnv: Record<string, string | undefined>;
+
+  beforeEach(() => {
+    savedEnv = {};
+    for (const key of providerEnvKeys) {
+      savedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+  });
+
+  afterEach(() => {
+    for (const key of providerEnvKeys) {
+      if (savedEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = savedEnv[key];
+    }
+  });
+
+  test('should create client with LM Studio config (no API key)', () => {
+    const client = new LLMClient({
+      provider: 'lmstudio',
+      baseUrl: 'http://localhost:1234/v1',
+      model: 'local-model',
+      // apiKey intentionally omitted for LM Studio
+    });
+
+    // Client should be created successfully
+    expect(client).not.toBeNull();
+  });
+
+  test('should create client with Ollama Cloud config (with API key)', () => {
+    const client = new LLMClient({
+      provider: 'ollama',
+      baseUrl: 'https://api.ollama.com/v1',
+      model: 'llama3.2',
+      apiKey: 'test-ollama-key',
+    });
+
+    expect(client).not.toBeNull();
+  });
+
+  test('isConfigured returns true when LIMINAL_LLM_API_KEY is set', () => {
+    process.env.LIMINAL_LLM_API_KEY = 'test-key-not-real';
+    expect(LLMClient.isConfigured()).toBe(true);
+  });
+
+  test('isConfigured returns false when no API keys are set', () => {
+    delete process.env.LIMINAL_LLM_API_KEY;
+    delete process.env.ATELIER_LLM_API_KEY;
+    expect(LLMClient.isConfigured()).toBe(false);
+  });
+
+  test('isConfigured returns true when OPENAI_API_KEY is set', () => {
+    process.env.OPENAI_API_KEY = 'test-api-key-not-real';
+    expect(LLMClient.isConfigured()).toBe(true);
+    delete process.env.OPENAI_API_KEY;
+  });
+});
+
+describe('LLMClient OpenAI (W0-L)', () => {
+  let originalFetch: typeof global.fetch;
+  beforeEach(() => { originalFetch = global.fetch; });
+  afterEach(() => { global.fetch = originalFetch; });
+
+  const openAIResponse = {
+    choices: [{ message: { content: 'function setup() { createCanvas(400,400); }\nfunction draw() {}' } }],
+  };
+
+  it('calls OpenAI URL with correct body/headers and parses response to code', async () => {
+    const { stub, getLastUrl, getLastOpts } = createFetchStub(openAIResponse);
+    global.fetch = stub as any;
+
+    const client = new LLMClient({
+      provider: 'openai',
+      apiKey: 'test-key-not-real',
+      model: 'gpt-4o-mini',
+    });
+
+    const result = await client.generateP5Sketch('a circle');
+
+    expect(result.success).toBe(true);
+    expect(result.code).toContain('createCanvas');
+    expect(getLastUrl()).toMatch(/openai\.com.*chat\/completions|.*\/v1\/chat\/completions/);
+    const opts = getLastOpts();
+    expect(opts?.method).toBe('POST');
+    expect((opts?.headers as Record<string, string>)?.['Authorization']).toBe('Bearer test-key-not-real');
+    expect((opts?.headers as Record<string, string>)?.['Content-Type']).toBe('application/json');
+    const body = JSON.parse((opts?.body as string) ?? '{}');
+    expect(body.model).toBe('gpt-4o-mini');
+    expect(body.messages).not.toBeNull();
+    expect(Array.isArray(body.messages)).toBe(true);
+  });
+
+  it('keeps glm-5v on the full p5 PromptLibrary path', async () => {
+    const { stub, getLastOpts } = createFetchStub(openAIResponse);
+    global.fetch = stub as any;
+
+    const client = new LLMClient({
+      provider: 'openai',
+      baseUrl: 'https://api.openai.com/v1',
+      apiKey: 'test-key-not-real',
+      model: 'glm-5v',
+    });
+
+    await client.generateP5Sketch('kinetic amber reed field');
+
+    const body = JSON.parse((getLastOpts()?.body as string) ?? '{}');
+    const messages = JSON.stringify(body.messages);
+    expect(messages).toContain('senior creative technologist specializing in p5.js');
+    expect(messages).toContain('Create a p5.js sketch: kinetic amber reed field');
+    expect(messages).not.toContain('<rules>');
+  });
+});
+
+describe('LLMClient MiniMax', () => {
+  let originalFetch: typeof global.fetch;
+  beforeEach(() => { originalFetch = global.fetch; });
+  afterEach(() => { global.fetch = originalFetch; });
+
+  const minimaxResponse = {
+    choices: [{ message: { content: 'function setup() { createCanvas(400,400); }\nfunction draw() {}' } }],
+  };
+
+  it('calls MiniMax API with correct shape and parses response to code', async () => {
+    const { stub, getLastOpts } = createFetchStub(minimaxResponse);
+    global.fetch = stub as any;
+
+    const client = new LLMClient({
+      provider: 'minimax',
+      apiKey: 'test-minimax-key',
+      model: 'mini-model',
+    });
+
+    const result = await client.generateP5Sketch('a circle');
+
+    expect(result.success).toBe(true);
+    expect(result.code).toContain('createCanvas');
+    const opts = getLastOpts();
+    expect(opts?.method).toBe('POST');
+    expect((opts?.headers as Record<string, string>)?.['Authorization']).toBe('Bearer test-minimax-key');
+    const body = JSON.parse((opts?.body as string) ?? '{}');
+    expect(body.model).toBe('mini-model');
+    expect(Array.isArray(body.messages)).toBe(true);
+  });
+});

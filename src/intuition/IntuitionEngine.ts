@@ -1,0 +1,755 @@
+/**
+ * IntuitionEngine — Unified capstone that composes all intuition signals.
+ *
+ * This is the single entry point for the intuition system. It composes
+ * signals from:
+ *
+ *   1. **ThompsonSampler** — Which model/strategy works best (confidence scores)
+ *   2. **DomainPrototype** — How close is this output to known-good patterns
+ *   3. **CreativeWorldModel** — Predicted quality from code behavior
+ *   4. **ProceduralTier** — Cached automatic decisions (skip evaluation when confident)
+ *   5. **ForgettingCurve** — Decay/retention across all stores
+ *   6. **MemoryBudget** — Enforce budget limits
+ *
+ * The engine produces a composite IntuitionSignal (0-1) that augments
+ * (NOT replaces) the existing analytical scoring pipeline.
+ *
+ * @module intuition/IntuitionEngine
+ */
+
+import { ThompsonSampler, armName, domainArmKey, inDomain } from './ThompsonSampler.js';
+import type { SamplerState } from './ThompsonSampler.js';
+import { DomainPrototype } from './DomainPrototype.js';
+import { IntuitionCache } from './IntuitionCache.js';
+import type { SerializedCache } from './IntuitionCache.js';
+import { MemoryConsolidator } from './MemoryConsolidator.js';
+import type { ConsolidationEpisode, ConsolidationResult } from './MemoryConsolidator.js';
+import { DreamEngine } from './DreamEngine.js';
+import type { DreamJournalEntry } from './DreamEngine.js';
+import { SleepScheduler } from './SleepScheduler.js';
+import type { SleepDepth, SleepSchedulerSnapshot } from './SleepScheduler.js';
+import { CreativeWorldModel } from './CreativeWorldModel.js';
+import type { WorldModelState } from './CreativeWorldModel.js';
+import { ForgettingCurve } from './ForgettingCurve.js';
+import type { DecayableItem, DecaySummary } from './ForgettingCurve.js';
+import { MemoryBudget } from './MemoryBudget.js';
+import type { MemoryHealthReport } from './MemoryBudget.js';
+import { ProceduralTier } from './ProceduralTier.js';
+import type { ProceduralTierState } from './ProceduralTier.js';
+import { Logger } from '../utils/Logger.js';
+import { MetabolicEntropyEngine } from '../entropy/MetabolicEntropyEngine.js';
+import { writeFileAtomic } from '../utils/atomicWrite.js';
+import { readFile, mkdir } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+/** A single signal contributing to the composite intuition score. */
+export interface IntuitionSignal {
+  /** Signal name (e.g., 'thompson_confidence', 'prototype_distance') */
+  name: string;
+  /** Signal value (0-1) */
+  value: number;
+  /** Why this signal has this value */
+  reason: string;
+  /** Signal weight in composite (0-1) */
+  weight: number;
+}
+
+/** The composite intuition assessment. */
+export interface IntuitionAssessment {
+  /** Composite score (0-1) */
+  score: number;
+  /** Overall confidence in the assessment */
+  confidence: number;
+  /** Individual signals that contributed */
+  signals: IntuitionSignal[];
+  /** Recommended model (from Thompson/ProceduralTier) */
+  recommendedModel: string | null;
+  /** Recommended strategy */
+  recommendedStrategy: string | null;
+  /** Whether a high-confidence procedural routine steered the recommendation (never the score or confidence) */
+  usedProceduralShortcut: boolean;
+  /** Human-readable explanation */
+  explanation: string;
+}
+
+import type { LLMClient } from '../llm/LLMClient.js';
+
+/** Configuration for the IntuitionEngine. */
+export interface IntuitionEngineConfig {
+  /** Weight for Thompson confidence signal. Default: 0.3 */
+  thompsonWeight?: number;
+  /** Weight for prototype distance signal. Default: 0.25 */
+  prototypeWeight?: number;
+  /** Weight for world model prediction signal. Default: 0.25 */
+  worldModelWeight?: number;
+  /** Weight for novelty signal. Default: 0.2 */
+  noveltyWeight?: number;
+  /** Minimum confidence for procedural shortcut. Default: 0.8 */
+  proceduralShortcutThreshold?: number;
+  /** Whether dreaming is enabled. Default: true */
+  dreamingEnabled?: boolean;
+  /** Domains to explore in dreams. Default: ['p5'] */
+  dreamDomains?: string[];
+  /**
+   * LLM client for DreamEngine callbacks. When present, Stage 1 and Stage 2 use real LLM generation.
+   * Note: RalphLoop constructs this engine WITHOUT an llm and never calls dream()/forceDream()
+   * (it only uses generateHint/recordOutcome), so production dreams today are template/stub
+   * output by design. Wiring dream cycles into the loop is a separate, larger change (ticket #380).
+   */
+  llm?: LLMClient;
+}
+
+/** Engine health report. */
+export interface IntuitionHealthReport {
+  /** Thompson sampler arm count */
+  thompsonArms: number;
+  /** Prototype domain count */
+  prototypeDomains: number;
+  /** Cache entry count */
+  cacheEntries: number;
+  /** Consolidator pattern count */
+  consolidatedPatterns: number;
+  /** World model observation count */
+  worldModelObservations: number;
+  /** Procedural routine count */
+  proceduralRoutines: number;
+  /** Memory budget health */
+  budgetHealth: MemoryHealthReport | null;
+  /** Decay summary */
+  decaySummary: DecaySummary | null;
+}
+
+/** Serialized engine state. */
+export interface IntuitionEngineState {
+  version: number;
+  thompson: SamplerState;
+  cache: SerializedCache;
+  consolidator: ReturnType<MemoryConsolidator['serialize']>;
+  worldModel: WorldModelState;
+  proceduralTier: ProceduralTierState;
+  dreamJournal: DreamJournalEntry[];
+  /** Optional for state files written before these were persisted. */
+  strategySampler?: SamplerState;
+  prototype?: ReturnType<DomainPrototype['serialize']>;
+  sleep?: SleepSchedulerSnapshot;
+  updatedAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// IntuitionEngine
+// ---------------------------------------------------------------------------
+
+const DEFAULT_CONFIG: Required<Omit<IntuitionEngineConfig, 'llm'>> = {
+  thompsonWeight: 0.3,
+  prototypeWeight: 0.25,
+  worldModelWeight: 0.25,
+  noveltyWeight: 0.2,
+  proceduralShortcutThreshold: 0.8,
+  dreamingEnabled: true,
+  dreamDomains: ['p5'],
+};
+
+export class IntuitionEngine {
+  // Core components
+  private readonly modelSampler: ThompsonSampler<string>;
+  private readonly strategySampler: ThompsonSampler<string>;
+  private readonly prototype: DomainPrototype;
+  private readonly cache: IntuitionCache;
+  private readonly consolidator: MemoryConsolidator;
+  private readonly worldModel: CreativeWorldModel;
+  private readonly dreamEngine: DreamEngine;
+  private readonly sleepScheduler: SleepScheduler;
+  private readonly forgettingCurve: ForgettingCurve;
+  private readonly memoryBudget: MemoryBudget;
+  private readonly proceduralTier: ProceduralTier;
+
+  private readonly config: Required<Omit<IntuitionEngineConfig, 'llm'>> & { llm?: LLMClient };
+  private readonly llm?: LLMClient;
+
+  constructor(config?: IntuitionEngineConfig) {
+    this.llm = config?.llm;
+    this.config = { ...DEFAULT_CONFIG, ...config };
+
+    // Initialize core components
+    this.modelSampler = new ThompsonSampler<string>({
+      minPulls: 3,
+      successThreshold: 0.7,
+      maxArms: 50,
+    });
+    this.strategySampler = new ThompsonSampler<string>({
+      minPulls: 3,
+      successThreshold: 0.7,
+      maxArms: 20,
+    });
+    this.prototype = new DomainPrototype();
+    this.cache = new IntuitionCache({ maxSize: 500, ttlMs: 60 * 60 * 1000 });
+    this.worldModel = new CreativeWorldModel({ minObservations: 3, kNeighbors: 5 });
+
+    this.consolidator = new MemoryConsolidator(
+      { modelSampler: this.modelSampler, strategySampler: this.strategySampler, prototype: this.prototype },
+      { maxPatterns: 200, retentionStability: 10, maxAgeDays: 90 },
+    );
+
+    this.forgettingCurve = new ForgettingCurve({ stability: 10, pruneThreshold: 0.05 });
+    this.memoryBudget = new MemoryBudget(this.forgettingCurve, { verbose: true });
+
+    this.proceduralTier = new ProceduralTier(
+      { modelSampler: this.modelSampler, strategySampler: this.strategySampler, prototype: this.prototype, worldModel: this.worldModel },
+      { maxRoutines: 50 },
+    );
+
+    const entropy = new MetabolicEntropyEngine({
+      eventStore: { getRecent: () => [] },
+      // eslint-disable-next-line @typescript-eslint/require-await -- inline mock satisfies Promise<string[]> contract
+      heap: { listFiles: async () => [] },
+      telemetry: { getSummary: () => ({ successRate: 0, avgDurationMs: 0, totalTasks: 0, totalViolations: 0 }) },
+    });
+
+    this.dreamEngine = new DreamEngine(
+      {
+        modelSampler: this.modelSampler,
+        strategySampler: this.strategySampler,
+        prototype: this.prototype,
+        cache: this.cache,
+        consolidator: this.consolidator,
+        entropy,
+      },
+      {
+        domains: this.config.dreamDomains,
+        generatePrompt: this.llm
+          ? (prompt) => this.llm!.generate(
+              'You are a creative visual concept generator. Given a creative brief, generate a vivid, evocative visual concept description suitable for code generation.',
+              prompt,
+            ).then((r) => r.success ? r.code : Promise.reject(new Error(r.error ?? 'LLM generation failed')))
+          : undefined,
+        generateCode: this.llm
+          ? (prompt, domain) => this.llm!.generate(
+              'You are a creative coding engine. Given a visual concept and target domain, generate complete, runnable code.',
+              `Domain: ${domain}\n${prompt}`,
+            ).then((r) => r.success ? r.code : Promise.reject(new Error(r.error ?? 'LLM generation failed')))
+          : undefined,
+      },
+    );
+
+    this.sleepScheduler = new SleepScheduler();
+
+    // Register stores with memory budget
+    this.registerStores();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Primary API: Assess
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Assess an output using the full intuition pipeline.
+   *
+   * This is the main entry point called by the scoring engine.
+   * Returns a composite IntuitionAssessment with score, signals,
+   * and recommendations.
+   */
+  assess(
+    output: string,
+    domain: string,
+    previousOutputs: string[] = [],
+    embedding?: number[],
+  ): IntuitionAssessment {
+    const signals: IntuitionSignal[] = [];
+
+    // Procedural routine: advisory only. It may recommend a model/strategy,
+    // but its historical quality never stands in for grading this output.
+    const shortcut = this.proceduralTier.lookup(domain);
+    const advisoryRoutine = shortcut && shortcut.confidence === 'high' ? shortcut : null;
+
+    // Signal 2: Thompson confidence
+    // Arms are domain-scoped: only this domain's evidence picks its model.
+    const selectedKey = this.modelSampler.select(inDomain(domain));
+    const selectedModel = selectedKey ? armName(selectedKey) : null;
+    const modelConfidence = selectedKey ? this.modelSampler.getConfidence(selectedKey) : 0;
+    signals.push({
+      name: 'thompson_confidence',
+      value: modelConfidence,
+      reason: selectedModel
+        ? `Thompson selected ${selectedModel} with confidence ${modelConfidence.toFixed(2)}`
+        : 'No model has enough pulls for Thompson selection',
+      weight: this.config.thompsonWeight,
+    });
+
+    // Signal 3: Prototype distance
+    let prototypeValue = 0.5;
+    const distance = embedding && this.prototype.isReady(domain, 3)
+      ? this.prototype.distanceToCentroid(domain, embedding)
+      : null;
+    const predicted = distance !== null && embedding ? this.prototype.predictQuality(domain, embedding) : null;
+    if (distance !== null && predicted !== null) {
+      prototypeValue = predicted;
+      signals.push({
+        name: 'prototype_distance',
+        value: prototypeValue,
+        reason: `Distance to ${domain} centroid: ${distance.toFixed(3)}, predicted quality: ${prototypeValue.toFixed(2)}`,
+        weight: this.config.prototypeWeight,
+      });
+    } else {
+      signals.push({
+        name: 'prototype_distance',
+        value: 0.5,
+        reason: embedding && this.prototype.isReady(domain, 3)
+          ? 'Prototype distance unavailable (empty, zero, non-finite or mismatched embedding; neutral default)'
+          : 'No prototype data for domain (neutral default)',
+        weight: this.config.prototypeWeight,
+      });
+    }
+
+    // Signal 4: World model prediction
+    let worldModelValue = 0.5;
+    const behavior = CreativeWorldModel.extractBehavior(output, domain);
+    if (this.worldModel.isReady(domain)) {
+      const prediction = this.worldModel.predict(behavior);
+      // A static-code surrogate only counts when it beats the constant
+      // baseline on recorded outcomes; otherwise it stays neutral.
+      if (prediction && prediction.confidence <= 0) {
+        signals.push({
+          name: 'world_model_prediction',
+          value: 0.5,
+          reason: `K-NN surrogate no better than domain mean (LOO MAE ${prediction.calibration.looMae.toFixed(3)} vs baseline ${prediction.calibration.baselineMae.toFixed(3)}); neutral`,
+          weight: this.config.worldModelWeight,
+        });
+      } else if (prediction) {
+        worldModelValue = prediction.predicted;
+        signals.push({
+          name: 'world_model_prediction',
+          value: worldModelValue,
+          reason: `K-NN prediction: ${worldModelValue.toFixed(2)} (confidence: ${prediction.confidence.toFixed(2)}, ${prediction.neighborCount} neighbors)`,
+          weight: this.config.worldModelWeight,
+        });
+      }
+    } else {
+      signals.push({
+        name: 'world_model_prediction',
+        value: 0.5,
+        reason: 'World model not ready for domain (neutral default)',
+        weight: this.config.worldModelWeight,
+      });
+    }
+
+    // Signal 5: Novelty
+    let noveltyValue = 1.0;
+    if (previousOutputs.length > 0) {
+      const outputTokens = new Set(output.toLowerCase().split(/\s+/));
+      const maxSimilarity = Math.max(
+        ...previousOutputs.map(prev => {
+          const prevTokens = new Set(prev.toLowerCase().split(/\s+/));
+          const intersection = new Set([...outputTokens].filter(t => prevTokens.has(t)));
+          const union = new Set([...outputTokens, ...prevTokens]);
+          return union.size > 0 ? intersection.size / union.size : 0;
+        }),
+      );
+      noveltyValue = 1 - maxSimilarity;
+    }
+    signals.push({
+      name: 'novelty',
+      value: noveltyValue,
+      reason: previousOutputs.length === 0
+        ? 'No previous outputs (max novelty)'
+        : `Novelty: ${noveltyValue.toFixed(2)} vs ${previousOutputs.length} previous outputs`,
+      weight: this.config.noveltyWeight,
+    });
+
+    // Compute composite score
+    const totalWeight = signals.reduce((sum, s) => sum + s.weight, 0);
+    const weightedSum = signals.reduce((sum, s) => sum + s.value * s.weight, 0);
+    const score = totalWeight > 0 ? Math.min(1, Math.max(0, weightedSum / totalWeight)) : 0.5;
+
+    // Select best model/strategy (a high-confidence routine only steers this)
+    const recommendedModel = advisoryRoutine?.model ?? selectedModel;
+    const strategyKey = this.strategySampler.select(inDomain(domain));
+    const recommendedStrategy = advisoryRoutine?.strategy ?? (strategyKey ? armName(strategyKey) : null);
+
+    const confidence = this.computeOverallConfidence(signals);
+
+    let explanation = this.buildExplanation(domain, score, confidence, recommendedModel, recommendedStrategy, signals);
+    if (advisoryRoutine) {
+      explanation += ` | Routine advice: ${advisoryRoutine.model}/${advisoryRoutine.strategy} (advisory; score is from this output's signals)`;
+    }
+
+    return {
+      score,
+      confidence,
+      signals,
+      recommendedModel,
+      recommendedStrategy,
+      usedProceduralShortcut: advisoryRoutine !== null,
+      explanation,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Learning API
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Record an outcome — update all learning subsystems.
+   * Call this after an output has been evaluated.
+   */
+  recordOutcome(
+    output: string,
+    domain: string,
+    qualityScore: number,
+    model?: string,
+    strategy?: string,
+    embedding?: number[],
+  ): void {
+    // Update Thompson samplers
+    if (model) this.modelSampler.update(domainArmKey(domain, model), qualityScore);
+    if (strategy) this.strategySampler.update(domainArmKey(domain, strategy), qualityScore);
+
+    // Update world model
+    const behavior = CreativeWorldModel.extractBehavior(output, domain);
+    this.worldModel.record(behavior, qualityScore);
+
+    // Update prototype from high-quality outputs
+    if (embedding && qualityScore >= 0.7) {
+      this.prototype.addExample(domain, embedding, qualityScore);
+    }
+
+    // Record in cache
+    this.cache.set(domain, output, {
+      score: qualityScore,
+      confidence: model ? this.modelSampler.getConfidence(domainArmKey(domain, model)) : 0.5,
+      signals: [{ name: 'quality', value: qualityScore, reason: `Actual quality score: ${qualityScore.toFixed(2)}` }],
+      recommendation: `domain: ${domain} | model: ${model ?? 'unknown'} | strategy: ${strategy ?? 'unknown'}`,
+    }, embedding);
+
+    // Record activity for sleep scheduler
+    this.sleepScheduler.recordActivity('generation');
+
+    // Record application for procedural tier
+    if (model && strategy) {
+      const routineKey = `${domain}:${model}:${strategy}`;
+      this.proceduralTier.recordApplication(routineKey, qualityScore >= 0.7);
+    }
+  }
+
+  /**
+   * Consolidate raw episodes into compressed patterns.
+   * Call periodically (e.g., at session end or during dreams).
+   */
+  consolidate(episodes: ConsolidationEpisode[]): ConsolidationResult {
+    // Run consolidation
+    const result = this.consolidator.consolidate(episodes);
+
+    // Promote deserving patterns to procedural routines
+    const patterns = this.consolidator.getAllPatterns();
+    this.proceduralTier.evaluateAndPromote(patterns);
+
+    // Enforce memory budgets
+    this.memoryBudget.enforce();
+
+    return result;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Dream API
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Run a dream cycle (if the sleep scheduler says it's time).
+   * Returns the dream journal entry, or null if not time to dream.
+   */
+  async dream(): Promise<DreamJournalEntry | null> {
+    if (!this.config.dreamingEnabled) return null;
+
+    const reservation = this.sleepScheduler.beginDream();
+    if (!reservation) return null;
+    const depth = reservation.depth;
+
+    Logger.info('IntuitionEngine', `Starting ${depth} dream cycle`);
+    let entry: DreamJournalEntry;
+    try {
+      entry = await this.dreamEngine.dream(depth);
+    } catch (err) {
+      this.sleepScheduler.abortDream(reservation.id);
+      throw err;
+    }
+    this.sleepScheduler.markDreamCompleted(reservation.id);
+
+    // After dreaming, run consolidation and promotion
+    const patterns = this.consolidator.getAllPatterns();
+    this.proceduralTier.evaluateAndPromote(patterns);
+    this.memoryBudget.enforce();
+
+    return entry;
+  }
+
+  /**
+   * Force a dream cycle regardless of sleep state.
+   */
+  async forceDream(depth: SleepDepth = 'micro'): Promise<DreamJournalEntry> {
+    const reservation = this.sleepScheduler.reserveForced(depth);
+    if (!reservation) throw new Error('DREAM_ALREADY_RUNNING');
+    let entry: DreamJournalEntry;
+    try {
+      entry = await this.dreamEngine.dream(depth);
+    } catch (err) {
+      this.sleepScheduler.abortDream(reservation.id);
+      throw err;
+    }
+    this.sleepScheduler.markDreamCompleted(reservation.id);
+
+    const patterns = this.consolidator.getAllPatterns();
+    this.proceduralTier.evaluateAndPromote(patterns);
+    this.memoryBudget.enforce();
+
+    return entry;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Hint API
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Generate a bounded, advisory hint string based on historical patterns.
+   * Suitable for injection into an LLM prompt.
+   */
+  generateHint(domain: string, maxLength = 200): string {
+    let hint = '';
+
+    // Procedural tier first
+    const shortcut = this.proceduralTier.lookup(domain);
+    if (shortcut && shortcut.confidence === 'high') {
+      hint = `Historical pattern: model=${shortcut.model}, strategy=${shortcut.strategy} tends to produce quality ~${shortcut.expectedQuality.toFixed(2)} for this domain.`;
+    } else if (this.modelSampler.isReady(inDomain(domain))) {
+      const bestModelKey = this.modelSampler.bestByMean(inDomain(domain));
+      const bestStrategyKey = this.strategySampler.bestByMean(inDomain(domain));
+      const bestModel = bestModelKey ? armName(bestModelKey) : null;
+      const bestStrategy = bestStrategyKey ? armName(bestStrategyKey) : null;
+      if (bestModel || bestStrategy) {
+        const parts: string[] = [];
+        if (bestModel) parts.push(`model=${bestModel}`);
+        if (bestStrategy) parts.push(`strategy=${bestStrategy}`);
+        hint = `Historical pattern: ${parts.join(', ')} shows the best mean performance for this domain.`;
+      }
+    }
+
+    if (!hint) return '';
+
+    if (hint.length > maxLength) {
+      hint = hint.slice(0, maxLength - 3) + '...';
+    }
+
+    return hint;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Component accessors
+  // ---------------------------------------------------------------------------
+
+  getModelSampler(): ThompsonSampler<string> { return this.modelSampler; }
+  getStrategySampler(): ThompsonSampler<string> { return this.strategySampler; }
+  getPrototype(): DomainPrototype { return this.prototype; }
+  getCache(): IntuitionCache { return this.cache; }
+  getConsolidator(): MemoryConsolidator { return this.consolidator; }
+  getWorldModel(): CreativeWorldModel { return this.worldModel; }
+  getDreamEngine(): DreamEngine { return this.dreamEngine; }
+  getSleepScheduler(): SleepScheduler { return this.sleepScheduler; }
+  getForgettingCurve(): ForgettingCurve { return this.forgettingCurve; }
+  getMemoryBudget(): MemoryBudget { return this.memoryBudget; }
+  getProceduralTier(): ProceduralTier { return this.proceduralTier; }
+
+  // ---------------------------------------------------------------------------
+  // Health & diagnostics
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Get a comprehensive health report for all subsystems.
+   */
+  getHealthReport(): IntuitionHealthReport {
+    const allItems: DecayableItem[] = [
+      ...Array.from(this.cache.getDomainEntries('p5')).map(e => ({
+        lastUpdated: new Date(e.createdAt).toISOString(),
+        quality: e.assessment.score,
+      })),
+    ];
+
+    return {
+      thompsonArms: this.modelSampler.totalPulls,
+      prototypeDomains: this.prototype.domainCount,
+      cacheEntries: this.cache.getStats().size,
+      consolidatedPatterns: this.consolidator.patternCount,
+      worldModelObservations: this.worldModel.getObservationCount(),
+      proceduralRoutines: this.proceduralTier.routineCount,
+      budgetHealth: this.memoryBudget.getHealthReport(),
+      decaySummary: this.forgettingCurve.summarize(allItems),
+    };
+  }
+
+  /**
+   * Get a human-readable summary of the engine state.
+   */
+  getSummary(): string {
+    const health = this.getHealthReport();
+    return [
+      `Intuition Engine Summary:`,
+      `  Thompson arms: ${health.thompsonArms} pulls across models`,
+      `  Prototypes: ${health.prototypeDomains} domains`,
+      `  Cache: ${health.cacheEntries} entries (${this.cache.getStats().hitRate.toFixed(1)}% hit rate)`,
+      `  Patterns: ${health.consolidatedPatterns} consolidated`,
+      `  World model: ${health.worldModelObservations} observations`,
+      `  Procedural: ${health.proceduralRoutines} routines`,
+      `  Best model: ${this.modelSampler.bestByMean() ?? 'undetermined'}`,
+      `  Best strategy: ${this.strategySampler.bestByMean() ?? 'undetermined'}`,
+    ].join('\n');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Persistence
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Serialize all engine state for persistence.
+   */
+  serialize(): IntuitionEngineState {
+    return {
+      version: 1,
+      thompson: this.modelSampler.serialize(),
+      cache: this.cache.serialize(),
+      consolidator: this.consolidator.serialize(),
+      worldModel: this.worldModel.serialize(),
+      proceduralTier: this.proceduralTier.serialize(),
+      dreamJournal: this.dreamEngine.getJournal(),
+      strategySampler: this.strategySampler.serialize(),
+      prototype: this.prototype.serialize(),
+      sleep: this.sleepScheduler.serialize(),
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * Load engine state from persistence.
+   */
+  deserialize(state: IntuitionEngineState): void {
+    this.modelSampler.deserialize(state.thompson);
+    this.cache.deserialize(state.cache);
+    this.consolidator.deserialize(state.consolidator);
+    this.worldModel.deserialize(state.worldModel);
+    this.proceduralTier.deserialize(state.proceduralTier);
+    this.dreamEngine.restoreJournal(state.dreamJournal ?? []);
+    if (state.strategySampler) this.strategySampler.deserialize(state.strategySampler);
+    if (state.prototype) this.prototype.deserialize(state.prototype);
+    if (state.sleep) this.sleepScheduler.deserialize(state.sleep);
+    Logger.info('IntuitionEngine', `Loaded engine state from ${state.updatedAt}`);
+  }
+
+  /** Default on-disk path for persisted engine state (alongside routing/archive data). */
+  static defaultStatePath(): string {
+    return join(homedir(), '.sinter', 'intuition', 'engine-state.json');
+  }
+
+  /**
+   * Load persisted engine state from disk so learning accumulates across runs.
+   * A missing file (first run) is not an error. Returns true if state was loaded.
+   */
+  async load(filePath: string = IntuitionEngine.defaultStatePath()): Promise<boolean> {
+    try {
+      const raw = await readFile(filePath, 'utf-8');
+      this.deserialize(JSON.parse(raw) as IntuitionEngineState);
+      return true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        Logger.warn('IntuitionEngine', 'Failed to load persisted state:', err);
+      }
+      return false;
+    }
+  }
+
+  /** Atomically persist engine state to disk so the next run resumes learning. */
+  async save(filePath: string = IntuitionEngine.defaultStatePath()): Promise<void> {
+    await mkdir(dirname(filePath), { recursive: true });
+    await writeFileAtomic(filePath, JSON.stringify(this.serialize()));
+  }
+
+  /**
+   * Reset all engine state.
+   */
+  reset(): void {
+    this.modelSampler.reset();
+    this.strategySampler.reset();
+    this.prototype.reset();
+    this.cache.reset();
+    this.consolidator.reset();
+    this.worldModel.reset();
+    this.proceduralTier.reset();
+    this.dreamEngine.reset();
+    this.sleepScheduler.reset();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Private
+  // ---------------------------------------------------------------------------
+
+  private registerStores(): void {
+    // Each store ranks every item it holds (so size and ranking agree) and
+    // evicts exactly the ids the budget chose.
+    this.memoryBudget.registerStore('cache', {
+      getSize: () => this.cache.getStats().size,
+      getItems: () => this.cache.getAllEntries().map(e => ({
+        id: e.key,
+        lastUpdated: new Date(e.createdAt).toISOString(),
+        quality: e.assessment.score,
+      })),
+      evict: (ids) => this.cache.deleteByKeys(ids),
+    }, { maxSize: 500 });
+
+    this.memoryBudget.registerStore('patterns', {
+      getSize: () => this.consolidator.patternCount,
+      getItems: () => this.consolidator.getAllPatterns().map(p => ({
+        id: p.key,
+        lastUpdated: p.lastUpdated,
+        quality: p.avgQuality,
+      })),
+      evict: (ids) => this.consolidator.removePatterns(ids),
+    }, { maxSize: 200 });
+
+    this.memoryBudget.registerStore('routines', {
+      getSize: () => this.proceduralTier.routineCount,
+      getItems: () => this.proceduralTier.getAllRoutines().map(r => ({
+        id: r.key,
+        lastUpdated: r.lastApplied,
+        quality: r.expectedQuality,
+        reinforcementCount: r.totalApplications,
+      })),
+      evict: (ids) => this.proceduralTier.removeRoutines(ids),
+    }, { maxSize: 50 });
+  }
+
+  private computeOverallConfidence(signals: IntuitionSignal[]): number {
+    if (signals.length === 0) return 0;
+    const avgValue = signals.reduce((sum, s) => sum + s.value, 0) / signals.length;
+    const countFactor = Math.min(1, this.modelSampler.totalPulls / 20);
+    return avgValue * 0.7 + countFactor * 0.3;
+  }
+
+  private buildExplanation(
+    domain: string,
+    score: number,
+    confidence: number,
+    model: string | null,
+    strategy: string | null,
+    signals: IntuitionSignal[],
+  ): string {
+    const signalSummary = signals
+      .map(s => `${s.name}=${s.value.toFixed(2)}`)
+      .join(', ');
+
+    return [
+      `Intuition: domain=${domain}, score=${score.toFixed(2)}, confidence=${confidence.toFixed(2)}`,
+      `  model=${model ?? 'undetermined'}, strategy=${strategy ?? 'undetermined'}`,
+      `  signals: [${signalSummary}]`,
+    ].join('\n');
+  }
+}

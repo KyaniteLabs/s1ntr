@@ -1,0 +1,169 @@
+/**
+ * SandboxRunner - Runs p5.js code in a safe, isolated headless browser
+ *
+ * Uses Puppeteer: launch page, inject p5 and sketch, run with timeout, no file/network
+ * access (only p5 CDN allowed), then close. Same interface for preview and living run.
+ */
+
+import puppeteer, { Browser } from 'puppeteer';
+import { generateHTML } from '../utils/generateHTML.js';
+import { inlineVendorAssets } from '../utils/vendorAssets.js';
+import { getChromeArgs } from '../security/SandboxConfig.js';
+import { Logger } from '../utils/Logger.js';
+import { getLocalP5ScriptForUrl, resolveChromiumExecutablePath } from '../utils/browserAssetFallbacks.js';
+import { missingChromiumError } from '../utils/browserPreflight.js';
+
+
+export interface SandboxResult {
+  stdout?: string;
+  error?: string;
+  completed: boolean;
+}
+
+export interface SandboxOptions {
+  timeoutMs?: number;
+  /** Only works if LIMINAL_DISABLE_SANDBOX=true */
+  disableSandbox?: boolean;
+}
+
+const DEFAULT_TIMEOUT_MS = 30_000;
+
+/**
+ * Force-close a Puppeteer browser by killing its Chromium process.
+ *
+ * When user code (e.g., `while(true){}`) blocks the page's main thread,
+ * `browser.close()` can hang indefinitely because Puppeteer waits for CDP
+ * responses from pages that can't respond. `process.kill()` sends SIGKILL
+ * directly from Node.js — no CDP cooperation needed.
+ */
+let wasKilled = false;
+
+function forceKillBrowser(browser: Browser): void {
+  const proc = browser.process();
+  if (proc?.pid) {
+    try {
+      process.kill(proc.pid, 'SIGKILL');
+      wasKilled = true;
+    } catch (err) {
+      // Process may already be dead - log for debugging
+      Logger.debug('SandboxRunner', 'Failed to kill browser process:', err);
+    }
+  } else {
+    // Fallback: try graceful close (may hang, but no PID available)
+    void browser.close().catch((err) => {
+      if (!wasKilled) {
+        Logger.debug('SandboxRunner', 'Failed to close browser:', err);
+      }
+    });
+  }
+}
+
+/**
+ * Run p5.js code in an isolated headless page with timeout and no file/network access.
+ * Use for preview and living run; no callback.
+ *
+ * Uses Promise.race() with a manual timeout to guarantee we return within timeoutMs
+ * even when user code (e.g., while(true){}) blocks the page's main thread and
+ * prevents Puppeteer's internal timeout from firing.
+ */
+export async function runInSandbox(
+  code: string,
+  options?: SandboxOptions
+): Promise<SandboxResult> {
+  const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  // Complete the LIMINAL_DISABLE_SANDBOX toggle: when no explicit option is given,
+  // honor the env. Chrome refuses to run as root with its OS sandbox (CI containers
+  // run as root), and SandboxConfig sanctions --no-sandbox in containerized envs.
+  // getChromeArgs still double-gates on the env, so production (env unset) stays secure.
+  const disableSandbox = options?.disableSandbox ?? (process.env.LIMINAL_DISABLE_SANDBOX === 'true');
+  let browser: Browser | null = null;
+  const startedAt = Date.now();
+  let manualTimeoutFired = false;
+  let manualTimeoutHandle: NodeJS.Timeout | undefined;
+
+  try {
+    // Use the same durable Chromium resolver as every other render path.
+    const executablePath = resolveChromiumExecutablePath();
+    if (!executablePath) throw missingChromiumError();
+
+    browser = await puppeteer.launch({
+      headless: true,
+      executablePath,
+      args: getChromeArgs({ forceDisableSandbox: disableSandbox }),
+    });
+
+    const page = await browser.newPage();
+    page.setDefaultTimeout(timeoutMs);
+    page.setDefaultNavigationTimeout(timeoutMs);
+
+    // Restrict network: only allow generated p5 script requests, fulfilled locally.
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      void (async () => {
+        const localScript = await getLocalP5ScriptForUrl(req.url());
+        if (localScript) {
+          await req.respond({
+            status: 200,
+            contentType: 'application/javascript; charset=utf-8',
+            body: localScript,
+          });
+          return;
+        }
+
+        await req.abort();
+      })().catch((err) => {
+        Logger.debug('SandboxRunner', 'Request handling failed:', err);
+        void req.abort().catch((abortErr) => {
+          Logger.debug('SandboxRunner', 'Request abort failed:', abortErr);
+        });
+      });
+    });
+
+    // setContent runs at about:blank: /vendor/ URLs never resolve, so inline
+    // the vendored scripts first (#924). Missing vendor file throws loudly.
+    const html = await inlineVendorAssets(generateHTML({
+      code,
+      title: 'Sandbox',
+      bodyStyle: 'margin: 0; padding: 0; overflow: hidden;',
+      fullscreen: true,
+    }));
+
+    // Race page loading against a manual timeout. When user code blocks the
+    // page's main thread (e.g. while(true){}), Puppeteer's built-in setContent
+    // timeout may not fire. The manual timeout guarantees we always return.
+    const loadPromise = page.setContent(html, { waitUntil: 'load', timeout: timeoutMs });
+    // Prevent unhandled rejection: if the manual timeout fires and kills the
+    // browser, loadPromise will reject. Log it for debugging but don't propagate.
+    loadPromise.catch((err) => {
+      Logger.debug('SandboxRunner', 'Load promise rejected (browser may have been killed):', err);
+    });
+
+    const manualTimeout = new Promise<never>((_, reject) => {
+      manualTimeoutHandle = setTimeout(() => {
+        manualTimeoutFired = true;
+        reject(new Error(`Sandbox timeout: execution exceeded ${timeoutMs}ms`));
+      }, timeoutMs);
+    });
+
+    await Promise.race([loadPromise, manualTimeout]);
+    await page.waitForSelector('canvas', { timeout: Math.min(10000, timeoutMs) });
+    await new Promise((r) => setTimeout(r, 300));
+
+    return { completed: true };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const elapsedMs = Date.now() - startedAt;
+    if (
+      manualTimeoutFired ||
+      (/Navigating frame was detached/i.test(message) && elapsedMs >= timeoutMs - 250)
+    ) {
+      return { completed: false, error: `Sandbox timeout: execution exceeded ${timeoutMs}ms` };
+    }
+    return { completed: false, error: message };
+  } finally {
+    if (manualTimeoutHandle) clearTimeout(manualTimeoutHandle);
+    if (browser) {
+      forceKillBrowser(browser);
+    }
+  }
+}

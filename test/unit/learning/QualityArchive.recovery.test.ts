@@ -1,0 +1,32 @@
+import { afterEach, expect, it, vi } from 'vitest';
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { QualityArchive } from '../../../src/learning/QualityArchive.js';
+const root = path.join(os.tmpdir(), `liminal-archive-${process.pid}`);
+afterEach(async () => { vi.restoreAllMocks(); await fs.rm(root, { recursive: true, force: true }); });
+it('refuses to overwrite an archive after quarantine fails', async () => {
+  await fs.mkdir(root, { recursive: true });
+  const file = path.join(root, 'archive.json');
+  await fs.writeFile(file, 'original unreadable archive');
+  const rename = vi.spyOn(fs, 'rename').mockRejectedValueOnce(new Error('quarantine denied'));
+  const archive = new QualityArchive({ path: file });
+  await archive.load();
+  await expect(archive.save()).rejects.toThrow('ARCHIVE_RECOVERY_REQUIRED');
+  expect(await fs.readFile(file, 'utf8')).toBe('original unreadable archive');
+  rename.mockRestore();
+  await archive.load();
+  await archive.save();
+  expect(JSON.parse(await fs.readFile(file, 'utf8')).archives.p5).toEqual([]);
+});
+it('refuses writes after a non-ENOENT read failure, then allows a successful reload', async () => {
+  await fs.mkdir(root, { recursive: true });
+  const file = path.join(root, 'archive.json');
+  const archive = new QualityArchive({ path: file });
+  vi.spyOn(fs, 'readFile').mockRejectedValueOnce(Object.assign(new Error('unreadable'), {code:'EACCES'}));
+  await archive.load();
+  await expect(archive.save()).rejects.toThrow('ARCHIVE_RECOVERY_REQUIRED');
+  await archive.load();
+  await archive.save();
+  expect(JSON.parse(await fs.readFile(file, 'utf8')).archives.music).toEqual([]);
+});

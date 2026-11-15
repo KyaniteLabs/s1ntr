@@ -1,0 +1,207 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Build output
+dist/
+dist-node/
+*.tsbuildinfo
+dist-desktop/
+.desktop-package/
+.cache/
+.tmp/
+tmp/
+temp/
+*.tgz
+
+# Coverage
+coverage/
+
+# ESLint cache
+.eslintcache
+
+# E2E temp output
+tmp-e2e/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.cursor/
+
+# OS
+.DS_Store
+Thumbs.db
+.AppleDouble
+.LSOverride
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Keep committed audit evidence readable even though ad hoc logs stay ignored.
+!docs/**/*.log
+
+# Environment
+.env
+.env.*
+!.env.example
+!.env.dogfood.example
+*.pem
+*.key
+
+# SinterFS runtime database (SQLite)
+.liminal/
+
+# Generated artifacts
+/gallery/
+/output/
+/test-output/
+
+# Test session logs
+test-stream/
+benchmark-output/
+
+# Claude Code
+.claude/
+
+# Git worktrees (isolated workspaces)
+.worktrees/
+worktrees/
+
+# jdatamunch local indexes
+.jdatamunch/
+
+# Playwright MCP pages
+.playwright-mcp/
+
+# Dogfood temp artifacts
+dogfood-temp/
+
+# Test results (generated artifacts)
+test-results/
+playwright-report/
+blob-report/
+
+# Landing page assets (build output)
+landing-*.png
+landing-archive/
+landing-assets/
+live-p5-test.png
+
+# Stream evolution artifacts
+stream/
+
+# Compost heap generated HTML
+compost/heap/*.html
+
+# Internal planning artifacts
+.todos/
+
+# One-off utility scripts (run locally, not distributed)
+capture-*.cjs
+capture-*.js
+record-*.cjs
+generate-example*.ts
+generate-example*.cjs
+generate-all-examples.ts
+dogfood-report-*.md
+
+# Root-level artifacts (managed in artifacts/ directory)
+regeneration.log
+test-qwen*.log
+
+# Compost state file
+compost/soup-state.json
+
+# Dogfood campaign outputs
+dogfood-output*/
+dogfood-campaign-*/
+dogfood-*.json
+
+# pnpm-only: never commit npm lockfiles or nested workspace lockfiles
+**/package-lock.json
+gui/pnpm-lock.yaml
+
+# Narrative local data
+narrative/data/
+
+# Archaeology database (derived data, rebuild with build-archaeology-db.py)
+narrative/data/archaeology.db
+narrative/data/archaeology.inspect.json
+
+# Python cache
+__pycache__/
+audit-*.png
+
+# oh-my-claudecode runtime state
+.omc/
+
+# oh-my-codex runtime state
+.omx/
+
+# Agent session artifacts
+ISSUE-REPORT.md
+
+# Agent memory (local runtime)
+memory/
+
+# Test temp artifacts (tracked files causing git merge conflicts in test mocks)
+test-export-temp/
+test-api-export-temp/
+test-api-gallery-temp/
+test-gallery-temp/
+.omc/state/
+
+# Duplicate " 2" files (copy artifacts from agents/tools)
+* 2.*
+
+# Test backup files
+*.bak
+
+# Archives
+*.zip
+
+# Sinter runtime object store — content-addressable store (objects, refs) + SQLite
+# DB and its WAL/SHM. All regenerable machine-local state; never tracked.
+/.sinter/
+
+# Quality/QA verification artifacts (baselines, render matrices, compose-verify logs)
+/.quality/*
+# Wave-8 release root is a FROZEN BUILD INPUT, not machine-local state: the
+# release-truth test requires the 16-conjunct wave-8 branch, which activates
+# only when this file exists. Doctrine: build inputs live in the repo.
+# Alternating ladder: re-include each parent dir, re-ignore its contents,
+# so ONLY the named file escapes the ignore (GLM review round 1).
+!/.quality/wave-8/
+/.quality/wave-8/*
+!/.quality/wave-8/release/
+/.quality/wave-8/release/*
+!/.quality/wave-8/release/release-root.json
+
+# Weekly read-only re-score reports (ops output written by the rescore cadence; Phase 4.G2)
+/docs/validation/rescore/
+.gjc/
+packages/sing/public/presets/
+
+# Compost runtime data (generated at runtime; heap source modules, tests,
+# README, digest/*.md, and seeds/seeds.json stay intentionally tracked)
+compost/seeds/archive/
+compost/routing-removal/
+compost/heap/cli-project-final.js
+compost/heap/p5-3-organic.js
+
+# Dogfood runtime outputs (producers such as scripts/dogfood-*.ts write to
+# these same paths; dogfood-campaign/REPORT.md is intentional evidence and
+# stays tracked, so only generated per-run subdirectories are ignored)
+dogfood-telemetry/
+dogfood-test/
+dogfood-campaign-dashboard.html
+dogfood-campaign/*/
+dogfood-campaign/*.json
+/dogfood-cloud-agent-*.ts
+node_modules

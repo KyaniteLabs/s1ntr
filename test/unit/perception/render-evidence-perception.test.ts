@@ -1,0 +1,261 @@
+import { describe, expect, it } from 'vitest';
+import { evaluateRenderEvidencePerception, measureRenderEvidence } from '../../../src/perception/RenderEvidencePerception.js';
+import type { RenderEvidence } from '../../../src/core/types/GenerationEvaluation.js';
+
+async function getSharp() {
+  const mod = await import('sharp');
+  return (mod.default ?? mod) as unknown as {
+    (input: unknown, options?: unknown): {
+      png(): { toBuffer(): Promise<Buffer> };
+    };
+  };
+}
+
+async function createPngBase64(kind: 'varied' | 'solid' | 'transparent' | 'clipped'): Promise<string> {
+  const sharp = await getSharp();
+  const width = 8;
+  const height = 8;
+
+  if (kind === 'solid' || kind === 'transparent') {
+    const buffer = await sharp({
+      create: {
+        width,
+        height,
+        channels: 4,
+        background: kind === 'transparent'
+          ? { r: 0, g: 0, b: 0, alpha: 0 }
+          : { r: 255, g: 255, b: 255, alpha: 1 },
+      },
+    }).png().toBuffer();
+    return buffer.toString('base64');
+  }
+
+  const data = Buffer.alloc(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = (y * width + x) * 4;
+      const clipped = kind === 'clipped' && x >= 6;
+      data[idx] = clipped ? 255 : x * (kind === 'clipped' ? 12 : 32);
+      data[idx + 1] = clipped ? 255 : y * (kind === 'clipped' ? 12 : 32);
+      data[idx + 2] = clipped ? 255 : (x + y) * (kind === 'clipped' ? 6 : 16);
+      data[idx + 3] = 255;
+    }
+  }
+  const buffer = await sharp(data, { raw: { width, height, channels: 4 } }).png().toBuffer();
+  return buffer.toString('base64');
+}
+
+describe('render evidence perception mapping', () => {
+  it('treats decoded varied screenshots as runtime visual visibility evidence', async () => {
+    const evidence: RenderEvidence = {
+      timingMs: 120,
+      infraUnavailable: false,
+      candidateFailure: false,
+      screenshot: { mimeType: 'image/png', dataBase64: await createPngBase64('varied'), width: 8, height: 8 },
+    };
+
+    await expect(evaluateRenderEvidencePerception(evidence, 'p5')).resolves.toMatchObject({ passed: true });
+    const noScreenshot = await evaluateRenderEvidencePerception({ timingMs: 120, infraUnavailable: false, candidateFailure: false }, 'p5');
+    expect(noScreenshot.issues.map(i => i.id))
+      .toContain('visual.no-visible-content');
+  });
+
+  it('surfaces decoded luminance measurement on render evidence', async () => {
+    const evidence: RenderEvidence = {
+      timingMs: 120,
+      infraUnavailable: false,
+      candidateFailure: false,
+      screenshot: { mimeType: 'image/png', dataBase64: await createPngBase64('varied'), width: 8, height: 8 },
+    };
+
+    const measure = await measureRenderEvidence(evidence);
+    await expect(evaluateRenderEvidencePerception(evidence, 'p5')).resolves.toMatchObject({ passed: true });
+
+    expect(measure?.verdict).toBe('ok');
+    expect(evidence.renderMeasure?.meanLuminance).toBeGreaterThan(0.2);
+    expect(evidence.renderMeasure?.meanLuminance).toBeLessThan(0.8);
+    expect(evidence.renderMeasure?.brightFraction).toBeLessThan(0.5);
+    expect(evidence.renderMeasure?.darkFraction).toBeLessThan(0.5);
+  });
+
+  it('stores brightnessStd on the documented 0..255 luma scale (LuminanceMeasure contract)', async () => {
+    // The varied 8×8 gradient has luma = 11.392x + 20.608y (x,y ∈ 0..7), whose
+    // analytic std is ≈53.9 on the 0..255 scale. A 0..1-normalized value (the
+    // FAB-021 bug, ≈0.21) misleads archive audits and any threshold consumer.
+    const evidence: RenderEvidence = {
+      timingMs: 120,
+      infraUnavailable: false,
+      candidateFailure: false,
+      screenshot: { mimeType: 'image/png', dataBase64: await createPngBase64('varied'), width: 8, height: 8 },
+    };
+
+    const measure = await measureRenderEvidence(evidence);
+    expect(measure?.brightnessStd).toBeGreaterThan(50);
+    expect(measure?.brightnessStd).toBeLessThan(58);
+  });
+
+  it('fails closed when a dark structured frame has concentrated clipped highlights', async () => {
+    const evidence: RenderEvidence = {
+      timingMs: 120,
+      infraUnavailable: false,
+      candidateFailure: false,
+      screenshot: { mimeType: 'image/png', dataBase64: await createPngBase64('clipped'), width: 8, height: 8 },
+    };
+
+    const result = await evaluateRenderEvidencePerception(evidence, 'glsl');
+    expect(result.passed).toBe(false);
+    expect(result.issues.map(issue => issue.id)).toContain('visual.highlight-clipped');
+    expect(evidence.renderMeasure?.verdict).toBe('highlight-clipped');
+  });
+
+  it('rejects solid and transparent screenshots as invisible visual evidence', async () => {
+    const solid: RenderEvidence = {
+      timingMs: 120,
+      infraUnavailable: false,
+      candidateFailure: false,
+      screenshot: { mimeType: 'image/png', dataBase64: await createPngBase64('solid'), width: 8, height: 8 },
+    };
+    const transparent: RenderEvidence = {
+      timingMs: 120,
+      infraUnavailable: false,
+      candidateFailure: false,
+      screenshot: { mimeType: 'image/png', dataBase64: await createPngBase64('transparent'), width: 8, height: 8 },
+    };
+
+    const solidResult = await evaluateRenderEvidencePerception(solid, 'p5');
+    const transparentResult = await evaluateRenderEvidencePerception(transparent, 'p5');
+
+    expect(solidResult.passed).toBe(false);
+    expect(solidResult.issues.map(i => i.id)).toContain('visual.no-visible-content');
+    expect(transparentResult.passed).toBe(false);
+    expect(transparentResult.issues.map(i => i.id)).toContain('visual.no-visible-content');
+  });
+
+  it('rechecks visibility when screenshot bytes change on the same evidence object', async () => {
+    const evidence: RenderEvidence = {
+      timingMs: 120,
+      infraUnavailable: false,
+      candidateFailure: false,
+      screenshot: { mimeType: 'image/png', dataBase64: await createPngBase64('varied'), width: 8, height: 8 },
+    };
+    expect((await evaluateRenderEvidencePerception(evidence, 'revideo')).passed).toBe(true);
+    evidence.screenshot = { ...evidence.screenshot!, dataBase64: await createPngBase64('solid') };
+    expect((await evaluateRenderEvidencePerception(evidence, 'revideo')).passed).toBe(false);
+  });
+
+  it('fails text domains on a blank or missing frame instead of passing a placeholder (#1280)', async () => {
+    const base = { timingMs: 120, infraUnavailable: false, candidateFailure: false };
+    const solid: RenderEvidence = {
+      ...base,
+      screenshot: { mimeType: 'image/png', dataBase64: await createPngBase64('solid'), width: 8, height: 8 },
+    };
+    for (const evidence of [solid, base as RenderEvidence]) {
+      const result = await evaluateRenderEvidencePerception(evidence, 'ascii');
+      expect(result.passed).toBe(false);
+      expect(result.issues.map(i => i.id)).toEqual(['text.no-visible-render']);
+    }
+  });
+
+  it('passes text domains with a visible frame without claiming text content (#1280)', async () => {
+    const evidence: RenderEvidence = {
+      timingMs: 120, infraUnavailable: false, candidateFailure: false,
+      screenshot: { mimeType: 'image/png', dataBase64: await createPngBase64('varied'), width: 8, height: 8 },
+    };
+    await expect(evaluateRenderEvidencePerception(evidence, 'textgen')).resolves.toMatchObject({ passed: true, issues: [] });
+  });
+
+  it('maps failed audio capture in music domains to unintended silence', async () => {
+    const evidence: RenderEvidence = {
+      timingMs: 120,
+      infraUnavailable: false,
+      candidateFailure: false,
+      audio: { success: false, error: 'No audio captured during render window', durationSeconds: 2 },
+    };
+
+    const result = await evaluateRenderEvidencePerception(evidence, 'strudel');
+    expect(result.passed).toBe(false);
+    expect(result.issues.map(i => i.id)).toContain('audio.unintended-silence');
+  });
+
+  it('allows captured audible audio evidence', async () => {
+    const evidence: RenderEvidence = {
+      timingMs: 120,
+      infraUnavailable: false,
+      candidateFailure: false,
+      audio: { success: true, peakAmplitude: 0.25, rmsAmplitude: 0.08, sampleRate: 44_100, durationSeconds: 2 },
+    };
+
+    await expect(evaluateRenderEvidencePerception(evidence, 'tone')).resolves.toMatchObject({ passed: true });
+  });
+
+  it('maps video evidence to human viewing ergonomics', async () => {
+    const evidence: RenderEvidence = {
+      timingMs: 120,
+      infraUnavailable: false,
+      candidateFailure: false,
+      screenshot: { mimeType: 'image/png', dataBase64: await createPngBase64('varied'), width: 8, height: 8 },
+      video: { fps: 240, durationSeconds: 5 },
+    };
+
+    const result = await evaluateRenderEvidencePerception(evidence, 'revideo');
+    expect(result.issues.map(i => i.id)).toContain('video.fps-outside-useful-range');
+  });
+
+  describe('H13 two-frame capture: the late frame is authoritative', () => {
+    it('pair A (decay): late dead frame wins and sets temporalDecay', async () => {
+      const evidence: RenderEvidence = {
+        timingMs: 120,
+        infraUnavailable: false,
+        candidateFailure: false,
+        screenshot: { mimeType: 'image/png', dataBase64: await createPngBase64('varied'), width: 8, height: 8 },
+        lateScreenshot: { mimeType: 'image/png', dataBase64: await createPngBase64('solid'), width: 8, height: 8 },
+      };
+      const measure = await measureRenderEvidence(evidence);
+      // The solid-white late frame measures washed/invisible; it is the steady state.
+      expect(measure?.temporalDecay).toBe(true);
+      expect(measure?.meanLuminance).toBeGreaterThan(0.9); // late (solid white) frame's measure, not the varied first frame's
+    });
+
+    it('pair B (loading flash): healthy late frame wins with no decay flag', async () => {
+      const evidence: RenderEvidence = {
+        timingMs: 120,
+        infraUnavailable: false,
+        candidateFailure: false,
+        screenshot: { mimeType: 'image/png', dataBase64: await createPngBase64('solid'), width: 8, height: 8 },
+        lateScreenshot: { mimeType: 'image/png', dataBase64: await createPngBase64('varied'), width: 8, height: 8 },
+      };
+      const measure = await measureRenderEvidence(evidence);
+      expect(measure?.temporalDecay).toBeUndefined();
+      expect(measure?.meanLuminance).toBeGreaterThan(0.2);
+      expect(measure?.meanLuminance).toBeLessThan(0.8); // the varied late frame's measure
+      expect(measure?.verdict).toBe('ok');
+    });
+
+    it('keeps a clipped late frame authoritative during perception evaluation', async () => {
+      const evidence: RenderEvidence = {
+        timingMs: 120,
+        infraUnavailable: false,
+        candidateFailure: false,
+        screenshot: { mimeType: 'image/png', dataBase64: await createPngBase64('varied'), width: 8, height: 8 },
+        lateScreenshot: { mimeType: 'image/png', dataBase64: await createPngBase64('clipped'), width: 8, height: 8 },
+      };
+
+      const result = await evaluateRenderEvidencePerception(evidence, 'glsl');
+      expect(result.passed).toBe(false);
+      expect(evidence.renderMeasure?.verdict).toBe('highlight-clipped');
+      expect(evidence.renderMeasure?.temporalDecay).toBe(true);
+    });
+
+    it('no late screenshot: behavior is byte-identical to single-frame', async () => {
+      const evidence: RenderEvidence = {
+        timingMs: 120,
+        infraUnavailable: false,
+        candidateFailure: false,
+        screenshot: { mimeType: 'image/png', dataBase64: await createPngBase64('varied'), width: 8, height: 8 },
+      };
+      const measure = await measureRenderEvidence(evidence);
+      expect(measure?.verdict).toBe('ok');
+      expect(measure?.temporalDecay).toBeUndefined();
+    });
+  });
+});

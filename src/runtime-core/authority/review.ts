@@ -1,0 +1,62 @@
+import { authorityRow, type ProductionAuthorityPath } from './types.js';
+
+/**
+ * Review-writer and journal authority rows.
+ * Add new rows here, one per line, instead of editing ProductionAuthorityRegistry.ts.
+ */
+export const reviewAuthorityRows: readonly ProductionAuthorityPath[] = [
+  authorityRow(
+    'src/creative-run/OwnerReviewLifecycle.ts:review-writer',
+    'review-writer',
+    'owner-review-domain-authority',
+    'authoritative',
+  ),
+  authorityRow(
+    'src/runtime-core/LiminalCommandFilePersistence.ts:journal',
+    'journal',
+    'operation-journal-authority',
+    'authoritative',
+  ),
+  authorityRow(
+    'scripts/compact-liminal-journal.mjs:journal',
+    'journal',
+    'operation-journal-authority',
+    'authoritative',
+  ),
+  authorityRow(
+    'src/runtime-core/LiminalOwnerReviewAuthority.ts:review-writer',
+    'review-writer',
+    'liminal-owner-review-receipt-authority',
+    'authoritative',
+  ),
+  authorityRow(
+    'src/runtime-core/ProductionLiminalRuntime.ts:journal',
+    'journal',
+    'operation-journal-authority',
+    'authoritative',
+  ),
+  authorityRow(
+    'src/cli/LiminalAuthoritativeCreate.ts:journal',
+    'journal',
+    'operation-journal-authority',
+    'authoritative',
+  ),
+  authorityRow(
+    'src/cli/LiminalRenderedEvidenceProof.ts:journal',
+    'journal',
+    'test-proof-journal',
+    'projection-only',
+  ),
+  authorityRow(
+    'src/creative-run/CreativeRunCoordinatorBase.ts:review-writer',
+    'review-writer',
+    'campaign-review-authority',
+    'authoritative',
+  ),
+  authorityRow(
+    'src/creative-run/OwnerQualityReview.ts:review-writer',
+    'review-writer',
+    'owner-review-domain-authority',
+    'authoritative',
+  ),
+];

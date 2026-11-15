@@ -1,0 +1,429 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import {
+  EPISODE_CODE_TRUNCATION_MARKER,
+  HarnessMemory,
+  MAX_EPISODE_CODE_BYTES,
+  MAX_RETAINED_EPISODES,
+} from '../../../src/harness/HarnessMemory.js';
+import { Status } from '../../../src/types/status.js';
+
+vi.mock('node:fs', () => ({
+  promises: {
+    mkdir: vi.fn().mockResolvedValue(undefined),
+    readFile: vi.fn().mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' })),
+    writeFile: vi.fn().mockResolvedValue(undefined),
+    readdir: vi.fn().mockResolvedValue([]),
+    unlink: vi.fn().mockResolvedValue(undefined),
+  },
+}));
+
+vi.mock('../../../src/utils/Logger.js', () => ({
+  Logger: {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+}));
+
+vi.mock('../../../src/embeddings/EmbeddingService.js', () => ({
+  getGlobalEmbeddingService: vi.fn(),
+}));
+
+vi.mock('../../../src/utils/vectors.js', () => ({
+  findKNearestNeighbors: vi.fn(),
+}));
+
+// save() persists via writeFileAtomic (node:fs/promises under the hood), not the
+// mocked node:fs — so failure injection targets the atomic-write boundary directly.
+vi.mock('../../../src/utils/atomicWrite.js', () => ({
+  writeFileAtomic: vi.fn().mockResolvedValue(undefined),
+  writeFileAtomicSync: vi.fn(),
+}));
+
+// Helper: create and initialize a fresh HarnessMemory per test.
+// Each test gets its own instance with clean state.
+async function createMemory(): Promise<HarnessMemory> {
+  const { promises: fs } = await import('node:fs');
+  vi.mocked(fs).readFile.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+  vi.mocked(fs).readdir.mockResolvedValue([]);
+  vi.mocked(fs).unlink.mockResolvedValue(undefined);
+  vi.mocked(fs).writeFile.mockResolvedValue(undefined);
+  const mem = new HarnessMemory();
+  await mem.initialize();
+  return mem;
+}
+
+describe('HarnessMemory', () => {
+  let memory: HarnessMemory;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    memory = await createMemory();
+  });
+
+  describe('task operations', () => {
+    it('starts a task and returns its id', () => {
+      const id = memory.startTask({ type: 'M1', description: 'Test task' });
+      expect(id).toMatch(/^task_/);
+      const tasks = memory.getTasks();
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0].status).toBe(Status.IN_PROGRESS);
+      expect(tasks[0].type).toBe('M1');
+    });
+
+    it('completes a task with outcome', () => {
+      const id = memory.startTask({ type: 'M2', description: 'Complete me' });
+      memory.completeTask(id, { status: Status.COMPLETED, outcome: 'done', artifacts: ['file.ts'] });
+      const task = memory.getTasks().find(t => t.id === id)!;
+      expect(task.status).toBe(Status.COMPLETED);
+      expect(task.outcome).toBe('done');
+      expect(task.artifacts).toEqual(['file.ts']);
+      expect(task.completedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+    });
+
+    it('completes a task with error', () => {
+      const id = memory.startTask({ type: 'M3', description: 'Fail me' });
+      memory.completeTask(id, { status: Status.FAILED, error: 'timeout' });
+      const task = memory.getTasks().find(t => t.id === id)!;
+      expect(task.status).toBe(Status.FAILED);
+      expect(task.error).toBe('timeout');
+    });
+
+    it('ignores completeTask for nonexistent id', () => {
+      memory.startTask({ type: 'M4', description: 'Only task' });
+      memory.completeTask('task_nonexistent', { status: Status.COMPLETED });
+      expect(memory.getTasks()).toHaveLength(1);
+      expect(memory.getTasks()[0].status).toBe(Status.IN_PROGRESS);
+    });
+
+    it('getPendingTasks returns only pending tasks', () => {
+      const id = memory.startTask({ type: 'M5', description: 'Active' });
+      memory.completeTask(id, { status: Status.COMPLETED });
+      expect(memory.getPendingTasks()).toHaveLength(0);
+    });
+
+    it('getIncompleteTasks returns pending and in-progress', () => {
+      memory.startTask({ type: 'M7', description: 'In progress' });
+      expect(memory.getIncompleteTasks()).toHaveLength(1);
+    });
+
+    it('getTasksByType filters by type', () => {
+      memory.startTask({ type: 'M1', description: 'First' });
+      memory.startTask({ type: 'M2', description: 'Second' });
+      memory.startTask({ type: 'M1', description: 'Third' });
+      expect(memory.getTasksByType('M1')).toHaveLength(2);
+      expect(memory.getTasksByType('M2')).toHaveLength(1);
+    });
+  });
+
+  describe('adaptation operations', () => {
+    it('records an adaptation', () => {
+      const id = memory.recordAdaptation({
+        patternName: 'missing-setup',
+        patternSeverity: 'high',
+        fixType: 'prompt',
+        description: 'Added setup() prompt',
+        success: true,
+      });
+      expect(id).toMatch(/^adapt_/);
+      expect(memory.getAdaptations()).toHaveLength(1);
+    });
+
+    it('filters successful adaptations', () => {
+      memory.recordAdaptation({
+        patternName: 'p1', patternSeverity: 'low', fixType: 'config',
+        description: 'Config fix', success: true,
+      });
+      memory.recordAdaptation({
+        patternName: 'p2', patternSeverity: 'medium', fixType: 'code',
+        description: 'Code fix', success: false,
+      });
+      expect(memory.getSuccessfulAdaptations()).toHaveLength(1);
+    });
+
+    it('filters adaptations by pattern name', () => {
+      memory.recordAdaptation({
+        patternName: 'washout', patternSeverity: 'high', fixType: 'prompt',
+        description: 'Fix 1', success: true,
+      });
+      memory.recordAdaptation({
+        patternName: 'other', patternSeverity: 'low', fixType: 'template',
+        description: 'Fix 2', success: true,
+      });
+      expect(memory.getAdaptationsForPattern('washout')).toHaveLength(1);
+    });
+
+    it('increments totalAdaptations stat', () => {
+      memory.recordAdaptation({
+        patternName: 'p', patternSeverity: 'low', fixType: 'manual',
+        description: 'Manual fix', success: true,
+      });
+      expect(memory.getStats().totalAdaptations).toBe(1);
+    });
+  });
+
+  describe('episode operations', () => {
+    it('records a generation episode', () => {
+      const id = memory.recordEpisode({
+        type: 'generation',
+        domain: 'hydra',
+        prompt: 'test prompt',
+        code: 'osc()',
+        score: 0.8,
+      });
+      expect(id).toMatch(/^ep_/);
+      expect(memory.getStats().totalGenerations).toBe(1);
+    });
+
+    it('records a conversation episode', () => {
+      memory.recordEpisode({ type: 'conversation', comment: 'user feedback' });
+      expect(memory.getStats().totalConversations).toBe(1);
+    });
+
+    it('does not increment counters for feedback type', () => {
+      memory.recordEpisode({ type: 'feedback', comment: 'liked it' });
+      expect(memory.getStats().totalGenerations).toBe(0);
+      expect(memory.getStats().totalConversations).toBe(0);
+    });
+
+    it('getRecentEpisodes returns sorted by timestamp', () => {
+      vi.useFakeTimers();
+      memory.recordEpisode({ type: 'generation', prompt: 'first' });
+      vi.advanceTimersByTime(10);
+      memory.recordEpisode({ type: 'generation', prompt: 'second' });
+      const recent = memory.getRecentEpisodes(10);
+      expect(recent[0].prompt).toBe('second');
+      vi.useRealTimers();
+    });
+
+    it('getEpisodesByType filters correctly', () => {
+      memory.recordEpisode({ type: 'generation', prompt: 'gen' });
+      memory.recordEpisode({ type: 'conversation', comment: 'conv' });
+      expect(memory.getEpisodesByType('generation')).toHaveLength(1);
+    });
+
+    it('getEpisodesByDomain filters correctly', () => {
+      memory.recordEpisode({ type: 'generation', domain: 'hydra', prompt: 'h' });
+      memory.recordEpisode({ type: 'generation', domain: 'p5', prompt: 'p' });
+      expect(memory.getEpisodesByDomain('hydra')).toHaveLength(1);
+    });
+
+    it('preserves code below and at the byte boundary', () => {
+      const below = 'a'.repeat(MAX_EPISODE_CODE_BYTES - 1);
+      const at = 'a'.repeat(MAX_EPISODE_CODE_BYTES);
+      memory.recordEpisode({ type: 'generation', code: below });
+      memory.recordEpisode({ type: 'generation', code: at });
+
+      const episodes = memory.getEpisodesByType('generation');
+      expect(episodes[0].code).toBe(below);
+      expect(episodes[1].code).toBe(at);
+    });
+
+    it('truncates oversized code at a valid UTF-8 boundary with a stable marker', () => {
+      memory.recordEpisode({
+        type: 'generation',
+        code: 'a'.repeat(MAX_EPISODE_CODE_BYTES - 1) + '😀tail',
+      });
+
+      const code = memory.getEpisodesByType('generation')[0].code!;
+      expect(code).toBe('a'.repeat(MAX_EPISODE_CODE_BYTES - 1) + EPISODE_CODE_TRUNCATION_MARKER);
+      expect(Buffer.byteLength(code.slice(0, -Buffer.byteLength(EPISODE_CODE_TRUNCATION_MARKER)), 'utf8'))
+        .toBeLessThanOrEqual(MAX_EPISODE_CODE_BYTES);
+    });
+  });
+
+  describe('pattern operations', () => {
+    it('records a new pattern', () => {
+      memory.recordPatternOccurrence('washout', 'hydra');
+      const history = memory.getPatternHistory();
+      expect(history).toHaveLength(1);
+      expect(history[0].patternName).toBe('washout');
+      expect(history[0].occurrences).toBe(1);
+      expect(history[0].affectedDomains).toEqual(['hydra']);
+    });
+
+    it('increments existing pattern occurrences', () => {
+      memory.recordPatternOccurrence('washout', 'hydra');
+      memory.recordPatternOccurrence('washout', 'p5');
+      const pattern = memory.getPatternHistory()[0];
+      expect(pattern.occurrences).toBe(2);
+      expect(pattern.affectedDomains).toContain('hydra');
+      expect(pattern.affectedDomains).toContain('p5');
+    });
+
+    it('does not duplicate domain in affectedDomains', () => {
+      memory.recordPatternOccurrence('washout', 'hydra');
+      memory.recordPatternOccurrence('washout', 'hydra');
+      const pattern = memory.getPatternHistory()[0];
+      expect(pattern.affectedDomains).toEqual(['hydra']);
+      expect(pattern.occurrences).toBe(2);
+    });
+
+    it('getFrequentPatterns filters by min occurrences', () => {
+      memory.recordPatternOccurrence('rare', 'p5');
+      memory.recordPatternOccurrence('common', 'hydra');
+      memory.recordPatternOccurrence('common', 'hydra');
+      memory.recordPatternOccurrence('common', 'p5');
+      // 'common' has 3 occurrences; threshold uses >=
+      expect(memory.getFrequentPatterns(4)).toHaveLength(0);
+      expect(memory.getFrequentPatterns(3)).toHaveLength(1);
+    });
+  });
+
+  describe('save and error handling', () => {
+    it('returns ok on successful save', async () => {
+      const result = await memory.save();
+      expect(result.isOk()).toBe(true);
+      expect(memory.hasSaveError).toBe(false);
+    });
+
+    it('returns err and sets hasSaveError on failure', async () => {
+      const { writeFileAtomic } = await import('../../../src/utils/atomicWrite.js');
+      vi.mocked(writeFileAtomic).mockRejectedValueOnce(new Error('disk full'));
+      const result = await memory.save();
+      expect(result.isErr()).toBe(true);
+      expect(memory.hasSaveError).toBe(true);
+    });
+
+    it('defensively bounds saved code and retains the newest episodes in order', async () => {
+      const { writeFileAtomic } = await import('../../../src/utils/atomicWrite.js');
+      for (let index = 0; index < MAX_RETAINED_EPISODES + 2; index++) {
+        memory.recordEpisode({
+          type: 'generation',
+          prompt: String(index),
+          code: index === MAX_RETAINED_EPISODES + 1
+            ? 'x'.repeat(MAX_EPISODE_CODE_BYTES + 1)
+            : undefined,
+        });
+      }
+
+      await memory.save();
+
+      const persisted = JSON.parse(vi.mocked(writeFileAtomic).mock.calls.at(-1)![1] as string);
+      expect(persisted.episodes).toHaveLength(MAX_RETAINED_EPISODES);
+      expect(persisted.episodes.map((episode: { prompt: string }) => episode.prompt))
+        .toEqual(Array.from({ length: MAX_RETAINED_EPISODES }, (_, index) => String(index + 2)));
+      expect(persisted.episodes.at(-1).code).toBe(
+        'x'.repeat(MAX_EPISODE_CODE_BYTES) + EPISODE_CODE_TRUNCATION_MARKER,
+      );
+    });
+  });
+
+  describe('getStatus', () => {
+    it('returns comprehensive status', () => {
+      memory.startTask({ type: 'M1', description: 'Test' });
+      memory.recordEpisode({ type: 'generation', domain: 'p5', prompt: 'hi' });
+      const status = memory.getStatus();
+      expect(status.tasksTotal).toBe(1);
+      expect(status.episodesTotal).toBe(1);
+      expect(status.initialized).toBe(true);
+    });
+  });
+
+  describe('temporary-file cleanup', () => {
+    it('removes only target-prefixed temporary files and preserves unrelated files', async () => {
+      const { promises: fs } = await import('node:fs');
+      vi.mocked(fs).readdir.mockResolvedValue([
+        'harness-memory.json',
+        'harness-memory.json.tmp-orphan',
+        'other.json.tmp-orphan',
+        'notes.txt',
+      ] as never);
+
+      const mem = new HarnessMemory();
+      await mem.initialize();
+
+      expect(fs.unlink).toHaveBeenCalledTimes(1);
+      expect(fs.unlink).toHaveBeenCalledWith(expect.stringMatching(/harness-memory\.json\.tmp-orphan$/));
+    });
+
+    it('warns on cleanup failure and still loads the canonical store', async () => {
+      const { promises: fs } = await import('node:fs');
+      const { Logger } = await import('../../../src/utils/Logger.js');
+      vi.mocked(fs).readdir.mockRejectedValueOnce(new Error('cleanup denied'));
+      vi.mocked(fs).readFile.mockResolvedValueOnce(JSON.stringify({
+        version: 2,
+        episodes: [],
+      }) as never);
+
+      const mem = new HarnessMemory();
+      await mem.initialize();
+
+      expect(Logger.warn).toHaveBeenCalledWith(
+        'HarnessMemory',
+        expect.stringContaining('cleanup denied'),
+      );
+      expect(fs.readFile).toHaveBeenCalledTimes(2);
+      expect(mem.getStatus().initialized).toBe(true);
+    });
+  });
+
+  describe('timer lifecycle and shutdown flush (E7)', () => {
+    it('unrefs the 30s auto-save interval so it does not keep the process alive', async () => {
+      const { promises: fs } = await import('node:fs');
+      vi.mocked(fs).readFile.mockRejectedValue(
+        Object.assign(new Error('ENOENT'), { code: 'ENOENT' }),
+      );
+
+      // Capture the timer handle returned by the auto-save setInterval and
+      // spy on its unref() so we can assert it was invoked.
+      const realSetInterval = global.setInterval;
+      const unrefSpy = vi.fn();
+      const setIntervalSpy = vi
+        .spyOn(global, 'setInterval')
+        .mockImplementation(((fn: () => void, ms?: number) => {
+          const handle = realSetInterval(fn, ms);
+          (handle as NodeJS.Timeout).unref = unrefSpy as never;
+          return handle;
+        }) as never);
+
+      const mem = new HarnessMemory();
+      await mem.initialize();
+
+      // The 30s auto-save interval must have been created and unref'd exactly once.
+      expect(setIntervalSpy).toHaveBeenCalledWith(expect.any(Function), 30000);
+      expect(unrefSpy).toHaveBeenCalledTimes(1);
+
+      await mem.shutdown();
+      setIntervalSpy.mockRestore();
+    });
+
+    it('flushes pending dirty state to disk on shutdown', async () => {
+      const { writeFileAtomic } = await import('../../../src/utils/atomicWrite.js');
+
+      // Initialize wrote once (initial save); clear so we only see the flush.
+      vi.mocked(writeFileAtomic).mockClear();
+
+      // Make in-flight memory that has NOT yet been auto-saved.
+      memory.recordEpisode({
+        type: 'generation',
+        domain: 'hydra',
+        prompt: 'unflushed-on-purpose',
+        score: 0.42,
+      });
+
+      await memory.shutdown();
+
+      // Shutdown must have persisted exactly once, and the persisted payload
+      // must contain the pending episode (real state, not a stub).
+      expect(writeFileAtomic).toHaveBeenCalledTimes(1);
+      const [, payload] = vi.mocked(writeFileAtomic).mock.calls[0];
+      const persisted = JSON.parse(payload as string);
+      expect(persisted.episodes).toHaveLength(1);
+      expect(persisted.episodes[0].prompt).toBe('unflushed-on-purpose');
+      expect(persisted.episodes[0].score).toBe(0.42);
+    });
+
+    it('does not write again on shutdown when there is nothing pending', async () => {
+      const { writeFileAtomic } = await import('../../../src/utils/atomicWrite.js');
+
+      // Persist current state, then clear the spy so a no-op shutdown is visible.
+      await memory.save();
+      vi.mocked(writeFileAtomic).mockClear();
+
+      await memory.shutdown();
+      expect(writeFileAtomic).not.toHaveBeenCalled();
+    });
+  });
+});

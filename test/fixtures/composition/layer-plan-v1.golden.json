@@ -1,0 +1,58 @@
+{
+  "schema": "sinter.layer-plan",
+  "schemaVersion": "1.0",
+  "id": "calm-orbit",
+  "title": "Calm Orbit",
+  "canvas": { "width": 800, "height": 600, "backgroundColor": "#05070f" },
+  "provenance": {
+    "generatedAt": "2026-07-26T00:00:00.000Z",
+    "sinterVersion": "2.4.0",
+    "sourceCommit": "fixture"
+  },
+  "layers": [
+    {
+      "id": "background-field",
+      "name": "Background field",
+      "sourceIndex": 0,
+      "domain": "p5",
+      "role": "background",
+      "blendMode": "normal",
+      "opacity": 1,
+      "zIndex": 0,
+      "bounds": { "x": 0, "y": 0, "width": 1, "height": 1 },
+      "alpha": { "mode": "opaque" },
+      "artifact": {
+        "path": "layers/background-field.html",
+        "mimeType": "text/html",
+        "sha256": "c32ed316b2c26bf5d4d28ef66b168eb185edc126c8cbe936b74b7f824337587b"
+      },
+      "generation": {
+        "prompt": "Background field",
+        "generator": "p5",
+        "generatedAt": "2026-07-26T00:00:00.000Z"
+      }
+    },
+    {
+      "id": "orbit-lines",
+      "name": "Orbit lines",
+      "sourceIndex": 1,
+      "domain": "glsl",
+      "role": "foreground",
+      "blendMode": "screen",
+      "opacity": 0.85,
+      "zIndex": 1,
+      "bounds": { "x": 0, "y": 0, "width": 1, "height": 1 },
+      "alpha": { "mode": "embedded" },
+      "artifact": {
+        "path": "layers/orbit-lines.html",
+        "mimeType": "text/html",
+        "sha256": "ee589330a455cff3cb93cca0e44e2f515791168493b52538879b736b9d5b955d"
+      },
+      "generation": {
+        "prompt": "Orbit lines",
+        "generator": "shader",
+        "generatedAt": "2026-07-26T00:00:00.000Z"
+      }
+    }
+  ]
+}

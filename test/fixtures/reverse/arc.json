@@ -1,0 +1,32 @@
+{
+  "sections": [
+    {
+      "t_start": 0,
+      "t_end": 20,
+      "energy": 0.2,
+      "label": "intro"
+    },
+    {
+      "t_start": 20,
+      "t_end": 50,
+      "energy": 0.9,
+      "label": "peak"
+    },
+    {
+      "t_start": 50,
+      "t_end": 60,
+      "energy": 0.3,
+      "label": "outro"
+    }
+  ],
+  "cues": [
+    {
+      "t": 20,
+      "kind": "drop"
+    },
+    {
+      "t": 60,
+      "kind": "hit"
+    }
+  ]
+}

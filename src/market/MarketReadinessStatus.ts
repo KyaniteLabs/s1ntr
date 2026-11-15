@@ -1,0 +1,231 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { validateProofReceipt } from '../runtime-core/ProofReceiptValidator.js';
+
+// 'advisory' checks are source-presence signals only (grep hits). They are
+// reported for context but never gate the smoke verdict — a verdict that can be
+// satisfied by string literals existing in source is a fabricated verdict.
+export type MarketReadinessCheckStatus = 'pass' | 'fail' | 'unknown' | 'advisory';
+
+export interface MarketReadinessCheck {
+  id: string;
+  label: string;
+  status: MarketReadinessCheckStatus;
+  evidence: string;
+}
+
+export interface MarketReadinessStatus {
+  ready: boolean;
+  verdict: 'ready' | 'not-ready';
+  checks: MarketReadinessCheck[];
+  blockers: string[];
+}
+
+function isExecutionVerified(check: MarketReadinessCheck): boolean {
+  return check.status !== 'advisory';
+}
+
+export function buildMarketReadinessStatus(input: { checks: MarketReadinessCheck[] }): MarketReadinessStatus {
+  const gating = input.checks.filter(isExecutionVerified);
+  const blockers = gating
+    .filter((check) => check.status !== 'pass')
+    .map((check) => `${check.label}: ${check.evidence}`);
+  // Passing requires at least one execution-verified check; an all-advisory
+  // report (source-presence only) never passes the smoke checks.
+  const ready = gating.length > 0 && blockers.length === 0;
+  return {
+    ready,
+    verdict: ready ? 'ready' : 'not-ready',
+    checks: input.checks,
+    blockers,
+  };
+}
+
+export function collectRepositoryMarketReadinessStatus(repoRoot = process.cwd()): MarketReadinessStatus {
+  const packagedInstall = isPackagedInstall(repoRoot);
+  const bin = read(path.join(repoRoot, 'bin', 'sinter'));
+  const telemetry = read(path.join(repoRoot, 'gui', 'src', 'gui', 'workbenchTelemetry.ts'));
+  const app = read(path.join(repoRoot, 'gui', 'src', 'App.tsx'));
+  const cliReceipt = read(path.join(repoRoot, 'src', 'cli', 'CognitiveReceiptReporter.ts'));
+  const wrappers = read(path.join(repoRoot, 'src', 'core', 'wrappers', 'GenericWrapper.ts'));
+  const level6Gate = read(path.join(repoRoot, 'src', 'runtime-core', 'Level6ReleaseGate.ts'));
+
+  const checks: MarketReadinessCheck[] = [
+    sourceCheck('natural-cli', 'Natural CLI front door', bin, ['inferNaturalLanguagePrompt', 'sinter "natural language prompt"']),
+    sourceCheck('creative-wrappers', 'Creative domain wrapper breadth', wrappers, ['strudel-editor', 'wrapRevideo', 'Hydra', 'Tone'], packagedInstall),
+    sourceCheck('studio-cognition', 'Studio learning receipts', `${telemetry}\n${app}`, ['latestCognitiveReceipt', 'What Sinter learned', 'sinter-cognitive-receipt'], packagedInstall),
+    sourceCheck('cli-cognition', 'CLI cognitive receipts', `${bin}\n${cliReceipt}`, ['writeCliCognitiveReceipt', 'Cognitive write-back']),
+    studioSmokeReceiptCheck(repoRoot),
+    sourceCheck('level6-gate', 'Level 6 release gate', `${bin}\n${level6Gate}`, ['release gate', 'runLevel6ReleaseGate', 'self-improvement-gauntlet', 'creative-domain-gauntlet'], packagedInstall),
+    liveProviderSmokeCheck(repoRoot),
+  ];
+
+  return buildMarketReadinessStatus({ checks });
+}
+
+export function formatMarketReadinessStatus(status: MarketReadinessStatus): string {
+  const verified = status.checks.filter((check) => check.status !== 'advisory');
+  const advisory = status.checks.filter((check) => check.status === 'advisory');
+
+  const lines = [
+    `Smoke checks: ${status.ready ? 'PASS' : 'FAIL'}`,
+    '',
+    'Execution-verified checks (gate the verdict):',
+    ...verified.map((check) => `- ${check.label}: ${check.status} — ${check.evidence}`),
+  ];
+
+  if (advisory.length > 0) {
+    lines.push('', 'Source-presence checks (advisory — do NOT gate the verdict):', ...advisory.map((check) => `- ${check.label}: ${check.status} — ${check.evidence}`));
+  }
+
+  if (status.blockers.length > 0) {
+    lines.push('', 'Blocking gaps:', ...status.blockers.map((blocker) => `- ${blocker}`));
+  }
+
+  return lines.join('\n');
+}
+
+function isPackagedInstall(repoRoot: string): boolean {
+  return fs.existsSync(path.join(repoRoot, 'package.json'))
+    && fs.existsSync(path.join(repoRoot, 'dist'))
+    && !fs.existsSync(path.join(repoRoot, 'src'))
+    && !fs.existsSync(path.join(repoRoot, 'gui'));
+}
+
+function sourceCheck(id: string, label: string, source: string, needles: string[], packagedInstall = false): MarketReadinessCheck {
+  if (packagedInstall) {
+    return {
+      id,
+      label,
+      status: 'advisory',
+      evidence: 'source-presence not checkable in packaged install (source files are not shipped)',
+    };
+  }
+
+  const missing = needles.filter((needle) => !source.includes(needle));
+  // Source-presence only: this never gates the smoke verdict (advisory). Grep hits
+  // prove a literal exists, not that the surface executes.
+  return {
+    id,
+    label,
+    status: 'advisory',
+    evidence: missing.length === 0
+      ? `source-presence (not execution-verified): found ${needles.join(', ')}`
+      : `source-presence (not execution-verified): missing ${missing.join(', ')}`,
+  };
+}
+
+function liveProviderSmokeCheck(repoRoot: string): MarketReadinessCheck {
+  const candidates = [
+    path.join(repoRoot, '.omx', 'proof', 'live-provider-smoke.json'),
+    path.join(repoRoot, '.omx', 'proof', 'market-readiness-live-smoke.json'),
+  ];
+  const found = candidates.find((filePath) => fs.existsSync(filePath));
+  if (!found) {
+    return {
+      id: 'live-provider-smoke',
+      label: 'Live provider smoke',
+      status: 'fail',
+      evidence: 'No current live provider smoke receipt found',
+    };
+  }
+
+  try {
+    const receipt = JSON.parse(fs.readFileSync(found, 'utf8')) as { status?: unknown; generatedAt?: unknown; provider?: unknown; model?: unknown };
+    if (receipt.status === 'pass') {
+      const validation = validateProofReceipt(repoRoot, receipt, {
+        requireProviderModel: true,
+        requireArtifactPaths: true,
+        requireArtifactDigests: true,
+      });
+      if (!validation.ok) {
+        return {
+          id: 'live-provider-smoke',
+          label: 'Live provider smoke',
+          status: 'fail',
+          evidence: `Live provider smoke receipt is not release-proof: ${validation.failures.join('; ')}`,
+        };
+      }
+      const generatedAt = typeof receipt.generatedAt === 'string' ? ` (${receipt.generatedAt})` : '';
+      const provider = typeof receipt.provider === 'string' && typeof receipt.model === 'string'
+        ? ` via ${receipt.provider}/${receipt.model}`
+        : '';
+      return {
+        id: 'live-provider-smoke',
+        label: 'Live provider smoke',
+        status: 'pass',
+        evidence: `Found passing ${path.relative(repoRoot, found)}${provider}${generatedAt}`,
+      };
+    }
+    return {
+      id: 'live-provider-smoke',
+      label: 'Live provider smoke',
+      status: 'fail',
+      evidence: `Live provider smoke receipt status ${String(receipt.status ?? 'unknown')}`,
+    };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return {
+      id: 'live-provider-smoke',
+      label: 'Live provider smoke',
+      status: 'fail',
+      evidence: `Live provider smoke receipt is unreadable: ${reason}`,
+    };
+  }
+}
+
+function studioSmokeReceiptCheck(repoRoot: string): MarketReadinessCheck {
+  const receiptPath = path.join(repoRoot, '.omx', 'proof', 'studio-smoke.json');
+  if (!fs.existsSync(receiptPath)) {
+    return {
+      id: 'studio-smoke',
+      label: 'Studio smoke',
+      status: 'fail',
+      evidence: 'No studio smoke receipt found — run pnpm proof:studio-smoke',
+    };
+  }
+  try {
+    const receipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8')) as { status?: unknown; generatedAt?: unknown; blockers?: unknown };
+    if (receipt.status === 'pass') {
+      const validation = validateProofReceipt(repoRoot, receipt);
+      if (!validation.ok) {
+        return {
+          id: 'studio-smoke',
+          label: 'Studio smoke',
+          status: 'fail',
+          evidence: `Studio smoke receipt is not release-proof: ${validation.failures.join('; ')}`,
+        };
+      }
+      const generatedAt = typeof receipt.generatedAt === 'string' ? ` (${receipt.generatedAt})` : '';
+      return {
+        id: 'studio-smoke',
+        label: 'Studio smoke',
+        status: 'pass',
+        evidence: `Found passing ${path.relative(repoRoot, receiptPath)}${generatedAt}`,
+      };
+    }
+    const blockers = Array.isArray(receipt.blockers) && receipt.blockers.length > 0 ? ` (failed: ${receipt.blockers.join(', ')})` : '';
+    return {
+      id: 'studio-smoke',
+      label: 'Studio smoke',
+      status: 'fail',
+      evidence: `Studio smoke receipt status ${String(receipt.status ?? 'unknown')}${blockers}`,
+    };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return {
+      id: 'studio-smoke',
+      label: 'Studio smoke',
+      status: 'fail',
+      evidence: `Studio smoke receipt is unreadable: ${reason}`,
+    };
+  }
+}
+
+function read(filePath: string): string {
+  try {
+    return fs.readFileSync(filePath, 'utf8');
+  } catch {
+    return '';
+  }
+}

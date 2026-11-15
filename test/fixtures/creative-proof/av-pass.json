@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "domains": [
+    {
+      "name": "p5",
+      "requiredModalities": ["visual"]
+    },
+    {
+      "name": "tone",
+      "requiredModalities": ["audio"]
+    }
+  ],
+  "evidence": [
+    {
+      "ref": "artifact.mp4",
+      "kind": "video",
+      "modalities": ["visual", "audio"],
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "bytes": 1000,
+      "durationSeconds": 12
+    }
+  ],
+  "verdicts": {
+    "technical": {
+      "status": "pass",
+      "evidenceRefs": ["artifact.mp4"]
+    },
+    "coordination": {
+      "status": "pass",
+      "evidenceRefs": ["artifact.mp4"]
+    },
+    "creativeQuality": {
+      "status": "pass",
+      "evidenceRefs": ["artifact.mp4"],
+      "evaluatorRef": "review:grok",
+      "rubricRef": "rubric:creative-v1"
+    }
+  },
+  "requestedClaims": {
+    "technicalSuccess": true,
+    "coordinationImproved": true,
+    "creativeQualityImproved": true
+  }
+}
