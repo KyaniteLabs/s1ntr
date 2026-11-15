@@ -52,8 +52,8 @@ export class TypeCheckTool extends Tool {
         timeout: 60000,
         cwd: process.cwd(),
       }).catch(err => {
-        // Type errors return exit code 2
-        if (err.exitCode === 2) {
+        // Type errors return exit code 2 (Node's execFile reports it as `code`)
+        if (err.exitCode === 2 || err.code === 2) {
           return { stdout: err.stdout, stderr: err.stderr };
         }
         throw err;

@@ -7,7 +7,7 @@ import { P5GeneratorLLM } from '../../../src/generators/p5/P5GeneratorLLM.js';
 describe('P5GeneratorLLM', () => {
   it('can be instantiated', () => {
     const gen = new P5GeneratorLLM();
-    expect(gen).not.toBeNull();
+    expect(gen).toBeInstanceOf(P5GeneratorLLM);
   });
 
   it('generate rejects without LLM config', async () => {

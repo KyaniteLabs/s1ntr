@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeDiagnosePlanFile } from './SelfImproveCompoundLoop.js';
+import { isEnoent } from '../utils/errors.js';
 
 export interface PlanPublishInput {
   runDir: string;
@@ -79,8 +80,10 @@ export function publishDiagnosePlan(input: PlanPublishInput): PlanPublishResult 
         );
         return { planPath, contentDigest, reused: true };
       }
-    } catch {
-      /* fall through to write */
+    } catch (err) {
+      // Expected: meta vanished (ENOENT) or is torn JSON (SyntaxError); fall through and rewrite it.
+      // Anything else (e.g. EACCES on the meta write) is a real failure.
+      if (!isEnoent(err) && !(err instanceof SyntaxError)) throw err;
     }
   }
 

@@ -104,7 +104,7 @@ describe('TierBasedGenerator', () => {
       const result = await generator.generate('create a canvas');
 
       expect(result).toContain('createCanvas');
-      expect(mockGenerateWithToolLoop).toHaveBeenCalled();
+      expect(mockGenerateWithToolLoop).toHaveBeenCalledTimes(1);
     });
 
     it('keeps actual provider/model and injected adaptation IDs as structured metadata', async () => {
@@ -294,7 +294,7 @@ describe('TierBasedGenerator', () => {
       await generator.generate('test', { bypassCache: true });
 
       // Verify that generateWithToolLoop was called
-      expect(mockGenerateWithToolLoop).toHaveBeenCalled();
+      expect(mockGenerateWithToolLoop).toHaveBeenCalledTimes(1);
     });
 
     it('should respect AbortSignal', async () => {
@@ -327,7 +327,7 @@ describe('TierBasedGenerator', () => {
       await generator.generate('test', { contextBudget: 5000 });
 
       // Should not throw and should complete successfully
-      expect(mockGenerateWithToolLoop).toHaveBeenCalled();
+      expect(mockGenerateWithToolLoop).toHaveBeenCalledTimes(1);
     });
   });
 });

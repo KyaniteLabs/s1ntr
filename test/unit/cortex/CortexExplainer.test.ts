@@ -118,8 +118,7 @@ describe('CortexExplainer', () => {
     const result = explainer.formatBudget(budget);
     expect(result).toContain('4/10 actions');
     expect(result).toContain('8000/50000 tokens');
-    expect(result).toContain('█');
-    expect(result).toContain('░');
+    expect(result).toContain('█'.repeat(8) + '░'.repeat(12) + ' 4/10 actions');
   });
 
   it('handles zero budget limit', () => {

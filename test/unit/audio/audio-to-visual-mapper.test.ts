@@ -22,10 +22,12 @@ function makeTimbre(overrides: Partial<TimbreData> = {}): TimbreData {
 describe('AudioToVisualMapper', () => {
   it('returns VisualMappingParams with all sub-objects', () => {
     const result = mapToVisualParams(makeFeatures(), makePitch(), makeTimbre());
-    expect(result.palette).not.toBeNull();
+    expect(result.palette.hues).toEqual([0.75, expect.closeTo(1 / 3, 6), 0]);
+    expect(result.palette.saturations).toEqual([expect.closeTo(0.66, 6), expect.closeTo(0.72, 6), expect.closeTo(0.72, 6)]);
+    expect(result.palette.lightness).toEqual([expect.closeTo(0.35333, 4), expect.closeTo(0.40333, 4), expect.closeTo(0.45333, 4)]);
     expect(result.motion).toEqual({"speed":1,"turbulence":0.2,"rhythm":"smooth"});
     expect(result.form).toEqual({"complexity":0.455,"sharpness":0.7,"scale":0.5});
-    expect(result.dynamics).not.toBeNull();
+    expect(result.dynamics).toEqual({ energy: 0.5, envelope: [0.5, 0.5, expect.closeTo(1 / 6, 6)], onsets: [] });
     expect(result.composition).toEqual({"focalWeight":0.35,"balance":0.7625});
   });
 

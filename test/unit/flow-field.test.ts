@@ -32,7 +32,7 @@ describe('FlowField', () => {
     });
     expect(code).toContain('1000');
     expect(code).toContain('0.01');
-    expect(code).toContain('3');
+    expect(code).toContain('Speed: 3');
     expect(code).toContain('20');
   });
 

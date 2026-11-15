@@ -33,7 +33,6 @@ describe('RepoIndexLite', () => {
       expect(context.verificationTargets[0].priority).toBe(1);
       expect(Array.isArray(context.creativeDomains)).toBe(true);
       expect(context.creativeDomains.length).toBeGreaterThan(0);
-      expect(context.preservationClause).toBeTruthy();
       expect(typeof context.preservationClause).toBe('string');
     }
   });

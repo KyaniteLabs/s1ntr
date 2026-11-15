@@ -5,6 +5,8 @@
  */
 import { copyFileSync, readFileSync, renameSync, existsSync } from 'node:fs';
 import { writeAtomicSync } from '../shared/fsAtomic.js';
+import { Logger } from '../utils/Logger.js';
+import { isEnoent } from '../utils/errors.js';
 
 export const SPU_SCORING_CONTRACT = 'spu-2.0-literal-v1' as const;
 export interface ScoreContractFields {
@@ -35,7 +37,10 @@ export class EloTable {
       }
     } catch {
       // Quarantine before save() can overwrite (audit M2 — torn read must not wipe the table).
-      try { renameSync(path, `${path}.corrupt-${Date.now()}`); } catch { /* nothing to quarantine */ }
+      try { renameSync(path, `${path}.corrupt-${Date.now()}`); } catch (renameErr) {
+        // ENOENT: the file is already gone, so nothing to quarantine. Anything else leaves the corrupt file exposed to overwrite.
+        if (!isEnoent(renameErr)) Logger.warn('EloTable', `could not quarantine corrupt table ${path}:`, renameErr);
+      }
     }
   }
 

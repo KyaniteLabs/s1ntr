@@ -7,6 +7,7 @@
 
 // Core Ralph-Wiggum Loop components
 import { RalphLoop } from './core/RalphLoop.js';
+import { writeTheorySidecar } from './utils/theorySidecar.js';
 import { GuidanceEngine } from './chat/GuidanceEngine.js';
 import { ValidationError } from './errors/ValidationError.js';
 import { GenerationError } from './errors/GenerationError.js';
@@ -466,11 +467,7 @@ export async function run(prompt: string, options: {
     // theory assessment. Persist it as a per-artifact sidecar so every
     // strudel-producing organ surfaces theory output (greppable acceptance).
     if (finalValidation.theoryAssessment && finalValidation.theoryAssessment.length > 0) {
-      try {
-        const { writeFileSync } = await import('node:fs');
-        writeFileSync(`${sourcePath}.theory.json`,
-          JSON.stringify({ domain: options.collabDomain, theoryAssessment: finalValidation.theoryAssessment, ts: new Date().toISOString() }, null, 1));
-      } catch { /* theory sidecar must never block saving */ }
+      writeTheorySidecar(sourcePath, options.collabDomain, finalValidation.theoryAssessment);
     }
     if (sourcePath.endsWith('.svg') || sourcePath.endsWith('.txt') || sourcePath.endsWith('.py')) {
       await fs.writeFile(sourcePath, finalCode, 'utf-8');

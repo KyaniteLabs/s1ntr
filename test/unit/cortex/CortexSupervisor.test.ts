@@ -13,7 +13,7 @@ describe('CortexSupervisor', () => {
     expect(lease.actionId).toBe('act-1');
     expect(lease.deadlineMs).toBe(5000);
     expect(lease.description).toBe('Test action');
-    expect(lease.startedAt).toBeTruthy();
+    expect(lease.startedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
 
     const active = supervisor.getActive();
     expect(active).toHaveLength(1);

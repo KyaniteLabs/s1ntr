@@ -7,7 +7,7 @@ describe('WorkspaceManager', () => {
     const config = mgr.create('test-project');
 
     expect(config!.name).toBe('test-project');
-    expect(config!.createdAt).toBeTruthy();
+    expect(config!.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     expect(config!.skillPreferences).toEqual([]);
     expect(config!.favorites).toEqual([]);
     expect(config!.sessionIds).toEqual([]);

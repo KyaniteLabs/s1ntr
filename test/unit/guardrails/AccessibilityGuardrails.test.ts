@@ -138,7 +138,7 @@ describe('AccessibilityGuardrails', () => {
 
       expect(result.accessible).toBe(true);
       expect(result.checks.photosensitivity).toBe(true);
-      expect(mockClose).toHaveBeenCalled();
+      expect(mockClose).toHaveBeenCalledTimes(1);
     });
 
     it('flags photosensitivity when flash rate exceeds 3Hz', async () => {

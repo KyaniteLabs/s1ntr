@@ -10,7 +10,7 @@
  */
 
 import type { TaskLedger } from './TaskLedger.js';
-import type { LedgerCLIAction, TaskManifest } from './types.js';
+import type { LedgerCLIAction } from './types.js';
 import { TaskRunner } from './TaskRunner.js';
 import { TaskVerifier } from './TaskVerifier.js';
 // @architecture Phase 10 conveyor imports
@@ -72,6 +72,74 @@ export function parseArgs(args: string[]): LedgerCLIAction {
     return { command: 'dashboard', format: fmtIdx !== -1 ? (argv[fmtIdx + 1] as 'text' | 'json') : undefined };
   }
   return { command: 'status', verbose: argv.includes('--verbose') };
+}
+
+export interface IntakeLoadResult {
+  loaded: number;
+  skipped: number;
+  failed: Array<{ id: string; reason: string }>;
+}
+
+/**
+ * Write intake specs into the ledger, skipping tasks that already exist (to
+ * preserve progress). A createTask failure is recorded with its reason, never
+ * dropped.
+ */
+export function loadIntakeSpecs(
+  specs: ReadonlyArray<{ id: string }>,
+  ledger: { loadTask(id: string): unknown; createTask(spec: never): unknown },
+): IntakeLoadResult {
+  const result: IntakeLoadResult = { loaded: 0, skipped: 0, failed: [] };
+  for (const spec of specs) {
+    if (ledger.loadTask(spec.id)) {
+      result.skipped++;
+      continue;
+    }
+    try {
+      ledger.createTask(spec as never);
+      result.loaded++;
+    } catch (err) {
+      result.failed.push({ id: spec.id, reason: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  return result;
+}
+
+export interface TaskDefsLoadResult {
+  loaded: number;
+  failed: Array<{ id: string; reason: string }>;
+}
+
+/** Create every task definition; a createTask failure is recorded with its reason, never dropped. */
+export function loadTaskDefs(
+  defs: ReadonlyArray<unknown>,
+  ledger: { createTask(def: never): unknown },
+): TaskDefsLoadResult {
+  const result: TaskDefsLoadResult = { loaded: 0, failed: [] };
+  for (const def of defs) {
+    try {
+      ledger.createTask(def as never);
+      result.loaded++;
+    } catch (err) {
+      const id = (def as { id?: unknown } | null)?.id;
+      result.failed.push({
+        id: typeof id === 'string' ? id : '(no id)',
+        reason: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return result;
+}
+
+const INTAKE_FAILURES_SHOWN = 3;
+
+/** Summary lines for failed intake writes: the count, the first few reasons, and how many were not shown. */
+export function formatIntakeFailures(failed: ReadonlyArray<{ id: string; reason: string }>): string[] {
+  if (failed.length === 0) return [];
+  const lines = [`  Failed:       ${failed.length}`];
+  for (const f of failed.slice(0, INTAKE_FAILURES_SHOWN)) lines.push(`    ${f.id}: ${f.reason}`);
+  if (failed.length > INTAKE_FAILURES_SHOWN) lines.push(`    ...and ${failed.length - INTAKE_FAILURES_SHOWN} more`);
+  return lines;
 }
 
 export async function execute(
@@ -251,16 +319,11 @@ export async function execute(
         console.error(`Invalid JSON in ${filePath}: ${(err as Error).message}`);
         process.exit(1);
       }
-      let loaded = 0;
-      for (const def of defs) {
-        try {
-          ledger.createTask(def as Omit<TaskManifest, 'status' | 'attemptCount' | 'createdAt' | 'updatedAt'>);
-          loaded++;
-        } catch (err) {
-          console.error(`Failed to load task ${(def as Record<string, unknown>).id}: ${(err as Error).message}`);
-        }
-      }
+      const { loaded, failed } = loadTaskDefs(defs, ledger);
+      for (const f of failed) console.error(`Failed to load task ${f.id}: ${f.reason}`);
       console.log(`Loaded ${loaded} task(s) from ${filePath}`);
+      for (const line of formatIntakeFailures(failed)) console.log(line);
+      if (failed.length > 0) process.exit(1);
       break;
     }
     case 'intake': {
@@ -274,24 +337,12 @@ export async function execute(
         break;
       }
       // Load specs into ledger (skip tasks that already exist to preserve progress)
-      let loaded = 0;
-      let skipped = 0;
-      for (const spec of specs) {
-        if (ledger.loadTask(spec.id)) {
-          skipped++;
-          continue;
-        }
-        try {
-          ledger.createTask(spec as Omit<TaskManifest, 'status' | 'attemptCount' | 'createdAt' | 'updatedAt'>);
-          loaded++;
-        } catch {
-          // Other write error — skip
-        }
-      }
+      const { loaded, skipped, failed } = loadIntakeSpecs(specs, ledger);
       console.log(`\n  Task Intake\n`);
       console.log(`  Candidates:  ${specs.length}`);
       console.log(`  Loaded:       ${loaded}`);
       if (skipped > 0) console.log(`  Skipped:      ${skipped} (already exist)`);
+      for (const line of formatIntakeFailures(failed)) console.log(line);
       // Summary by class
       const byClass: Record<string, number> = {};
       for (const s of specs) {
@@ -307,6 +358,8 @@ export async function execute(
         console.log(`  Output:       ${outputPath}`);
       }
       console.log('');
+      // A task that could not be written is lost work: fail the command so scripts notice.
+      if (failed.length > 0) process.exit(1);
       break;
     }
     case 'batch': {

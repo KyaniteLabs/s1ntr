@@ -29,6 +29,11 @@ module.exports = {
     '@typescript-eslint/await-thenable': 'error',
     '@typescript-eslint/no-misused-promises': 'error',
     'no-console': 'warn',
+    // LLM output must only execute through src/guardrails/GeneratedCodeGuard.ts.
+    // A disable needs a comment naming the guard (or why the input is trusted).
+    'no-eval': ['error', { allowIndirect: false }],
+    'no-new-func': 'error',
+    'no-implied-eval': 'error',
   },
   overrides: [
     {

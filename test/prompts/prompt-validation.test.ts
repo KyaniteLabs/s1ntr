@@ -71,7 +71,7 @@ describe('Prompt Library Validation', () => {
 
     it('should have all expected prompt IDs registered', () => {
       for (const id of EXPECTED_IDS) {
-        expect(PromptLibrary.get(id)).not.toBeNull();
+        expect(PromptLibrary.get(id)?.id).toBe(id);
       }
     });
 
@@ -113,8 +113,6 @@ describe('Prompt Library Validation', () => {
     it('every prompt should have created and updated dates', () => {
       const all = PromptLibrary.list();
       for (const template of all) {
-        expect(template.created).not.toBeNull();
-        expect(template.updated).not.toBeNull();
         expect(template.created).toMatch(/^\d{4}-\d{2}-\d{2}$/);
         expect(template.updated).toMatch(/^\d{4}-\d{2}-\d{2}$/);
       }

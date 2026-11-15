@@ -275,7 +275,7 @@ describe('TierBasedGenerator (expanded)', () => {
 
       await gen.generate('test prompt');
 
-      expect(mockGetEffectiveConfig).toHaveBeenCalled();
+      expect(mockGetEffectiveConfig).toHaveBeenCalledTimes(1);
     });
 
     it('resolves the GENERATOR ROLE, not the default provider (regression: per-role model was ignored)', async () => {
@@ -292,7 +292,7 @@ describe('TierBasedGenerator (expanded)', () => {
 
       await gen.generate('test prompt');
 
-      expect(mockLoadRoleConfig).toHaveBeenCalled();
+      expect(mockLoadRoleConfig).toHaveBeenCalledTimes(1);
       expect(mockGetEffectiveConfig).not.toHaveBeenCalled();
       expect((gen as any).llm.getConfig()).toMatchObject({
         provider: 'openai', thinking: { enabled: true, effort: 'max' },
@@ -990,7 +990,7 @@ describe('TierBasedGenerator (expanded)', () => {
       await gen.generate('test');
 
       // loadContext should be called — the user preferences are passed via context
-      expect(mockLoadContext).toHaveBeenCalled();
+      expect(mockLoadContext).toHaveBeenCalledTimes(1);
       const ctxArg = mockLoadContext.mock.calls[0][2];
       expect(ctxArg.userPreferences).toContain('p5');
       expect(ctxArg.userPreferences).toContain('three');

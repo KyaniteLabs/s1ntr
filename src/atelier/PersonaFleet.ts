@@ -16,6 +16,7 @@
 import { readFileSync, mkdirSync, existsSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeAtomicSync } from '../shared/fsAtomic.js';
+import { Logger } from '../utils/Logger.js';
 import { hostname } from 'node:os';
 
 export interface PersonaStyle {
@@ -127,7 +128,7 @@ export function getMachinePersona(cwd: string): Persona | null {
   if (existsSync(file)) {
     try {
       return JSON.parse(readFileSync(file, 'utf8')) as Persona;
-    } catch { /* corrupt — rebuild below */ }
+    } catch (err) { Logger.warn('PersonaFleet', `active-persona.json unreadable (reassigning persona): ${file}:`, err); }
   }
 
   // Pin with SINTER_PERSONA=<id>; otherwise pick by a hash of the hostname.

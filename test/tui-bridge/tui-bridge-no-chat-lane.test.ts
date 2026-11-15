@@ -445,7 +445,7 @@ describe('Bubble Tea operator routing', () => {
       fakeLlm() as never,
     );
     await waitFor(() => service.getEvents(session.sessionId).find(event => event.type === 'preview.completed'));
-    expect(draftGenerate).toHaveBeenCalled();
+    expect(draftGenerate).toHaveBeenCalledTimes(3);
     expect(ralphRun).not.toHaveBeenCalled();
   }, 30000);
 

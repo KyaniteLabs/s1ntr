@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, readdirSync, statfsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { Logger } from './Logger.js';
 
 /** Shared durable browser root (not under Caches / .cache). */
 export const DEFAULT_BROWSERS_HOME = join(homedir(), '.sinter', 'browsers');
@@ -162,8 +163,9 @@ export function ensurePurgeResistantBrowserEnv(
     try {
       mkdirSync(env.PLAYWRIGHT_BROWSERS_PATH, { recursive: true });
       mkdirSync(env.PUPPETEER_CACHE_DIR, { recursive: true });
-    } catch {
-      // Non-fatal: install step will surface write failures loudly.
+    } catch (err) {
+      // Non-fatal (the install step also fails loudly), but say why browsers will not install.
+      Logger.warn('browserPreflight', 'could not create browser cache directories:', err);
     }
   }
 

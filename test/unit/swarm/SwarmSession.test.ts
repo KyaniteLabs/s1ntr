@@ -5,7 +5,8 @@
  * blind candidate ordering/filtering, candidate artifact writes, preview
  * export being non-fatal, atomic record IO, listing, and label merging.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { Logger } from '../../../src/utils/Logger.js';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -205,6 +206,22 @@ describe('SwarmSession record (#1295)', () => {
       const onDisk = JSON.parse(readFileSync(written.sessionPath, 'utf-8')) as { candidates: Array<{ sourcePath: string; previewPath?: string }> };
       expect(onDisk.candidates.every(c => c.previewPath === undefined)).toBe(true);
       expect(onDisk.candidates.every(c => existsSync(c.sourcePath))).toBe(true);
+    });
+
+    it('warns for each candidate whose preview export fails', async () => {
+      const warn = vi.spyOn(Logger, 'warn').mockImplementation(() => {});
+      try {
+        let attempts = 0;
+        await writeSwarmSession(swarmResult(), 'a geometric grid that breathes', dir, {
+          exportHtml: async () => { attempts++; throw new Error('no renderer'); },
+        });
+        const previewWarns = warn.mock.calls.map(c => String(c[1])).filter(m => m.startsWith('candidate preview not exported: '));
+        expect(attempts).toBe(3); // all three fixture candidates are p5-renderable
+        expect(previewWarns).toHaveLength(attempts);
+        expect(previewWarns.every(m => m.endsWith('.html:'))).toBe(true);
+      } finally {
+        warn.mockRestore();
+      }
     });
 
     it('round-trips through load/list and merges a label block', async () => {

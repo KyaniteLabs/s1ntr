@@ -2916,7 +2916,7 @@ describe('W8C-06 shared Studio/CLI owner-review lifecycle parity', () => {
       holistic: { provider: 'anthropic', model: 'claude-review' },
     });
     expect(fixture.reviewResult.bundle.candidates.every(candidate => candidate.reviews.length === 2)).toBe(true);
-    expect(fixture.reviewTransports[0]).toHaveBeenCalled();
+    expect(fixture.reviewTransports[0]).toHaveBeenCalledTimes(3);
   });
 
   it('maps a kimi-cliproxy reviewer consistently and settles exact signed completions', async () => {
@@ -2925,6 +2925,6 @@ describe('W8C-06 shared Studio/CLI owner-review lifecycle parity', () => {
       holistic: { provider: 'anthropic', model: 'claude-review' },
     });
     expect(fixture.reviewResult.bundle.candidates.every(candidate => candidate.reviews.length === 2)).toBe(true);
-    expect(fixture.reviewTransports[0]).toHaveBeenCalled();
+    expect(fixture.reviewTransports[0]).toHaveBeenCalledTimes(3);
   });
 });

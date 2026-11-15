@@ -1,0 +1,14 @@
+import { fattribs, ff } from "./format.js";
+const circle = (p, r, attribs, ...body) => [
+  "circle",
+  fattribs({
+    ...attribs,
+    cx: ff(p[0]),
+    cy: ff(p[1]),
+    r: ff(r)
+  }),
+  ...body
+];
+export {
+  circle
+};

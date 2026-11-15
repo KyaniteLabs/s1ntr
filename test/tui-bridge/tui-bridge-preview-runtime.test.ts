@@ -49,8 +49,8 @@ describe('PreviewService preview runtime verification', () => {
   it('rejects preview screenshots when the generated page throws a runtime error', async () => {
     await expect(renderHtmlScreenshot('/tmp/bad-p5.html', '/tmp/bad-p5.png', 'p5'))
       .rejects.toThrow('p5 runtime failed');
-    expect(closePage).toHaveBeenCalled();
-    expect(closeBrowser).toHaveBeenCalled();
+    expect(closePage).toHaveBeenCalledTimes(1);
+    expect(closeBrowser).toHaveBeenCalledTimes(1);
   });
 
   it('renders and closes page and browser on the success path', async () => {

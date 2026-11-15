@@ -385,8 +385,9 @@ export class RalphLoop {
         status: 'started',
         metadata: { maxIterations: normalizedOptions.maxIterations, mode: normalizedOptions.mode },
       });
-    } catch {
-      // SinterFS run recording is non-critical
+    } catch (err) {
+      // Non-critical to the run, but the 'started' record is lost.
+      Logger.warn('RalphLoop', 'SinterFS recordRun (started) failed:', err);
     }
 
     // Organism mode: delegate entirely to OrganismLoop
@@ -2262,8 +2263,9 @@ export class RalphLoop {
               sessionId,
             },
           });
-        } catch {
-          // SinterFS failure must not affect loop operation
+        } catch (err) {
+          // Must not affect loop operation, but the final artifact is not recorded.
+          Logger.warn('RalphLoop', 'SinterFS writeArtifact failed:', err);
         }
       }
 
@@ -2281,8 +2283,9 @@ export class RalphLoop {
             duration,
           },
         });
-      } catch {
-        // SinterFS failure must not affect loop operation
+      } catch (err) {
+        // Must not affect loop operation, but the final run record is lost.
+        Logger.warn('RalphLoop', 'SinterFS recordRun (final) failed:', err);
       }
 
       // Prefer the best valid candidate over the last iteration. best-tracking

@@ -55,7 +55,7 @@ describe('system prompt audit guardrails', () => {
 
   it('chat.assistant uses explicit context tags instead of ad-hoc separators', () => {
     const chatPrompt = PromptLibrary.get('chat.assistant');
-    expect(chatPrompt).not.toBeNull();
+    expect(chatPrompt?.id).toBe('chat.assistant');
 
     const rendered = PromptLibrary.render('chat.assistant', { userPrompt: 'hello' });
     expect(chatPrompt?.systemPrompt).toContain('Return valid JSON only');

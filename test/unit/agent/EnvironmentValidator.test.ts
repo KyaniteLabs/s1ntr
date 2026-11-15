@@ -171,9 +171,9 @@ describe('EnvironmentValidator', () => {
   it('each check has name, status, and message', async () => {
     const report = await validator.validate();
     for (const check of report.checks) {
-      expect(check.name).toBeTruthy();
+      expect(check.name).toMatch(/\S/);
       expect(check.status).toMatch(/^(pass|fail|warn)$/);
-      expect(check.message).toBeTruthy();
+      expect(check.message).toMatch(/\S/);
     }
   });
 });

@@ -278,7 +278,7 @@ renderer.render(scene, new THREE.PerspectiveCamera());
     await gen.generate('create a 3D scene');
     // ThreeGenerator.generate() expands the user prompt with exposure rails before
     // PromptBuilder.loadContext — that expanded string is what the LLM sees.
-    expect(loadSpy).toHaveBeenCalled();
+    expect(loadSpy).toHaveBeenCalledTimes(2);
     const expandedPrompt = String(loadSpy.mock.calls[0]?.[1] ?? '');
     expect(expandedPrompt).toContain('ACESFilmicToneMapping');
     expect(expandedPrompt).toMatch(/0\.8-2\.0/);

@@ -94,6 +94,6 @@ class Particle {
     expect(particleClass!.metrics.loc).toBeGreaterThan(0);
 
     const updateMethod = tokens.find(t => t.name === 'update' && t.kind === 'method');
-    expect(updateMethod).not.toBeNull();
+    expect(updateMethod?.name).toBe('update');
   });
 });

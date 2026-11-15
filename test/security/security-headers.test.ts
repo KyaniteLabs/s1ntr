@@ -18,7 +18,7 @@ describe('Security Headers', () => {
 
   it('should include Content-Security-Policy header', async () => {
     const response = await fetch(`http://localhost:${TEST_PORT}/`);
-    expect(response.headers.get('content-security-policy')).toBeTruthy();
+    expect(response.headers.get('content-security-policy')).toContain("default-src 'self'");
   });
 
   it('keeps script-src local-only for vendored preview wrappers (#924)', async () => {
@@ -45,6 +45,6 @@ describe('Security Headers', () => {
 
   it('should remove X-Powered-By header', async () => {
     const response = await fetch(`http://localhost:${TEST_PORT}/`);
-    expect(response.headers.get('x-powered-by')).toBeFalsy();
+    expect(response.headers.get('x-powered-by')).toBeNull();
   });
 });

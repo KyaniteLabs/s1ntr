@@ -167,7 +167,7 @@ describe('GeneratorBanditRouter', () => {
 
       expect(state.version).toBe(1);
       expect(state.arms.length).toBe(2);
-      expect(state.updatedAt).toBeTruthy();
+      expect(state.updatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
 
       const router2 = new GeneratorBanditRouter();
       router2.deserialize(state);

@@ -27,7 +27,6 @@ describe('ReportGenerator', () => {
     const report = gen.generate(graph, 'json');
 
     expect(report.format).toBe('json');
-    expect(report.content).toBeTruthy();
     const parsed = JSON.parse(report.content);
     expect(parsed.manifest.sessionId).toBe('json-session');
   });

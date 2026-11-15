@@ -17,7 +17,7 @@ describe('sanitizeTerminalText', () => {
   it('truncates overly long text', () => {
     const result = sanitizeTerminalText('x'.repeat(250), { maxLength: 40 });
     expect(result.length).toBeLessThanOrEqual(40);
-    expect(result).toContain('…');
+    expect(result.endsWith('…')).toBe(true);
   });
 
   it('can normalize output to a single line', () => {

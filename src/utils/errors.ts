@@ -59,3 +59,12 @@ export function formatErrorWithFallback(
   const message = error instanceof Error ? error.message : fallback;
   return `${context}: ${message}`;
 }
+
+/**
+ * True when `error` is a Node fs "no such file or directory" error. Use it to
+ * narrow a catch to the one expected race (file vanished) and rethrow or
+ * report everything else.
+ */
+export function isEnoent(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | null | undefined)?.code === 'ENOENT';
+}

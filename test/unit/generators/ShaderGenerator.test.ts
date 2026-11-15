@@ -387,7 +387,7 @@ describe('ShaderGenerator', () => {
     const gen = new ShaderGenerator(llm);
     try { await gen.generate('glowing aurora'); } catch { /* prompt content is what we assert */ }
 
-    expect(loopSpy).toHaveBeenCalled();
+    expect(loopSpy).toHaveBeenCalledTimes(2);
     const call = loopSpy.mock.calls[0][0] as { systemPrompt?: string; userPrompt?: string };
     const combined = `${call.systemPrompt || ''} ${call.userPrompt || ''}`;
     // The host declares ONLY u_time / u_resolution / u_mouse

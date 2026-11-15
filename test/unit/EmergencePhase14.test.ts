@@ -559,7 +559,7 @@ describe('ArchiveTaskPlanner', () => {
 
     const plan = planner.plan(cells, ['order-chaos']);
     const improvement = plan.tasks.find(t => t.type === 'perturbation-probe');
-    expect(improvement).not.toBeNull();
+    expect(improvement?.type).toBe('perturbation-probe');
   });
 
   it('plans replay for user-pinned entries', () => {

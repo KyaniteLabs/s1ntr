@@ -79,8 +79,8 @@ describe('RoutingData async functions', () => {
         timestamp: new Date().toISOString(),
       });
 
-      expect(mockMkdir).toHaveBeenCalled();
-      expect(mockWriteFile).toHaveBeenCalled();
+      expect(mockMkdir).toHaveBeenCalledTimes(1);
+      expect(mockWriteFile).toHaveBeenCalledTimes(1);
       const written = JSON.parse((mockWriteFile.mock.calls[0] as unknown[])[1] as string);
       expect(written).toHaveLength(1);
       expect(written[0].domain).toBe('music');

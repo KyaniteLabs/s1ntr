@@ -82,7 +82,7 @@ describe('EvaluationFabric', () => {
       expect(result.judgment.score).toBe(0.8);
       expect(result.judgment.passed).toBe(true);
       expect(result.durationMs).toBeGreaterThanOrEqual(0);
-      expect(result.timestamp).toBeTruthy();
+      expect(result.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     });
 
     it('does not include suite result for plain evaluation', async () => {

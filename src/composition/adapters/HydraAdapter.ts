@@ -14,6 +14,7 @@ import type { RenderContext } from '../CompositionEngine.js';
 import { getWebGLBlendFunc } from '../utils/blendModes.js';
 import { VENDOR_ASSETS } from '../../utils/vendorAssets.js';
 import { Logger } from '../../utils/Logger.js';
+import { compileGeneratedCode } from '../../guardrails/GeneratedCodeGuard.js';
 
 /** Hydra synth instance type */
 interface HydraSynth {
@@ -169,9 +170,8 @@ export class HydraAdapter implements LayerAdapter {
         Logger.warn('HydraAdapter', `Blocked unsafe Hydra layer code: ${blockedPatterns.join(', ')}`);
       } else {
         // Execute the Hydra code
-        // eslint-disable-next-line no-new-func
-        const runCode = new Function(userCode);
-        runCode();
+        // GeneratedCodeGuard: AST denylist + runtime computed-key guard + strict mode.
+        compileGeneratedCode(userCode)();
       }
     } catch (error) {
       Logger.error('HydraAdapter', 'Error executing Hydra code:', error);

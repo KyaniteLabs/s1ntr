@@ -4,13 +4,48 @@
  * Tier 0 Fix: Tests to verify loop iteration and convergence detection
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { RalphLoop } from '../../src/core/RalphLoop.js';
-import { LLMClient } from '../../src/llm/LLMClient.js';
+import { installIntegrationProofLLMEnv } from '../integration/helpers/proof-llm-server.js';
+
+// Provider boundary 1: loopback fake LLM (real HTTP). Boundary 2: the headless
+// browser, served from a recorded healthy render. The loop in between is real.
+vi.mock('../../src/render/HeadlessRenderer.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/render/HeadlessRenderer.js')>();
+  const evidence = JSON.parse(
+    fs.readFileSync(new URL('../fixtures/ralph-loop/render-evidence.json', import.meta.url), 'utf8'),
+  );
+  const fake = { renderWithEvidence: async () => structuredClone(evidence) };
+  return { ...actual, HeadlessRenderer: { ...actual.HeadlessRenderer, getInstance: () => fake } };
+});
 
 describe('RalphLoop', () => {
   describe('Convergence detection', () => {
+    let proofLLMCleanup: Awaited<ReturnType<typeof installIntegrationProofLLMEnv>>;
+    let galleryDir: string;
+    let savedScoreTimeout: string | undefined;
+
+    beforeAll(async () => {
+      // NODE_ENV=test caps the rendered-evidence judge at 1s; lift it.
+      savedScoreTimeout = process.env.LIMINAL_RENDERED_SCORE_TIMEOUT_MS;
+      process.env.LIMINAL_RENDERED_SCORE_TIMEOUT_MS = '30000';
+      proofLLMCleanup = await installIntegrationProofLLMEnv();
+      galleryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ralph-convergence-'));
+    });
+
+    afterAll(async () => {
+      await proofLLMCleanup?.();
+      fs.rmSync(galleryDir, { recursive: true, force: true });
+      if (savedScoreTimeout === undefined) delete process.env.LIMINAL_RENDERED_SCORE_TIMEOUT_MS;
+      else process.env.LIMINAL_RENDERED_SCORE_TIMEOUT_MS = savedScoreTimeout;
+    });
+
     beforeEach(() => {
+      // test/setup.ts wipes LLM env vars in its own beforeEach; re-apply the fake.
+      proofLLMCleanup.reapply();
       RalphLoop.reset();
     });
 
@@ -19,41 +54,19 @@ describe('RalphLoop', () => {
     });
 
     it('should track iteration count correctly', async () => {
-      if (!LLMClient.isConfigured()) {
-        console.log('[SKIP] LLM not configured');
-        return;
-      }
-      // Mock the generation to return consistent scores that don't converge
-      const mockGenerate = vi.fn();
-      
-      // This test just verifies the loop structure works
-      // We can't easily mock the internal generator, but we can verify
-      // that the loop tries to run multiple iterations when allowed
-      
-      const startTime = Date.now();
-      
-      // Create a promise that resolves after a short timeout
-      // to test loop behavior without actual LLM calls
-      const testResult = await Promise.race([
-        RalphLoop.run('test prompt', {
-          maxIterations: 3,
-          minQualityScore: 0, // Don't stop for quality
-          timeoutMinutes: 0.01, // Very short timeout (0.6 seconds)
-        }),
-        new Promise((resolve) => 
-          setTimeout(() => resolve({ iterations: 0, reason: 'timeout' }), 1000)
-        ),
-      ]);
+      // minQualityScore 0 means quality never stops the loop, so the only
+      // exit is the iteration cap.
+      const result = await RalphLoop.run('test prompt', {
+        maxIterations: 3,
+        minQualityScore: 0,
+        galleryDir,
+      });
 
-      const duration = Date.now() - startTime;
-      
-      // Should have attempted to run or timed out quickly
-      expect(duration).toBeLessThan(2000);
-      // Either a LoopResult or the timeout sentinel: both carry a numeric iterations and a string reason.
-      const outcome = testResult as { iterations: number; reason: string };
-      expect(typeof outcome.iterations).toBe('number');
-      expect(typeof outcome.reason).toBe('string');
-    });
+      expect(result.iterations).toBe(3);
+      expect(result.completed).toBe(false);
+      expect(result.reason).toMatch(/^max iterations reached \(3\)/);
+      expect(RalphLoop.getState().history.map(h => h.iteration)).toEqual([1, 2, 3]);
+    }, 60_000);
 
     it('should detect convergence when scores plateau', async () => {
       // This test documents the convergence detection behavior

@@ -174,6 +174,7 @@ export async function checkGLSLCompile(fragmentShader: string): Promise<CompileC
       // bindings do NOT exist there. Pass the shared source builder as a
       // string and rebuild it in-page so Node and browser run the SAME logic.
       page!.evaluate((shaderCode: string, sourcesFnSource: string) => {
+        // eslint-disable-next-line no-eval -- trusted input: sourcesFnSource is buildShaderSources.toString() from this module (never LLM output); the shader text is passed as data to it, not evaluated
         const buildShaderSources = eval(`(${sourcesFnSource})`) as (code: string) => { vertexShaderSrc: string; fragmentShaderSrc: string; isGlsl300: boolean };
         const canvas = document.createElement('canvas');
         canvas.width = 1;

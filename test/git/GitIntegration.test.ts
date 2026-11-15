@@ -115,7 +115,7 @@ describe('GitIntegration', () => {
 
       expect(branch.isOk()).toBe(true);
       expect(branch.value).toContain('liminal/');
-      expect(mockCheckoutBranch).toHaveBeenCalled();
+      expect(mockCheckoutBranch).toHaveBeenCalledTimes(1);
     });
 
     it('returns null when not a git repo', async () => {
@@ -141,7 +141,7 @@ describe('GitIntegration', () => {
 
       await integration.startRun('dirty-test');
 
-      expect(mockStash).toHaveBeenCalled();
+      expect(mockStash).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -171,8 +171,8 @@ describe('GitIntegration', () => {
 
       expect(result.isOk()).toBe(true);
       expect(result.value.hash).toBe('abc123');
-      expect(mockAdd).toHaveBeenCalled();
-      expect(mockCommit).toHaveBeenCalled();
+      expect(mockAdd).toHaveBeenCalledTimes(1);
+      expect(mockCommit).toHaveBeenCalledTimes(1);
     });
 
     it('returns Err when git is disabled', async () => {
@@ -272,7 +272,7 @@ describe('GitIntegration', () => {
 
       await integration.endRun('max iterations');
 
-      expect(mockAddAllAndCommit).toHaveBeenCalled();
+      expect(mockAddAllAndCommit).toHaveBeenCalledTimes(1);
     });
 
     it('does not pop unrelated existing stashes when this run did not stash', async () => {
@@ -307,7 +307,7 @@ describe('GitIntegration', () => {
 
       await integration.endRun('quality achieved');
 
-      expect(mockStash).toHaveBeenCalled();
+      expect(mockStash).toHaveBeenCalledTimes(1);
       expect(mockStashPop).toHaveBeenCalledTimes(1);
     });
   });

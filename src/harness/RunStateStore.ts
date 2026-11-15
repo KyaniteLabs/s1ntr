@@ -175,8 +175,12 @@ export async function clearRunState(cwd?: string): Promise<void> {
   const path = runStatePath(cwd);
   try {
     await writeFile(path, '', 'utf-8');
-  } catch {
-    // Ignore - file may not exist
+  } catch (err) {
+    // ENOENT: the state directory is gone, so there is no run state to clear.
+    // Anything else leaves a stale resumable run behind.
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      Logger.warn('RunStateStore', `could not clear run state ${path}:`, err);
+    }
   }
 }
 

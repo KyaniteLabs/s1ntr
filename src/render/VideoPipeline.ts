@@ -1,6 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { Logger } from '../utils/Logger.js';
+import { isEnoent } from '../utils/errors.js';
 import { VideoRenderResult, VideoRenderOptions } from './VideoRenderer.js';
 import { RevideoRenderer } from './RevideoRenderer.js';
 import { HyperFramesRenderer, HyperFramesRenderOptions } from './HyperFramesRenderer.js';
@@ -71,8 +73,9 @@ export class VideoPipeline {
       for (const tempFile of tempFiles) {
         try {
           await fs.promises.unlink(tempFile);
-        } catch {
-          // best-effort cleanup — temp files may already be gone
+        } catch (err) {
+          // ENOENT: temp file already gone. Anything else leaks a temp file.
+          if (!isEnoent(err)) Logger.warn('VideoPipeline', `could not delete temp file ${tempFile}:`, err);
         }
       }
     }

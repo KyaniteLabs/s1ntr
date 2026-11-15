@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 /**
  * E2E sandbox self-improve (optional).
  * - Sandbox: runInSandbox(minimal p5) completes without timeout/crash; skip if Puppeteer/Chrome unavailable.
@@ -9,7 +9,7 @@ import { describe, it, expect } from 'vitest';
 import { runInSandbox } from '../../src/sandbox/index.js';
 import { requestImprovement } from '../../src/improvement/requestImprovement.js';
 import { LLMClient } from '../../src/llm/LLMClient.js';
-import { applyProviderEnv } from './helpers/liveProviderTestEnv.js';
+import { installIntegrationProofLLMEnv } from '../integration/helpers/proof-llm-server.js';
 
 const MINIMAL_P5 = `
 function setup() {
@@ -67,16 +67,22 @@ describe('E2E sandbox self-improve', () => {
   });
 
   describe('requestImprovement (one improvement step)', () => {
-    it('code -> requestImprovement -> returns improved code (skip if LLM unavailable)', async () => {
-      if (!LLMClient.isConfigured()) {
-        const providerConfig = applyProviderEnv('glm');
-        if (!providerConfig || !LLMClient.isConfigured()) {
-          console.warn(
-            'Skipping E2E improvement test: LLM unavailable (set LIMINAL_LLM_API_KEY or configure GLM).'
-          );
-          return;
-        }
-      }
+    let proofLLMCleanup: Awaited<ReturnType<typeof installIntegrationProofLLMEnv>>;
+
+    beforeAll(async () => {
+      // Loopback fake provider: no key, no network, no spend.
+      proofLLMCleanup = await installIntegrationProofLLMEnv();
+    });
+    afterAll(async () => {
+      await proofLLMCleanup?.();
+    });
+    beforeEach(() => {
+      // test/setup.ts wipes LLM env vars in its own beforeEach; re-apply the fake.
+      proofLLMCleanup.reapply();
+    });
+
+    it('code -> requestImprovement -> returns improved code', async () => {
+      expect(LLMClient.isConfigured()).toBe(true);
 
       const result = await requestImprovement(MINIMAL_P5);
 

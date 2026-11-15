@@ -14,6 +14,7 @@
 import { readFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeAtomicSync } from '../shared/fsAtomic.js';
+import { Logger } from '../utils/Logger.js';
 
 /** Static starting pairs (CEO direction). (strudel,tone) is audio+audio and
  *  is filtered out by usablePriorPairs — ONE audio layer max. */
@@ -70,7 +71,10 @@ export function loadOrCreate(cwd: string): RecipesFile {
   try {
     const parsed = JSON.parse(readFileSync(RECIPES(cwd), 'utf8')) as RecipesFile;
     if (parsed && parsed.schema === 'sinter.recipes/0.1') return parsed;
-  } catch { /* absent or torn — reseed below */ }
+  } catch (err) {
+    // ENOENT: first run, reseed below. A torn file is reseeded too, which discards learned recipes.
+    if ((err as NodeJS.ErrnoException | null)?.code !== 'ENOENT') Logger.warn('RecipeBook', `recipes.json unreadable (reseeding, learned recipes lost): ${RECIPES(cwd)}:`, err);
+  }
   const fresh: RecipesFile = {
     schema: 'sinter.recipes/0.1',
     version: 1,

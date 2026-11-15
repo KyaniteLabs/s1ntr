@@ -327,8 +327,8 @@ describe('LLMModeAgent harness lane emission shapes', () => {
       rollback: false,
       status: Status.SUCCESS,
     });
-    expect(mockClearRunState).toHaveBeenCalled();
-    expect(mockReadRunState).toHaveBeenCalled();
+    expect(mockClearRunState).toHaveBeenCalledTimes(1);
+    expect(mockReadRunState).toHaveBeenCalledTimes(1);
   });
 
   it('parse-failure emits call.end success:false with parse_error exactly once', async () => {

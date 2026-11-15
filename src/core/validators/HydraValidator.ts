@@ -6,6 +6,8 @@
  * chained with modifiers and ending with .out()
  */
 
+import { parse } from '@babel/parser';
+
 export interface HydraValidationResult {
   valid: boolean;
   errors: string[];
@@ -27,8 +29,8 @@ export class HydraValidator {
     // Syntax gate: compile without executing — malformed code must be rejected
     // at validation so the escalation seat can retry, never shipped to the player.
     try {
-      // eslint-disable-next-line no-new-func
-      new Function(trimmed);
+      // Static parse only; nothing is evaluated (same gate as ToneValidator).
+      parse(trimmed, { sourceType: 'script', allowReturnOutsideFunction: true });
     } catch (error) {
       errors.push(`Hydra code has a syntax error and cannot run: ${error instanceof Error ? error.message : String(error)}`);
     }

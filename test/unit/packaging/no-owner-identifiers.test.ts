@@ -104,7 +104,7 @@ describe("owner-identifier scanners", () => {
 	});
 
 	it("flags private host addresses and skips network ids and public ones", () => {
-		expect(privateHostAddresses("x 10.0.0.0 192.168.1.20 8.8.8.8 100.100.1.2 1.2.3.4.5")).toEqual(["192.168.1.20", "100.100.1.2"]);
+		expect(privateHostAddresses("x 10.0.0.0 192.168.1.20 8.8.8.8 <internal-host> 1.2.3.4.5")).toEqual(["192.168.1.20", "<internal-host>"]);
 		expect(privateHostAddresses("")).toEqual([]);
 	});
 });

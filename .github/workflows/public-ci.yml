@@ -1,0 +1,77 @@
+name: Public CI
+
+# CI for the curated public snapshot (github.com/KyaniteLabs/s1ntr), published
+# by scripts/atelier/sync-public-mirror.sh. The snapshot has no internal docs,
+# no GUI package and no agent tooling, so this runs only the gates the public
+# tree can satisfy: install, build, lint, fast tests. The full gate stays on
+# Forgejo (.forgejo/workflows/ci.yml). GitHub-hosted runners, read-only token,
+# no secrets, no pull_request_target: fork PRs run with exactly these rights.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-ci-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+  # No provider credentials exist here; tests use recorded providers only.
+  ANTHROPIC_AUTH_TOKEN: ''
+  ANTHROPIC_BASE_URL: ''
+  MINIMAX_API_KEY: ''
+  OLLAMA_API_KEY: ''
+  # ubuntu-latest ships Google Chrome; use it instead of downloading one.
+  PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: /usr/bin/google-chrome
+  PUPPETEER_EXECUTABLE_PATH: /usr/bin/google-chrome
+  PUPPETEER_SKIP_DOWNLOAD: 'true'
+  # Ubuntu 24.04 runners block Chrome's user-namespace sandbox. CI VM only.
+  LIMINAL_DISABLE_SANDBOX: 'true'
+
+jobs:
+  public-gate:
+    name: public-gate
+    # Only the public snapshot repo; the private repos gate on Forgejo.
+    if: github.repository == 'KyaniteLabs/s1ntr'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        timeout-minutes: 10
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        timeout-minutes: 10
+        run: pnpm build
+
+      - name: Lint
+        timeout-minutes: 10
+        run: pnpm lint
+
+      - name: Fast tests
+        timeout-minutes: 25
+        run: pnpm test:ci:fast

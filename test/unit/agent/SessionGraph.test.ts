@@ -29,7 +29,7 @@ describe('SessionGraph', () => {
         durationMs: 120,
       });
       expect(turn.turnId).toBe('turn-1');
-      expect(turn.timestamp).toBeTruthy();
+      expect(turn.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     });
 
     it('increments turnCount in the manifest', () => {

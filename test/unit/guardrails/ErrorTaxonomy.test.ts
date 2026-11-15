@@ -61,7 +61,7 @@ describe('ERROR_TAXONOMY', () => {
 
   it('contains all expected error categories', () => {
     for (const type of expectedTypes) {
-      expect(ERROR_TAXONOMY[type], `Missing taxonomy entry for ${type}`).not.toBeNull();
+      expect(Object.keys(ERROR_TAXONOMY), `Missing taxonomy entry for ${type}`).toContain(type);
     }
   });
 
@@ -118,9 +118,9 @@ describe('ERROR_PATTERNS', () => {
   it('every pattern references a taxonomy entry that exists', () => {
     for (const ep of ERROR_PATTERNS) {
       expect(
-        ERROR_TAXONOMY[ep.type],
+        Object.keys(ERROR_TAXONOMY),
         `Pattern references unknown taxonomy type "${ep.type}"`,
-      ).not.toBeNull();
+      ).toContain(ep.type);
     }
   });
 

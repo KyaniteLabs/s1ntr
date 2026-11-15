@@ -14,6 +14,7 @@
 import { readFileSync, appendFileSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeAtomicSync } from '../shared/fsAtomic.js';
+import { Logger } from '../utils/Logger.js';
 
 export interface ConductorPlan {
   primary: string;
@@ -96,11 +97,11 @@ export function checkAdherence(cwd: string, lastPlan: ConductorPlan, trendRow: T
       declared,
       adhered,
     }) + '\n');
-  } catch { /* verdict log is best-effort */ }
+  } catch (err) { Logger.warn('ConductorCheck', 'verdict log append failed (verdict not recorded):', err); }
 
   // Consume the plan either way — but a MISS releases it WITHOUT consuming
   // the candidate, so the same pair can be retried on a later turn.
-  try { rmSync(lastPlanPath(cwd), { force: true }); } catch { /* best-effort */ }
+  try { rmSync(lastPlanPath(cwd), { force: true }); } catch (err) { Logger.warn('ConductorCheck', 'could not release plan record:', err); }
 
   if (adhered) updateAutoDisable(cwd, trendRow);
   return { adhered, declared };
@@ -143,7 +144,7 @@ function updateAutoDisable(cwd: string, trendRow: TrendRowLike): void {
     } else {
       writeState(cwd, { enabled: true, subBaselineStreak: streak, lastCheck: evidence });
     }
-  } catch { /* state write is best-effort */ }
+  } catch (err) { Logger.warn('ConductorCheck', 'conductor state write failed (auto-disable streak not persisted):', err); }
 }
 
 function writeState(cwd: string, state: unknown): void {
@@ -164,8 +165,8 @@ export function expireStalePlan(cwd: string, lastPlan: ConductorPlan): void {
       expired: true,
       reason: 'no scored row landed within the plan freshness window — budget consumed, no output',
     }) + '\n');
-  } catch { /* verdict log is best-effort */ }
-  try { rmSync(lastPlanPath(cwd), { force: true }); } catch { /* best-effort */ }
+  } catch (err) { Logger.warn('ConductorCheck', 'expired-plan verdict append failed:', err); }
+  try { rmSync(lastPlanPath(cwd), { force: true }); } catch (err) { Logger.warn('ConductorCheck', 'could not release expired plan record:', err); }
 }
 
 /** Convenience for the bin wiring: check only when a plan record exists and

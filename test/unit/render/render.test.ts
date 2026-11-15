@@ -413,7 +413,7 @@ describe('HeadlessRenderer', () => {
 
     await renderer.initialize();
 
-    expect(renderer.browser.newContext).toHaveBeenCalled();
+    expect(renderer.browser.newContext).toHaveBeenCalledTimes(1);
     expect(renderer.context).toBe(newContext);
     HeadlessRenderer.instance = null;
   });

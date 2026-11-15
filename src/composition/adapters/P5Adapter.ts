@@ -14,6 +14,7 @@ import type { RenderContext } from '../CompositionEngine.js';
 import { getCanvasCompositeOp } from '../utils/blendModes.js';
 import { VENDOR_ASSETS } from '../../utils/vendorAssets.js';
 import { Logger } from '../../utils/Logger.js';
+import { compileGeneratedCode, createGeneratedCodeScope } from '../../guardrails/GeneratedCodeGuard.js';
 
 /** p5.js sketch instance */
 interface P5Instance {
@@ -112,6 +113,9 @@ export class P5Adapter implements LayerAdapter {
 
       // Wrap user's code in a function that sets up p5 globals
       const userCode = layer.code;
+      // setup and draw bodies run as separate compiles; undeclared variables
+      // (`x = 0` in setup, `x += 1` in draw) live here, not on window.
+      const sketchScope = createGeneratedCodeScope();
 
       p.setup = () => {
         p.canvas = p.createCanvas(width, height).elt as HTMLCanvasElement;
@@ -138,9 +142,8 @@ export class P5Adapter implements LayerAdapter {
                 return;
               }
 
-              // eslint-disable-next-line no-new-func
-              const setupFn = new Function('p', setupMatch[1]);
-              setupFn(p);
+              // GeneratedCodeGuard: AST denylist + runtime computed-key guard + strict mode.
+              compileGeneratedCode(setupMatch[1], { p }, sketchScope)();
             } catch (e) {
               Logger.error('P5Adapter', 'Error in setup:', e);
             }
@@ -168,9 +171,8 @@ export class P5Adapter implements LayerAdapter {
                 return;
               }
 
-              // eslint-disable-next-line no-new-func
-              const drawFn = new Function('p', drawMatch[1]);
-              drawFn(p);
+              // GeneratedCodeGuard: AST denylist + runtime computed-key guard + strict mode.
+              compileGeneratedCode(drawMatch[1], { p }, sketchScope)();
             } catch (e) {
               Logger.error('P5Adapter', 'Error in draw:', e);
             }

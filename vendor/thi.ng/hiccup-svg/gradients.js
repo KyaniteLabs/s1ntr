@@ -1,0 +1,43 @@
+import { fattribs, fcolor, ff } from "./format.js";
+const RE_ALPHA_COLOR = /(rgb|hsl)a\(([a-z0-9.-]+),([0-9.%]+),([0-9.%]+),([0-9.]+)\)/;
+const __gradient = (type, attribs, stops) => [type, fattribs(attribs), ...stops.map(__gradientStop)];
+const __gradientStop = ([offset, col]) => {
+  col = fcolor(col);
+  let opacity;
+  const parts = RE_ALPHA_COLOR.exec(col);
+  if (parts) {
+    col = `${parts[1]}(${parts[2]},${parts[3]},${parts[4]})`;
+    opacity = parts[5];
+  }
+  return ["stop", { offset, "stop-color": col, "stop-opacity": opacity }];
+};
+const linearGradient = (id, from, to, stops, attribs) => __gradient(
+  "linearGradient",
+  {
+    ...attribs,
+    id,
+    x1: ff(from[0]),
+    y1: ff(from[1]),
+    x2: ff(to[0]),
+    y2: ff(to[1])
+  },
+  stops
+);
+const radialGradient = (id, from, to, fr, r, stops, attribs) => __gradient(
+  "radialGradient",
+  {
+    ...attribs,
+    id,
+    fx: ff(from[0]),
+    fy: ff(from[1]),
+    cx: ff(to[0]),
+    cy: ff(to[1]),
+    fr: ff(fr),
+    r: ff(r)
+  },
+  stops
+);
+export {
+  linearGradient,
+  radialGradient
+};

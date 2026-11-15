@@ -128,9 +128,9 @@ describe('ASCIIArtGenerator', () => {
     });
     const gen = new ASCIIArtGenerator();
     const result = await gen.generate('castle', { width: 12, height: 4 });
-    expect(result).toContain('★');
-    expect(result).toContain('╱');
-    expect(result).toContain('█');
+    expect(result).toContain('★★★');
+    expect(result).toContain('╱   ╲');
+    expect(result).toContain('★█████★');
   });
 
   it('removes empty lines and filters before formatting', async () => {

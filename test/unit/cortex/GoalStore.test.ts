@@ -72,8 +72,8 @@ describe('GoalStore', () => {
     expect(goal.priority).toBe('high');
     expect(goal.category).toBe('coverage');
     expect(goal.status).toBe('active');
-    expect(goal.createdAt).toBeTruthy();
-    expect(goal.updatedAt).toBeTruthy();
+    expect(goal.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(goal.updatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     expect(mockFs.writeManifest).toHaveBeenCalledTimes(1);
 
     // Verify persisted
@@ -147,7 +147,7 @@ describe('GoalStore', () => {
 
     const completed = store.completeGoal(created.id);
     expect(completed!.status).toBe('completed');
-    expect(completed!.updatedAt).toBeTruthy();
+    expect(completed!.updatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
 
     // Verify persisted
     const loaded = store.getGoal(created.id);

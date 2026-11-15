@@ -16,7 +16,7 @@ process.env.LIMINAL_ALLOW_LOCALHOST_LLM = "true";
  * - CI environment (too slow)
  */
 
-import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -35,31 +35,12 @@ import { classifyError } from '../../src/guardrails/remediation/ErrorTaxonomy.js
 import { LLMClient } from '../../src/llm/LLMClient.js';
 import { runInSandbox } from '../../src/sandbox/index.js';
 import { createResourceLimiter } from '../../src/guardrails/core/ResourceLimiter.js';
-import { applyProviderEnv } from './helpers/liveProviderTestEnv.js';
+import { installIntegrationProofLLMEnv } from '../integration/helpers/proof-llm-server.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const E2E_TIMEOUT_MS = 120000; // 2 minutes
-
-// Check if LLM is available
-async function isLLMAvailable(): Promise<boolean> {
-  try {
-    // Check if LLMClient is configured
-    if (!LLMClient.isConfigured()) {
-      return false;
-    }
-    // Try a simple request
-    const client = new LLMClient();
-    await client.generate('test', { model: 'test', temperature: 0 });
-    return true;
-  } catch {
-    // A failed probe means the real generation assertion would fail too.
-    // Treat configured-but-unusable local/cloud LLMs as unavailable so this
-    // optional e2e path skips instead of producing a false suite failure.
-    return false;
-  }
-}
 
 // Check if Chrome/Puppeteer is available
 function isChromeUnavailableError(error: string | undefined): boolean {
@@ -68,19 +49,15 @@ function isChromeUnavailableError(error: string | undefined): boolean {
   return /could not find|failed to launch|executable doesn't exist|no usable sandbox|chromium/i.test(msg);
 }
 
-describe('E2E Guardrails with Real LLM', () => {
-  let llmAvailable = false;
+describe('E2E Guardrails with a recorded provider', () => {
+  let proofLLMCleanup: Awaited<ReturnType<typeof installIntegrationProofLLMEnv>>;
   let constitution: Constitution;
   let system: ReturnType<typeof initializeGuardrailSystem>;
 
   beforeAll(async () => {
-    if (!LLMClient.isConfigured()) {
-      applyProviderEnv('glm');
-    }
-    llmAvailable = await isLLMAvailable();
-    if (!llmAvailable) {
-      console.warn('[E2E] LLM not available - LLM-dependent tests will be skipped');
-    }
+    // Loopback fake provider (real HTTP, deterministic bodies): no key, no network, no spend.
+    proofLLMCleanup = await installIntegrationProofLLMEnv();
+    expect(LLMClient.isConfigured()).toBe(true);
 
     // Initialize constitution for learning
     constitution = initializeConstitution();
@@ -117,10 +94,13 @@ describe('E2E Guardrails with Real LLM', () => {
     }));
   });
 
+  afterAll(async () => {
+    await proofLLMCleanup?.();
+  });
+
   beforeEach(() => {
-    if (!LLMClient.isConfigured()) {
-      applyProviderEnv('glm');
-    }
+    // test/setup.ts wipes LLM env vars in its own beforeEach; re-apply the fake.
+    proofLLMCleanup.reapply();
   });
 
   describe('Phase 1: Foundation Layer', () => {
@@ -386,11 +366,6 @@ describe('E2E Guardrails with Real LLM', () => {
 
   describe('Full Integration: Real LLM + Guardrails', () => {
     it('should generate code with guardrail validation', async () => {
-      if (!llmAvailable) {
-        console.warn('[E2E] LLM not available - skipping LLM-dependent guardrail test');
-        return;
-      }
-
       const taskId = `e2e-llm-${Date.now()}`;
 
       // Generate code using LLM
@@ -420,7 +395,6 @@ Output only the code, no explanation.`;
       // The live gate should produce code; keep the diagnostic explicit if a
       // configured provider fails after the availability probe passed.
       if (generationError) {
-        console.warn('[E2E] LLM generation failed:', generationError.message);
         expect.unreachable('LLM generation should not fail when test is configured to run');
       }
 

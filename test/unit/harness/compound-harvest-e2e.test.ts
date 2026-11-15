@@ -87,7 +87,7 @@ describe('compound harvest e2e', () => {
     expect(r.loggedFailure).toBe(true);
     expect(r.adaptationIds).toEqual(['adapt_e2e_1']);
     expect(mockRecordPattern).toHaveBeenCalledWith('timeout-storm', 'harness-diagnose');
-    expect(mockSave).toHaveBeenCalled();
+    expect(mockSave).toHaveBeenCalledTimes(1);
 
     mockGetAdaptations.mockReturnValue([
       // Attempt 2: memory returns the lesson from attempt 1
@@ -119,7 +119,7 @@ describe('compound harvest e2e', () => {
     );
     expect(r.adaptationIds).toEqual([]);
     expect(mockRecordPattern).not.toHaveBeenCalled();
-    expect(mockLog).toHaveBeenCalled();
+    expect(mockLog).toHaveBeenCalledTimes(2);
     const rejectLog = mockLog.mock.calls.some(
       (c) => String(c[0]?.thinking || '').includes('harmful-pattern-rejected'),
     );

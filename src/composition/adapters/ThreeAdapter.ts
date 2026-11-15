@@ -24,6 +24,7 @@ import type { RenderContext } from '../CompositionEngine.js';
 import { getWebGLBlendFunc } from '../utils/blendModes.js';
 import { VENDOR_ASSETS } from '../../utils/vendorAssets.js';
 import { Logger } from '../../utils/Logger.js';
+import { compileGeneratedCode } from '../../guardrails/GeneratedCodeGuard.js';
 
 /** Three.js Scene type (simplified) */
 interface THREEScene {
@@ -210,12 +211,11 @@ export class ThreeAdapter implements LayerAdapter {
         throw new Error(`Blocked unsafe Three.js layer code: ${blockedPatterns.join(', ')}`);
       }
       {
-        // Shadows the module for the direct eval below, which reads THREE.
-        const THREE = trackedThree;
-        void THREE;
         try {
-          // eslint-disable-next-line no-eval
-          eval(layer.code);
+          // GeneratedCodeGuard: AST denylist + runtime computed-key guard + strict mode.
+          compileGeneratedCode(layer.code, {
+            THREE: trackedThree, scene, camera, renderer, objects, width, height,
+          })();
         } catch (error) {
           Logger.error('ThreeAdapter', 'Error executing Three.js code:', error);
           throw error;

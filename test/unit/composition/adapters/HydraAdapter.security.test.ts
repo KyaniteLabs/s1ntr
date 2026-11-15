@@ -71,10 +71,17 @@ describe('HydraAdapter security', () => {
     vi.restoreAllMocks();
     Reflect.deleteProperty(window, 'Hydra');
     Reflect.deleteProperty(window, '__hydraMarker');
+    Reflect.deleteProperty(window, '__hydraProbe');
   });
 
   it('executes benign Hydra code', () => {
-    const layer = createLayer('globalThis.__hydraMarker = "ran";');
+    // Generated code can no longer reach window/globalThis, so it reports
+    // through a probe function exposed as an ordinary global (as Hydra's own
+    // makeGlobal functions are).
+    (window as unknown as { __hydraProbe: (v: string) => void }).__hydraProbe = (v) => {
+      (window as unknown as { __hydraMarker?: string }).__hydraMarker = v;
+    };
+    const layer = createLayer('__hydraProbe("ran");');
 
     adapter.render(layer, container);
 

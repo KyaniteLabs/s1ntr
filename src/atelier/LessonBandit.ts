@@ -9,6 +9,8 @@
 import { readFileSync, renameSync, existsSync } from 'node:fs';
 import { writeAtomicSync } from '../shared/fsAtomic.js';
 import { join } from 'node:path';
+import { Logger } from '../utils/Logger.js';
+import { isEnoent } from '../utils/errors.js';
 
 export interface LessonPosterior {
   readonly id: string;
@@ -51,7 +53,10 @@ export class LessonBandit {
       // Quarantine the unreadable file before any save() can overwrite it —
       // fresh state in memory is fine, but destroying the on-disk evidence
       // of what broke turns a torn write into a total table wipe (audit M2).
-      try { renameSync(this.statePath, `${this.statePath}.corrupt-${Date.now()}`); } catch { /* nothing to quarantine */ }
+      try { renameSync(this.statePath, `${this.statePath}.corrupt-${Date.now()}`); } catch (renameErr) {
+        // ENOENT: already gone, nothing to quarantine. Anything else leaves the corrupt file exposed to overwrite.
+        if (!isEnoent(renameErr)) Logger.warn('LessonBandit', `could not quarantine corrupt state ${this.statePath}:`, renameErr);
+      }
     }
   }
 

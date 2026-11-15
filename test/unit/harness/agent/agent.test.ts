@@ -159,7 +159,6 @@ describe('HarnessAgent', () => {
   it('getSession returns session after execution', async () => {
     await agent.executeTask({ id: 's1', title: 'T', description: 'd', approved: true });
     const session = agent.getSession('s1');
-    expect(session).not.toBeUndefined();
     expect(session!.task.id).toBe('s1');
   });
 

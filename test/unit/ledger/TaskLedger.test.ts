@@ -55,8 +55,8 @@ describe('TaskLedger', () => {
     expect(task.status).toBe('pending');
     expect(task.attemptCount).toBe(0);
     expect(task.title).toBe('Test task');
-    expect(task.createdAt).toBeTruthy();
-    expect(task.updatedAt).toBeTruthy();
+    expect(task.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(task.updatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
   it('createTask — persists manifest to .sinter/manifests/task/<id>/manifest.json', () => {

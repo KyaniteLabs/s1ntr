@@ -39,7 +39,7 @@ describe('chat command', () => {
   it('initializes ConversationManager', async () => {
     const startNewSessionSpy = vi.spyOn(ConversationManager.prototype, 'startNewSession');
     await chatCommand();
-    expect(startNewSessionSpy).toHaveBeenCalled();
+    expect(startNewSessionSpy).toHaveBeenCalledTimes(1);
     startNewSessionSpy.mockRestore();
   });
 

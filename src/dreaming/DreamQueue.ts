@@ -8,6 +8,8 @@
 
 import fs from 'fs';
 import path from 'path';
+import { Logger } from '../utils/Logger.js';
+import { isEnoent } from '../utils/errors.js';
 import type {
   CompositionDreamPlan,
   CompositionDreamRecord,
@@ -102,8 +104,9 @@ export class DreamQueue {
       // it (same recovery contract as QualityArchive) and start empty.
       try {
         fs.renameSync(persistPath, `${persistPath}.corrupt-${Date.now()}`);
-      } catch {
-        /* rename best-effort */
+      } catch (renameErr) {
+        // ENOENT: already gone. Anything else leaves the unreadable queue to be overwritten.
+        if (!isEnoent(renameErr)) Logger.warn('DreamQueue', `could not quarantine corrupt queue ${persistPath}:`, renameErr);
       }
       return;
     }
@@ -124,8 +127,9 @@ export class DreamQueue {
     try {
       fs.mkdirSync(path.dirname(this.persistPath), { recursive: true });
       fs.writeFileSync(this.persistPath, JSON.stringify({ version: 1, tasks: this.queue }, null, 2), 'utf-8');
-    } catch {
-      /* persistence is best-effort; the in-memory queue stays authoritative */
+    } catch (err) {
+      // The in-memory queue stays authoritative, but the on-disk copy is now stale.
+      Logger.warn('DreamQueue', `queue persistence failed: ${this.persistPath}:`, err);
     }
   }
 

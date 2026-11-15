@@ -26,11 +26,11 @@ describe('LineageTracker', () => {
       seed: 'test-seed-123',
     });
 
-    expect(record.artifactId).toBeTruthy();
+    expect(record.artifactId).toMatch(/^[0-9a-f-]{36}$/);
     expect(record.provenance).toBe('fresh-generation');
     expect(record.parentIds).toEqual([]);
     expect(record.seed).toBe('test-seed-123');
-    expect(record.createdAt).toBeTruthy();
+    expect(record.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
   it('records a remix with parent IDs', async () => {
@@ -183,7 +183,7 @@ describe('PreferenceEventLogger', () => {
 
     expect(record.action).toBe('pin');
     expect(record.artifactId).toBe('art-1');
-    expect(record.capturedAt).toBeTruthy();
+    expect(record.capturedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
   it('logs a pairwise comparison', async () => {

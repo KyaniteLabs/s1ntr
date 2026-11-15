@@ -25,8 +25,8 @@
  *   heuristic. Sorted by weight desc then tag asc. Fully deterministic.
  */
 
-import { readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, existsSync, mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { writeAtomicSync } from '../shared/fsAtomic.js';
 import type { PlateEntry } from './NamingOrgan.js';
 
@@ -299,6 +299,7 @@ export function growTaxonomy(cwd: string, options: { topAxes?: number } = {}): T
 /** Write the taxonomy where the naming loop can consume it. Deterministic: no timestamps. */
 export function writeTaxonomy(cwd: string, taxonomy: Taxonomy): string {
   const path = TAXONOMY_PATH(cwd);
+  mkdirSync(dirname(path), { recursive: true }); // fresh workspaces have no game/ dir yet
   writeAtomicSync(path, `${JSON.stringify(taxonomy, null, 1)}\n`);
   return path;
 }

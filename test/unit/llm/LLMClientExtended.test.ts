@@ -1266,7 +1266,7 @@ describe('LLMClient loadRoles', () => {
     vi.spyOn(client as any, 'resolveModel').mockResolvedValue('test-model');
 
     await client.complete({ prompt: 'draw a circle', systemPrompt: '' });
-    expect(provider.generate).toHaveBeenCalled();
+    expect(provider.generate).toHaveBeenCalledTimes(1);
     const req = provider.generate.mock.calls[0][0] as { systemPrompt: string };
     expect(req.systemPrompt.trim().length).toBeGreaterThan(0);
     expect(req.systemPrompt).toBe('You are a helpful assistant.');
@@ -1277,7 +1277,7 @@ describe('LLMClient loadRoles', () => {
       userPrompt: 'draw a circle',
       tools: [],
     });
-    expect(provider.generate).toHaveBeenCalled();
+    expect(provider.generate).toHaveBeenCalledTimes(1);
     const toolReq = provider.generate.mock.calls[0][0] as { systemPrompt: string };
     expect(toolReq.systemPrompt.trim().length).toBeGreaterThan(0);
     expect(toolReq.systemPrompt).toBe('You are a helpful assistant.');
@@ -1470,7 +1470,7 @@ describe('LLMClient request provenance', () => {
     expect(response.fallbackUsed).toBe(true);
     expect(response.fallbackFrom).toBe('minimax:MiniMax-M2.5');
     expect(response.fallbackTo).toBe('lmstudio:local-model');
-    expect(fallback.generate).toHaveBeenCalled();
+    expect(fallback.generate).toHaveBeenCalledTimes(1);
   });
 
   it('engages fallback chain when primary fails with HTTP 403 LLMAuthError', async () => {
@@ -1519,7 +1519,7 @@ describe('LLMClient request provenance', () => {
     expect(response.success).toBe(true);
     expect(response.text).toBe('fallback after 403');
     expect(response.fallbackUsed).toBe(true);
-    expect(fallback.generate).toHaveBeenCalled();
+    expect(fallback.generate).toHaveBeenCalledTimes(1);
   });
 
   it('does not engage fallback when primary fails with non-fallbackable plain LLMError (400)', async () => {

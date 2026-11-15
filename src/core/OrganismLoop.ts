@@ -67,8 +67,9 @@ export async function runOrganismMode(
             artifacts: runArtifact ? [runArtifact] : [],
             metadata: { mode: 'organism', iterations: iteration, finalScore: bestScore, reason: 'aborted by user' },
           });
-        } catch {
-          // SinterFS failure must not affect loop operation
+        } catch (err) {
+          // Must not affect loop operation, but the run record is lost.
+          Logger.warn('OrganismLoop', 'SinterFS recordRun (suspended) failed:', err);
         }
       }
       return result;
@@ -135,8 +136,9 @@ export async function runOrganismMode(
       if (adapter) {
         try {
           runArtifact = await adapter.saveOrganism(options.project, i, result.musicCode, result.visualCode);
-        } catch {
-          // GalleryFSAdapter failure must not affect loop operation
+        } catch (err) {
+          // Must not affect loop operation, but the organism artifact ref is lost.
+          Logger.warn('OrganismLoop', 'GalleryFSAdapter saveOrganism failed:', err);
         }
       } else {
         await gallery.saveOrganism(options.project, i, result.musicCode, result.visualCode);
@@ -164,8 +166,9 @@ export async function runOrganismMode(
         artifacts: runArtifact ? [runArtifact] : [],
         metadata: { mode: 'organism', iterations: iteration, finalScore: bestScore },
       });
-    } catch {
-      // SinterFS failure must not affect loop operation
+    } catch (err) {
+      // Must not affect loop operation, but the run record is lost.
+      Logger.warn('OrganismLoop', 'SinterFS recordRun (completed) failed:', err);
     }
   }
 

@@ -273,7 +273,7 @@ describe('validateSyllableConstraint', () => {
 
     it('suggestions include the target count', () => {
       const result = validateSyllableConstraint(['The'], 5);
-      expect(result.suggestions[0]).toContain('5');
+      expect(result.suggestions[0]).toContain('to reach the target of 5');
     });
 
     it('only mismatched lines get suggestions', () => {

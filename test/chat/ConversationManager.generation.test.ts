@@ -430,7 +430,7 @@ describe('ConversationManager - Generation Integration', () => {
 
       await manager.generateFromBrief(brief);
 
-      expect(RalphLoop.run).toHaveBeenCalled();
+      expect(RalphLoop.run).toHaveBeenCalledTimes(1);
       expect(manager.currentSession?.iterations).toHaveLength(1);
       expect(manager.currentSession?.iterations[0]).toMatchObject({
         code: mockIterationContext.code,

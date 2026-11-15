@@ -180,7 +180,7 @@ describe('UrlValidator', () => {
     it('should still allow public IPv6 and the carrier-grade NAT range the fleet gateway uses', async () => {
       await expect(validateUrl('https://api.company.com/v1', {}, resolvingTo('2606:4700::1111')))
         .resolves.toBeUndefined();
-      await expect(validateUrl('https://api.company.com/v1', {}, resolvingTo('100.64.0.1')))
+      await expect(validateUrl('https://api.company.com/v1', {}, resolvingTo('<internal-host>')))
         .resolves.toBeUndefined();
     });
 

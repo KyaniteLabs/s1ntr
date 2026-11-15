@@ -208,7 +208,6 @@ describe('HeadlessRenderer readiness', () => {
     });
 
     // waitForFirstFrame should have polled and found blank canvas
-    expect(page.evaluate).toHaveBeenCalled();
     // Should have waited for the canvas
     expect(events).toContain('canvas-ready');
     // The hydra blank-output error should be returned

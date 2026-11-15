@@ -15,6 +15,8 @@
 import { writeFileSync, renameSync, unlinkSync } from 'node:fs';
 import { writeFile, rename, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
+import { Logger } from './Logger.js';
+import { isEnoent } from './errors.js';
 
 function tempPath(targetPath: string): string {
   return `${targetPath}.tmp-${process.pid}-${randomUUID()}`;
@@ -56,8 +58,10 @@ export function writeFileAtomicSync(
   } catch (err) {
     try {
       unlinkSync(tmp);
-    } catch {
-      /* temp may not exist; ignore */
+    } catch (cleanupErr) {
+      // ENOENT: the write never created the temp file. Anything else leaves a stray temp;
+      // the original write error is still the one thrown.
+      if (!isEnoent(cleanupErr)) Logger.warn('atomicWrite', `could not remove temp file ${tmp}:`, cleanupErr);
     }
     throw err;
   }

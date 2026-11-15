@@ -23,9 +23,8 @@ describe('DOMAIN_MAPPINGS', () => {
   });
 
   it('each mapping has source, target, techniqueMap, and decisionMap', () => {
-    for (const mapping of Object.values(DOMAIN_MAPPINGS)) {
-      expect(mapping.source).toBeTruthy();
-      expect(mapping.target).toBeTruthy();
+    for (const [key, mapping] of Object.entries(DOMAIN_MAPPINGS)) {
+      expect(`${mapping.source}→${mapping.target}`).toBe(key);
       expect(typeof mapping.techniqueMap).toBe('object');
       expect(typeof mapping.decisionMap).toBe('object');
     }

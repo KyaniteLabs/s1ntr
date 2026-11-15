@@ -235,7 +235,7 @@ describe('Constitution.applyPrevention', () => {
     // that are not common stop words, producing: /Unexpected.*token.*line/i
     const result = await constitution.applyPrevention(ctx, 'Unexpected token at line 5');
     expect(result.prevented).toBe(true);
-    expect(result.ruleId).not.toBeNull();
+    expect(result.ruleId).toEqual(expect.any(String));
     expect(result.reason).toContain('validation');
   });
 

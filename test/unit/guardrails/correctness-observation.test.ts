@@ -323,7 +323,6 @@ describe('TelemetryCollector', () => {
       collector.recordTaskStart('task-1', { prompt: 'create art' });
 
       const metrics = collector.getMetrics('task-1');
-      expect(metrics).not.toBeUndefined();
       expect(metrics!.taskId).toBe('task-1');
       expect(metrics!.success).toBe(true);
       expect(metrics!.guardrailsEvaluated).toBe(0);
@@ -334,7 +333,6 @@ describe('TelemetryCollector', () => {
       collector.recordTaskStart('task-2', {});
 
       const trace = collector.getTrace('task-2');
-      expect(trace).not.toBeUndefined();
       expect(trace!.steps).toEqual([]);
     });
 
@@ -542,6 +540,6 @@ describe('telemetry global functions', () => {
     // The global might have been set by previous tests, so this is more of a
     // structural check -- we verify getTelemetry returns the same instance
     const t = getTelemetry();
-    expect(t).not.toBeNull();
+    expect(getTelemetry()).toBe(t);
   });
 });

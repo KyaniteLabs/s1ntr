@@ -223,8 +223,8 @@ describe('Semantic Search with Embeddings', () => {
 
       expect(retrieved[0].embedding).toHaveLength(384);
       expect(retrieved[0].embeddingModel).toBe('mock-model');
-      expect(retrieved[0].embeddedAt).not.toBeNull();
-      expect(mockEmbeddingService.embed).toHaveBeenCalled();
+      expect(retrieved[0].embeddedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+      expect(mockEmbeddingService.embed).toHaveBeenCalledTimes(1);
     });
 
     it('should retrieve seeds using semantic search', async () => {
@@ -280,7 +280,7 @@ describe('Semantic Search with Embeddings', () => {
       expect(updated).toBe(1);
 
       retrieved = await noEmbedBank.getAll();
-      expect(retrieved[0].embedding).not.toBeNull();
+      expect(retrieved[0].embedding).toHaveLength(384);
     });
 
     it('should embed text directly', async () => {

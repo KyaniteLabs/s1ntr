@@ -1,0 +1,44 @@
+import { SQRT2_2 } from "@thi.ng/math/api";
+import { add3 } from "@thi.ng/vectors/add";
+import { ZERO3 } from "@thi.ng/vectors/api";
+import { maddN3 } from "@thi.ng/vectors/maddn";
+import { max3 } from "@thi.ng/vectors/max";
+import { min3 } from "@thi.ng/vectors/min";
+import { sub3 } from "@thi.ng/vectors/sub";
+import { subN3 } from "@thi.ng/vectors/subn";
+import { AABB } from "./api/aabb.js";
+import { __argsVV } from "./internal/args.js";
+function aabb(...args) {
+  return new AABB(...__argsVV(args));
+}
+const aabbFromMinMax = (min, max, attribs) => new AABB(min, sub3([], max, min), attribs);
+const aabbFromMinMaxWithMargin = (min, max, margin, attribs) => aabbFromMinMax(min, max, attribs).offset(margin);
+const aabbFromCentroid = (centroid, size, attribs) => new AABB(maddN3([], size, -0.5, centroid), size, attribs);
+const aabbWithCentroidAndMargin = (centroid, size, margin, attribs) => aabbFromCentroid(centroid, size, attribs).offset(margin);
+const intersectionAABB = (a, b) => {
+  const p = max3([], a.pos, b.pos);
+  const q = min3(null, add3([], a.pos, a.size), add3([], b.pos, b.size));
+  const size = max3(null, sub3(null, q, p), ZERO3);
+  return size[0] > 0 && size[1] > 0 && size[2] > 0 ? new AABB(p, size) : void 0;
+};
+function inscribedAABB(...args) {
+  let pos, r;
+  if (args.length === 1) {
+    const c = args[0];
+    pos = c.pos;
+    r = c.r;
+  } else {
+    [pos, r] = args;
+  }
+  r *= SQRT2_2;
+  return aabb(subN3([], pos, r), r * 2);
+}
+export {
+  aabb,
+  aabbFromCentroid,
+  aabbFromMinMax,
+  aabbFromMinMaxWithMargin,
+  aabbWithCentroidAndMargin,
+  inscribedAABB,
+  intersectionAABB
+};

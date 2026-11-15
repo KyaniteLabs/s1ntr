@@ -12,6 +12,7 @@ import type { Layer, GlobalSettings } from '../types.js';
 import type { LayerAdapter, Export, Import } from './index.js';
 import type { RenderContext } from '../CompositionEngine.js';
 import { Logger } from '../../utils/Logger.js';
+import { compileGeneratedCode } from '../../guardrails/GeneratedCodeGuard.js';
 import { VENDOR_ASSETS } from '../../utils/vendorAssets.js';
 
 /** Tone.js types (simplified) */
@@ -138,19 +139,15 @@ export class ToneAdapter implements LayerAdapter {
       Logger.warn('ToneAdapter', `Blocked unsafe Tone.js layer code: ${blockedPatterns.join(', ')}`);
     } else {
       try {
-        // Define tracking function in eval context
-        (window as unknown as Record<string, unknown>).__trackSynth = (s: ToneSynth) => {
+        // GeneratedCodeGuard: AST denylist + runtime computed-key guard + strict
+        // mode. The tracker is passed as a variable, not planted on window.
+        const trackSynth = (s: ToneSynth) => {
           synths.push(s);
           return s;
         };
-
-        // eslint-disable-next-line no-eval
-        eval(wrappedCode);
+        compileGeneratedCode(wrappedCode, { Tone, __trackSynth: trackSynth })();
       } catch (error) {
         Logger.error('ToneAdapter', 'Error executing Tone.js code:', error);
-      } finally {
-        // Clean up tracking function
-        delete (window as unknown as Record<string, unknown>).__trackSynth;
       }
     }
 

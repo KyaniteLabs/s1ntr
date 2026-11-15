@@ -1,0 +1,15 @@
+import { unsupportedOp } from "@thi.ng/errors/unsupported";
+const vop = (dispatch = 1, fallback, ...optimized) => {
+  const impls = [, ,].concat(optimized);
+  const fn = (...args) => {
+    const g = impls[args[dispatch].length] || fallback;
+    return g ? g(...args) : unsupportedOp(`no impl for vec size ${args[dispatch].length}`);
+  };
+  fn.add = (dim, fn2) => impls[dim] = fn2;
+  fn.default = (fn2) => fallback = fn2;
+  fn.impl = (dim) => dim != null ? impls[dim] || fallback : fallback;
+  return fn;
+};
+export {
+  vop
+};

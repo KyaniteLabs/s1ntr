@@ -28,6 +28,10 @@ import { libraryPromptSection } from '../runtime-core/LibraryPromptSection.js';
 import { readFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeAtomicSync } from '../shared/fsAtomic.js';
+import { Logger } from '../utils/Logger.js';
+
+/** A missing file is an expected first-run state; anything else is a real read failure. */
+const isMissingFile = (err: unknown): boolean => (err as NodeJS.ErrnoException | null)?.code === 'ENOENT';
 import { loadOrCreate as loadRecipeBook, librariesFor, usablePriorPairs } from './RecipeBook.js';
 import { injectSeedMotifs } from './CompostPromptMemory.js';
 
@@ -315,12 +319,18 @@ private libraryCapabilitySuffix(): string {
     try {
       const state = JSON.parse(readFileSync(this.gamePath('conductor.state'), 'utf8')) as { enabled?: boolean };
       if (state?.enabled === false) return false;
-    } catch { /* no state file — lane defaults on */ }
+    } catch (err) {
+      // ENOENT: no state file, the lane defaults on. A torn file also defaults on, which would silently ignore the kill switch.
+      if (!isMissingFile(err)) Logger.warn('PromptOrgan', 'conductor.state unreadable (kill switch ignored, lane defaults on):', err);
+    }
     try {
       const today = new Date().toISOString().slice(0, 10);
       const count = JSON.parse(readFileSync(this.gamePath('conductor-count.json'), 'utf8')) as { wave?: string; used?: number };
       if (count?.wave === today && (count.used ?? 0) >= 2) return false;
-    } catch { /* no counter yet — budget fresh */ }
+    } catch (err) {
+      // ENOENT: no counter yet. A torn counter resets the daily budget.
+      if (!isMissingFile(err)) Logger.warn('PromptOrgan', 'conductor-count.json unreadable (daily budget treated as fresh):', err);
+    }
     return true;
   }
 
@@ -331,7 +341,10 @@ private libraryCapabilitySuffix(): string {
     try {
       const count = JSON.parse(readFileSync(path, 'utf8')) as { wave?: string; used?: number };
       if (count?.wave === today) used = count.used ?? 0;
-    } catch { /* fresh day */ }
+    } catch (err) {
+      // ENOENT: first turn. A torn counter restarts the count at zero.
+      if (!isMissingFile(err)) Logger.warn('PromptOrgan', 'conductor-count.json unreadable (count restarts at 0):', err);
+    }
     writeAtomicSync(path, JSON.stringify({ wave: today, used: used + 1 }, null, 1));
   }
 
@@ -350,7 +363,7 @@ private libraryCapabilitySuffix(): string {
           .filter(p => !(['strudel', 'tone', 'audio'].includes(p.primary) && ['strudel', 'tone', 'audio'].includes(p.secondary)));
         if (pairs.length > 0) return this.pick(pairs);
       }
-    } catch { /* torn frontier — fall through to priors */ }
+    } catch (err) { Logger.warn('PromptOrgan', 'combination-frontier.json unreadable (falling back to priors):', err); }
     const priors = usablePriorPairs();
     if (priors.length === 0) return null;
     const [primary, secondary] = this.pick(priors);
@@ -373,7 +386,7 @@ private libraryCapabilitySuffix(): string {
     const createdAt = new Date().toISOString();
     try {
       writeAtomicSync(this.gamePath('conductor-last.json'), JSON.stringify({ ...pair, ts: createdAt }, null, 1));
-    } catch { /* plan record is best-effort — the prompt still ships */ }
+    } catch (err) { Logger.warn('PromptOrgan', 'conductor plan record write failed (adherence check will not run; prompt still ships):', err); }
     this.noteConductorTurn();
     return {
       text,

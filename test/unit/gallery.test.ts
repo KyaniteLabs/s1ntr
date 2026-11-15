@@ -263,7 +263,7 @@ function draw() {
       expect(history).toHaveLength(1);
       expect(history[0].version).toBe(1);
       expect((history[0] as Iteration).code).toBe(code);
-      expect(history[0].timestamp).toBeTruthy();
+      expect(history[0].timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     });
 
     it('should load multiple iterations in correct order', async () => {
@@ -308,8 +308,8 @@ function draw() {
       const history = await gallery.loadHistory('test-project');
 
       expect(history).toHaveLength(2);
-      expect(history[0].timestamp).toBeTruthy();
-      expect(history[1].timestamp).toBeTruthy();
+      expect(history[0].timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+      expect(history[1].timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     });
 
     it('should throw error for null project name', async () => {
@@ -443,7 +443,7 @@ function draw() {
       expect(history).toHaveLength(3);
       expect(history[0].version).toBe(1);
       expect((history[0] as Iteration).code).toBe('code1');
-      expect(history[0].timestamp).toBeTruthy();
+      expect(history[0].timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
       expect(() => new Date(history[0].timestamp)).not.toThrow();
       expect(history[1].version).toBe(2);
       expect((history[1] as Iteration).code).toBe('code2');

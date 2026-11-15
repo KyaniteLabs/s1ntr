@@ -18,6 +18,7 @@ import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { CodeValidator } from '../core/CodeValidator.js';
 import { writeFileAtomic } from '../utils/atomicWrite.js';
+import { Logger } from '../utils/Logger.js';
 import { VotingEngine } from './VotingEngine.js';
 import type { RoundResult, SwarmResult, VoteSource } from './types.js';
 
@@ -268,8 +269,9 @@ export async function writeSwarmSession(
       try {
         await exportHtml(output.content, previewPath);
         candidate.previewPath = previewPath;
-      } catch {
-        // Non-fatal: the source path is still saved and printed.
+      } catch (err) {
+        // Non-fatal: the source path is still saved and printed, but the preview is missing.
+        Logger.warn('SwarmSession', `candidate preview not exported: ${previewPath}:`, err);
       }
     }
   }

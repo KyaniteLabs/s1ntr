@@ -52,7 +52,7 @@ const BLOCKED_HOSTS = [
   'metadata.oraclecloud.com',
 ];
 
-// Private IP ranges. 100.64.0.0/10 (carrier-grade NAT) is deliberately not
+// Private IP ranges. <internal-host>/10 (carrier-grade NAT) is deliberately not
 // listed: the fleet's own LLM gateway is addressed in that range.
 const PRIVATE_IP_PATTERNS = [
   /^10\./,                          // 10.0.0.0/8

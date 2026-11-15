@@ -1,0 +1,43 @@
+import { DEFAULT, defmulti } from "@thi.ng/defmulti/defmulti";
+import { ZERO2, ZERO3 } from "@thi.ng/vectors/api";
+import { set2, set3 } from "@thi.ng/vectors/set";
+import { submN } from "@thi.ng/vectors/submn";
+import { Arc } from "./api/arc.js";
+import { Circle } from "./api/circle.js";
+import { Ellipse } from "./api/ellipse.js";
+import { Sphere } from "./api/sphere.js";
+import { centroid } from "./centroid.js";
+import { __copyAttribs } from "./internal/copy.js";
+import { __dispatch } from "./internal/dispatch.js";
+import { translate } from "./translate.js";
+const center = defmulti(
+  __dispatch,
+  {},
+  {
+    [DEFAULT]: ($, origin = ZERO3) => {
+      const c = centroid($);
+      return c ? translate($, submN(null, c, origin, -1)) : void 0;
+    },
+    arc: ($, origin = ZERO2) => new Arc(
+      set2([], origin),
+      set2([], $.r),
+      $.axis,
+      $.start,
+      $.end,
+      $.xl,
+      $.cw,
+      __copyAttribs($.attribs)
+    ),
+    circle: ($, origin = ZERO2) => new Circle(set2([], origin), $.r, __copyAttribs($.attribs)),
+    ellipse: ($, origin = ZERO2) => new Ellipse(
+      set2([], origin),
+      set2([], $.r),
+      __copyAttribs($.attribs)
+    ),
+    extra: ($) => $,
+    sphere: ($, origin = ZERO3) => new Sphere(set3([], origin), $.r, __copyAttribs($.attribs))
+  }
+);
+export {
+  center
+};

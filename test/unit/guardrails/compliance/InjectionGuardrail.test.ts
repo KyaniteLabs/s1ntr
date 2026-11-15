@@ -266,7 +266,7 @@ describe('InjectionGuardrail', () => {
     expect(result.passed).toBe(false);
     // Message should say "N suspicious patterns" where N >= 2
     const match = result.message.match(/(\d+) suspicious patterns/);
-    expect(match).not.toBeNull();
+    expect(match?.[1]).toMatch(/^\d+$/);
     expect(Number(match![1])).toBeGreaterThanOrEqual(2);
   });
 

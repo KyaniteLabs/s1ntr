@@ -7,14 +7,14 @@ describe('E2E: audio + aesthetic wiring', () => {
     'exports AudioAnalyzer from index',
     async () => {
       const mod = await import('../../src/index.js');
-      expect(mod.AudioAnalyzer).not.toBeNull();
+      expect(typeof mod.AudioAnalyzer).toBe('function');
     },
     BARREL_IMPORT_TIMEOUT_MS,
   );
 
   it('exports AestheticCritic from index', async () => {
     const mod = await import('../../src/index.js');
-    expect(mod.AestheticCritic).not.toBeNull();
+    expect(typeof mod.AestheticCritic).toBe('function');
   }, BARREL_IMPORT_TIMEOUT_MS);
 
   it('AestheticCritic critiques real p5 code end-to-end', async () => {

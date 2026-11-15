@@ -165,7 +165,7 @@ describe('fix command integration', () => {
       const binContent = execSync(`cat "${binPath}"`, { encoding: 'utf-8' });
 
       expect(binContent).toContain('Fix completed successfully!');
-      expect(binContent).toContain('✅');
+      expect(binContent).toContain('✅ Fix completed successfully!');
     });
 
     it('displays failure message on failed fix', () => {
@@ -173,7 +173,7 @@ describe('fix command integration', () => {
       const binContent = execSync(`cat "${binPath}"`, { encoding: 'utf-8' });
 
       expect(binContent).toContain('Fix failed');
-      expect(binContent).toContain('❌');
+      expect(binContent).toContain('❌ Fix failed');
     });
 
     it('displays task details in output', () => {

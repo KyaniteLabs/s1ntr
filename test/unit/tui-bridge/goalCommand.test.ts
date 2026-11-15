@@ -187,7 +187,7 @@ describe('TuiBridgeService /goal command handling', () => {
 
     const result = await dispatchCommand((svc as any).commandCtx, SID, '/goal list');
     expect(result.reviewRequired).toBe(false);
-    expect(mockListGoals).toHaveBeenCalled();
+    expect(mockListGoals).toHaveBeenCalledTimes(2);
   });
 
   it('shows empty message when no active goals', async () => {
@@ -196,7 +196,7 @@ describe('TuiBridgeService /goal command handling', () => {
 
     const result = await dispatchCommand((svc as any).commandCtx, SID, '/goal list');
     expect(result.reviewRequired).toBe(false);
-    expect(mockListGoals).toHaveBeenCalled();
+    expect(mockListGoals).toHaveBeenCalledTimes(2);
   });
 
   // ── /goal remove ───────────────────────────────────────────────

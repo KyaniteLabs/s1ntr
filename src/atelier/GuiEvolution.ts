@@ -3,6 +3,7 @@
  * which returns ADMITTED-only cells — atelier must insertAdmitted or pools are empty).
  */
 import { MapElites } from '../evolution/MapElites.js';
+import { Logger } from '../utils/Logger.js';
 import type { AtelierMetrics } from './GuiSpec.js';
 
 export interface LibraryEntry {
@@ -76,8 +77,9 @@ export class GuiEvolution {
     try {
       const parsed = JSON.parse(state) as { entries: LibraryEntry[] };
       for (const entry of parsed.entries ?? []) this.admit(entry);
-    } catch {
-      // corrupt state starts a fresh archive — accumulation lives in reports/seeds anyway
+    } catch (err) {
+      // A corrupt state starts a fresh archive (accumulation lives in reports/seeds anyway), but say so.
+      Logger.warn('GuiEvolution', 'archive state unreadable (starting a fresh archive):', err);
     }
   }
 }

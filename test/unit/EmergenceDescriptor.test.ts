@@ -13,7 +13,7 @@ describe('BehaviorDescriptorExtractor', () => {
     const descriptor = extractor.extract('function draw() { background(0); }');
     expect(descriptor.values).toHaveLength(6);
     expect(descriptor.source).toBe('heuristic-v1');
-    expect(descriptor.extractedAt).toBeTruthy();
+    expect(descriptor.extractedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
   it('produces values in the 0–1 range for any input', () => {

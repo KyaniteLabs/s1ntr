@@ -63,7 +63,7 @@ describe('OrganismLoop', () => {
     expect(result.code).toContain('osc');
     expect(result.finalScore).toBeGreaterThanOrEqual(0);
     expect(result.duration).toBeGreaterThanOrEqual(0);
-    expect(result.timestamp).toBeTruthy();
+    expect(result.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
   // ── Multiple iterations ───────────────────────────────────────────

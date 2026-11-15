@@ -212,7 +212,7 @@ describe('ReasoningCapture', () => {
       expect(Array.isArray(trace.patterns)).toBe(true);
       expect(typeof trace.quality).toBe('object');
       expect(trace.sessionId).toBe('test-session-123');
-      expect(mockWriteFileSync).toHaveBeenCalled();
+      expect(mockWriteFileSync).toHaveBeenCalledTimes(1);
     });
 
     it('captures failure outcome with error', () => {

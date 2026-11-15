@@ -9,6 +9,7 @@
  */
 
 import { Gallery } from '../gallery/Gallery.js';
+import { Logger } from '../utils/Logger.js';
 import { GalleryFSAdapter } from '../fs/adapters/GalleryFSAdapter.js';
 import { mergeSketchCode } from '../utils/mergeSketchCode.js';
 import { ContextAccumulation } from './ContextAccumulation.js';
@@ -52,8 +53,9 @@ export class LoopPersistence {
     if (this.adapter) {
       try {
         this.adapter.writeGalleryVersionRef(this.options.project, iteration, versionCode);
-      } catch {
-        // SinterFS reference failures must not hide a successful gallery save.
+      } catch (err) {
+        // Must not hide a successful gallery save, but the SinterFS ref is now missing.
+        Logger.warn('LoopPersistence', 'SinterFS gallery version ref not written:', err);
       }
     }
   }
@@ -94,8 +96,9 @@ export class LoopPersistence {
     if (this.adapter) {
       try {
         this.adapter.writeGalleryVersionRef(this.options.project, iteration + 1, versionCode);
-      } catch {
-        // SinterFS reference failures must not hide a successful gallery save.
+      } catch (err) {
+        // Must not hide a successful gallery save, but the SinterFS ref is now missing.
+        Logger.warn('LoopPersistence', 'SinterFS gallery version ref not written:', err);
       }
     }
   }

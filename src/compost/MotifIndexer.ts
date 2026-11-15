@@ -38,6 +38,10 @@ export interface MotifIndexerConfig {
 
 const DEFAULT_MIN_LEN = 4;
 const DEFAULT_MAX_MOTIFS = 200;
+// Whole words, so "banana" is not NaN and "nullable" is not null; any word containing
+// "error" (TypeError, errors, onError) still counts.
+const FAILURE_SIGNALS = /\b(\w*error\w*|catch|fail\w*|undefined|null|NaN)\b/i;
+const STRUCTURAL_SIGNALS = /\b(if|for|while|function|class|return)\b/i;
 
 export class MotifIndexer {
   private readonly motifs: Map<string, MotifEntry> = new Map();
@@ -55,7 +59,7 @@ export class MotifIndexer {
   index(fragments: CompostFragment[]): MotifIndexResult {
     for (const fragment of fragments) {
       const patterns = this.extractPatterns(fragment.content);
-      for (const pattern of patterns) {
+      for (const { pattern, raw } of patterns) {
         const existing = this.motifs.get(pattern);
         if (existing) {
           existing.frequency++;
@@ -70,7 +74,7 @@ export class MotifIndexer {
             fragmentIds: [fragment.id],
             frequency: 1,
             domains: [fragment.domain],
-            kind: this.classifyPattern(pattern, fragment),
+            kind: this.classifyPattern(raw),
           });
         }
       }
@@ -92,7 +96,9 @@ export class MotifIndexer {
     const results: MotifEntry[] = [];
 
     for (const entry of this.motifs.values()) {
-      if (entry.pattern.includes(normalized) || normalized.includes(entry.pattern)) {
+      // Patterns are stored with uppercase ID/N placeholders; the query is lowercased.
+      const pattern = entry.pattern.toLowerCase();
+      if (pattern.includes(normalized) || normalized.includes(pattern)) {
         results.push(entry);
       }
     }
@@ -127,15 +133,16 @@ export class MotifIndexer {
     this.motifs.clear();
   }
 
-  private extractPatterns(content: string): string[] {
-    const patterns: string[] = [];
+  /** Each pattern keeps its raw source text: normalisation erases the keywords classification needs. */
+  private extractPatterns(content: string): Array<{ pattern: string; raw: string }> {
+    const patterns: Array<{ pattern: string; raw: string }> = [];
     const lines = content.split('\n').filter(l => l.trim().length >= this.minPatternLength);
 
     // Extract structural patterns: normalized line shapes
     for (const line of lines) {
       const normalized = this.normalizePattern(line);
       if (normalized.length >= this.minPatternLength) {
-        patterns.push(normalized);
+        patterns.push({ pattern: normalized, raw: line });
       }
     }
 
@@ -143,7 +150,7 @@ export class MotifIndexer {
     for (let i = 0; i < lines.length - 1; i++) {
       const pair = this.normalizePattern(lines[i]) + '|' + this.normalizePattern(lines[i + 1]);
       if (pair.length >= this.minPatternLength * 2) {
-        patterns.push(pair);
+        patterns.push({ pattern: pair, raw: `${lines[i]}\n${lines[i + 1]}` });
       }
     }
 
@@ -160,16 +167,10 @@ export class MotifIndexer {
       .replace(/'.*?'/g, "'S'");
   }
 
-  private classifyPattern(pattern: string, _fragment: CompostFragment): MotifEntry['kind'] {
-    // Failure patterns: common error-like structures
-    const failureSignals = ['error', 'catch', 'fail', 'undefined', 'null', 'NaN'];
-    const lower = pattern.toLowerCase();
-    if (failureSignals.some(s => lower.includes(s))) return 'failure';
-
-    // Structural patterns: control flow, declarations
-    const structuralSignals = ['if', 'for', 'while', 'function', 'class', 'return'];
-    if (structuralSignals.some(s => lower.includes(s))) return 'structural';
-
+  private classifyPattern(raw: string): MotifEntry['kind'] {
+    // Classify on the raw source: normalised patterns have every identifier replaced by "ID".
+    if (FAILURE_SIGNALS.test(raw)) return 'failure';
+    if (STRUCTURAL_SIGNALS.test(raw)) return 'structural';
     return 'success';
   }
 }

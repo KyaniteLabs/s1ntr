@@ -48,7 +48,7 @@ describe('Collaboration Types', () => {
         callLLM: async (_prompt: string, _systemPrompt?: string) => 'test',
       };
 
-      expect(config.callLLM).not.toBeNull();
+      return expect(config.callLLM('p')).resolves.toBe('test');
     });
 
     it('should accept config with optional fields', () => {
@@ -74,7 +74,7 @@ describe('Collaboration Types', () => {
         callLLM: async (_prompt: string, _systemPrompt?: string) => 'test',
       };
 
-      expect(config.callLLM).not.toBeNull();
+      return expect(config.callLLM('p')).resolves.toBe('test');
     });
 
     it('should accept config with optional fields', () => {

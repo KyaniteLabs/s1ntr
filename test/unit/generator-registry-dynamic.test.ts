@@ -130,7 +130,7 @@ describe('GeneratorRegistry - Dynamic Domain Registration', () => {
       generatorRegistry.registerDomain(config);
 
       let dispatch = generatorRegistry.dispatch('test prompt');
-      expect(dispatch).not.toBeNull();
+      expect(dispatch?.confidence).toBe(0.9);
 
       generatorRegistry.unregisterDomain('test');
 
@@ -311,7 +311,7 @@ describe('GeneratorRegistry - Dynamic Domain Registration', () => {
 
       expect(allKeywords.custom1).toEqual(['kw1', 'kw2']);
       expect(allKeywords.custom2).toEqual(['kw3']);
-      expect(allKeywords.music).not.toBeNull(); // Built-in should still be there
+      expect(allKeywords.music).toContain('music'); // Built-in should still be there
     });
 
     it('should recognize dynamic domains in isDomainSupported()', () => {

@@ -154,9 +154,9 @@ export function indexBeads(cwd: string): { added: number; total: number; backfil
             try {
               const t = JSON.parse(readFileSync(join(traceDir, tf), 'utf8')) as { prompt?: string; model?: string; rawOutput?: string };
               if (t.rawOutput && t.rawOutput.includes(row.artifact.slice(-20))) { model = t.model; break; }
-            } catch {}
+            } catch { /* unreadable or non-JSON trace: skip it, model attribution is best-effort */ }
           }
-        } catch {}
+        } catch { /* no reasoning-trace dir: model stays unattributed */ }
         beads.push({
           id,
           domain: row.domain,

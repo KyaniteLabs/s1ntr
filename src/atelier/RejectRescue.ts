@@ -22,6 +22,7 @@
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, existsSync } from 'node:fs';
 import { join, basename, resolve, dirname } from 'node:path';
 import { CodeValidator } from '../core/CodeValidator.js';
+import { Logger } from '../utils/Logger.js';
 import { GenericWrapper } from '../core/wrappers/GenericWrapper.js';
 import { GLSLValidator } from '../core/validators/GLSLValidator.js';
 import {
@@ -435,7 +436,7 @@ export async function sweepRejects(cwd: string, options: SweepOptions = {}): Pro
               writeFileSync(stagingPath, JSON.stringify(staging, null, 2));
               stagedLessonIds.push(lesson.id);
             }
-          } catch { /* staging must never break the sweep */ }
+          } catch (err) { Logger.warn('RejectRescue', `lesson staging failed (sweep continues): ${stagingPath}:`, err); }
         }
       }
     }

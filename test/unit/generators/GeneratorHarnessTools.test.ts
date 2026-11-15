@@ -146,7 +146,6 @@ describe('GeneratorHarnessTools', () => {
   describe('classifyFailure', () => {
     // All results must have evidence
     const assertHasEvidence = (result: FailureClassification) => {
-      expect(result.evidence).not.toBeNull();
       expect(typeof result.evidence).toBe('string');
     };
 
@@ -227,7 +226,7 @@ describe('GeneratorHarnessTools', () => {
         'const synth = new Tone.Synth(); synth.trigger();'
       );
       expect(result.failureClass).toBe('runtime_error');
-      expect(result.runtimeError).not.toBeNull();
+      expect(result.runtimeError).toMatch(/ReferenceError/);
       assertHasEvidence(result);
     });
 
@@ -240,12 +239,12 @@ describe('GeneratorHarnessTools', () => {
       assertHasEvidence(result);
     });
 
-    it('classifies unknown when error is generic and code is reasonable', () => {
+    it('classifies generic error on trivial code as missing_required_api', () => {
       const result = tools.classifyFailure(
         'Something went wrong but not sure what',
         'const validCode = true;'
       );
-      expect(result.failureClass).toBeTruthy();
+      expect(result.failureClass).toBe('missing_required_api');
       assertHasEvidence(result);
     });
 

@@ -64,7 +64,7 @@ describe('GoldenSuiteRunner', () => {
       expect(result.aggregate.evaluationMode).toBe('per-case-execution');
       expect(result.caseResults).toHaveLength(2);
       expect(result.durationMs).toBeGreaterThanOrEqual(0);
-      expect(result.timestamp).toBeTruthy();
+      expect(result.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     });
 
     it('reports failures when score is below threshold', async () => {
@@ -187,7 +187,7 @@ describe('GoldenSuiteRunner', () => {
 
       expect(result.aggregate.suitePassed).toBe(false);
       expect(result.durationMs).toBeGreaterThanOrEqual(0);
-      expect(result.timestamp).toBeTruthy();
+      expect(result.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     });
 
     it('populates fabricResults for each case', async () => {
