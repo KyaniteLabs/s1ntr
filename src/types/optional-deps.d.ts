@@ -69,24 +69,14 @@ declare module 'meyda' {
 
 /**
  * Extensions to the Window object for Puppeteer-injected metrics.
- * Used by AccessibilityGuardrails and RuntimeHealthMonitor.
+ * Used by RuntimeHealthMonitor.
  */
-interface AccessibilityMetrics {
-  luminanceSamples: number[];
-  flashCount: number;
-  lastLuminance: number;
-  hasAudio: boolean;
-  audioPeakLevel: number;
-}
-
 interface SinterMetrics {
   frameCount: number;
   lastFrameTime: number;
   fpsSamples: number[];
-  objectCounts: number[];
 }
 
 interface Window {
-  __accessibilityMetrics?: AccessibilityMetrics;
   __liminalMetrics?: SinterMetrics;
 }

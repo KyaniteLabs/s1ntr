@@ -6,6 +6,7 @@
 import type { LLMClient } from '../llm/LLMClient.js';
 import { z } from 'zod';
 import { TASK_AXES, type AtelierTransport } from './GuiSpec.js';
+import { answerCode } from '../llm/ModelOutput.js';
 
 type AtelierCompletionClient = Pick<LLMClient, 'complete' | 'getConfig'>;
 const directiveSchema = z.object({
@@ -19,7 +20,7 @@ const critiqueSchema = z.array(z.object({
 }));
 
 function responseBody(text: string): string {
-  return text.trim().replace(/^```(?:json|html)?\s*([\s\S]*?)\s*```$/i, '$1').trim();
+  return answerCode(text, ['json', 'html']).trim();
 }
 
 function parseJson<T>(text: string, schema: z.ZodType<T>, kind: string): T {

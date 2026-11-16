@@ -6,10 +6,20 @@
 import { SECURITY_HEADERS } from './SecurityHeaders.js';
 import { transliterateTypography } from '../../core/recovery/SourceRecovery.js';
 import { VENDOR_ASSETS } from '../../utils/vendorAssets.js';
+import { STRUDEL_TEMPO_SCRIPT } from '../../render/strudelTempo.js';
 import type { DomainString } from '../../types/domains.js';
+import { answerCode } from '../../llm/ModelOutput.js';
+import { scriptSafe, scriptString } from '../../utils/scriptEmbed.js';
+import { parse } from '@babel/parser';
 
 const STRUDEL_CDN = VENDOR_ASSETS.strudel;
 const HYDRA_CDN = VENDOR_ASSETS.hydra;
+/**
+ * Declared in the same block the hydra piece runs in, so a piece that
+ * declares go or o is a redeclaration SyntaxError. HydraValidator parses the
+ * piece behind this exact line. One line so piece line numbers don't shift.
+ */
+export const HYDRA_PIECE_PRELUDE = "const go = () => {}; const o = typeof o0 !== 'undefined' ? o0 : undefined;";
 const TONE_CDN = VENDOR_ASSETS.tone;
 const STRUDEL_SECURITY_HEADERS = SECURITY_HEADERS
   // 'unsafe-eval' is REQUIRED: the strudel runtime transpiles pattern code via
@@ -113,17 +123,28 @@ export class GenericWrapper {
       .replace(/'/g, '&#39;');
   }
 
-  private static escapeScript(value: string): string {
-    return value.replace(/<\/script>/gi, '<\\/script>');
-  }
-
   private static isHTMLDocument(code: string): boolean {
     const trimmed = code.trim();
     return /^<!doctype\s+html/i.test(trimmed) || /^<html\b/i.test(trimmed) || /<body\b/i.test(trimmed);
   }
 
   private static isHTMLFragment(code: string): boolean {
-    return /<\/?(?:script|style|button|div|main|section|canvas|audio|body|html)\b/i.test(code);
+    if (!/<\/?(?:script|style|button|div|main|section|canvas|audio|body|html)\b/i.test(code)) return false;
+    // JS that names a tag in a string or comment is still JS; the HTML path
+    // would find no <script> in it and drop the artwork.
+    return !this.parsesAsScript(code);
+  }
+
+  private static parsesAsScript(code: string): boolean {
+    for (const sourceType of ['script', 'module'] as const) {
+      try {
+        parse(code, { sourceType, allowAwaitOutsideFunction: true });
+        return true;
+      } catch {
+        // try the next source type
+      }
+    }
+    return false;
   }
 
   private static extractBodyFragment(html: string): string {
@@ -173,9 +194,7 @@ export class GenericWrapper {
   }
 
   private static stripLLMToolMarkup(code: string): string {
-    return code
-      .replace(/```(?:\w+)?\s*/g, '')
-      .replace(/```\s*$/g, '')
+    return answerCode(code)
       .replace(/<tool_call\b[\s\S]*?<arg_value\b[^>]*>/gi, '')
       .replace(/<\/arg_value>(?:\\n|\s)*<\/tool_call>\s*$/gi, '')
       .replace(/<\/arg_value>[\s\S]*?<\/tool_call>\s*$/gi, '')
@@ -362,12 +381,14 @@ export class GenericWrapper {
     <canvas id="sinter-audio-scope" width="1200" height="220" style="display:block;width:100%;height:160px;margin:0 0 12px;border-radius:14px;"></canvas>
     <pre data-strudel-source-code><code>${visibleCode}</code></pre>
     <div id="sinter-strudel-status" role="status">Ready.</div>
+    ${STRUDEL_TEMPO_SCRIPT}
     <script>
       (function () {
         window.__sinterDrawScope(document.getElementById('sinter-audio-scope'));
         var btn = document.getElementById('sinter-strudel-play');
         var status = document.getElementById('sinter-strudel-status');
         var ready = false;
+        var bootFailed = false;
         // (shims removed — see artwork tail-strip above)
         var booted = strudel.initStrudel().then(function () {
           // Preload the REPL's default sample banks — bd/sd/hh etc. are sample
@@ -376,7 +397,7 @@ export class GenericWrapper {
             return strudel.samples(u).catch(function () { /* bank optional */ });
           }));
         });
-        // Generated pieces often END with invented .start()/.tempo() calls that
+        // Generated pieces often END with invented .start()/.tempo()/.out() calls that
         // don't exist on Pattern. Strip ONLY a trailing occurrence — shimming
         // Pattern.prototype breaks the scheduler's internal wiring and the
         // piece plays silence. The JSON embed escapes < as \u003c so an
@@ -384,24 +405,33 @@ export class GenericWrapper {
         // terminate the page's script early (H5).
         var artwork = ${JSON.stringify(code).replace(/</g, '\\u003c')}
           .replace(/\\s*\\.\\s*start\\s*\\(\\s*\\)\\s*;?\\s*$/, '')
-          .replace(/\\s*\\.\\s*tempo\\s*\\([^)]*\\)\\s*;?\\s*$/, '');
+          .replace(/\\s*\\.\\s*tempo\\s*\\([^)]*\\)\\s*;?\\s*$/, '')
+          // A trailing .out() is Kabelsalat's signal-output method; on a Strudel
+          // pattern it routes away from superdough and the piece is silent.
+          .replace(/\\s*\\.\\s*out\\s*\\(\\s*\\)\\s*;?\\s*$/, '');
         booted.then(function () { ready = true; status.textContent = 'Ready.'; })
-          .catch(function (err) { status.textContent = 'Boot error: ' + (err && err.message ? err.message : err); });
+          .catch(function (err) { bootFailed = true; console.warn('Strudel boot error:', err); status.textContent = 'Boot error: ' + (err && err.message ? err.message : err); });
         btn.addEventListener('click', function () {
-          if (!ready) { status.textContent = 'Still booting — try again in a second.'; return; }
+          // A failed boot stays failed; only a boot still running asks for patience.
+          if (!ready) { if (!bootFailed) status.textContent = 'Still booting — try again in a second.'; return; }
           try {
             // Chrome autoplay policy: the context must resume inside the
             // gesture handler, before any async work.
             var ctx = strudel.getAudioContext();
             if (ctx && ctx.state === 'suspended') { ctx.resume(); }
-            strudel.evaluate(artwork).then(function () {
+            strudel.evaluate(artwork).then(function (pattern) {
+              // Strudel's REPL catches a pattern error itself, logs it, and
+              // resolves with no pattern: that is not playing.
+              if (!pattern) throw new Error('the pattern did not evaluate');
               btn.innerHTML = '&#9632; Stop';
               status.textContent = 'Playing.';
               btn.onclick = function () { try { strudel.hush(); } catch (e) {} btn.innerHTML = '&#9654; Play'; status.textContent = 'Stopped.'; btn.onclick = null; };
             }).catch(function (err) {
+              console.error('Strudel playback error:', err);
               status.textContent = 'Playback error: ' + (err && err.message ? err.message : err);
             });
           } catch (err) {
+            console.error('Strudel playback error:', err);
             status.textContent = 'Playback error: ' + (err && err.message ? err.message : err);
           }
         });
@@ -417,11 +447,9 @@ export class GenericWrapper {
     // render black. Generated code emits it often enough that it reached live
     // composites (investor-audit F15, pixel-identical reproduction). Pin bare
     // render() to the primary output; explicit render(oN) calls are preserved.
-    // Only </script needs escaping in a raw <script> embed — the old backtick
-    // escaping corrupted legit template literals in the artwork (H5).
-    const safeCode = code
-      .replace(/\brender\s*\(\s*\)/g, 'render(o0)')
-      .replace(/<\/script/gi, '<\\/script');
+    // Backtick escaping corrupted legit template literals in the artwork (H5);
+    // scriptSafe changes only what the HTML parser would misread.
+    const safeCode = scriptSafe(code.replace(/\brender\s*\(\s*\)/g, 'render(o0)'));
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -476,7 +504,6 @@ export class GenericWrapper {
             canvas.height = hydraHeight;
 
             // Signal that hydra is initialized and ready to render.
-            // The headless renderer checks this global to detect first-frame.
             window.__hydraReady = true;
             window.__hydraWidth = hydraWidth;
             window.__hydraHeight = hydraHeight;
@@ -498,36 +525,6 @@ export class GenericWrapper {
                 setResolution(hydraWidth, hydraHeight);
             }
 
-            // Dispatch a custom event so the headless renderer can detect
-            // that the first render has occurred.
-            function signalFirstFrame() {
-                window.dispatchEvent(new CustomEvent('hydra:firstFrame'));
-            }
-
-            // Monitor for the first render by sampling the canvas.
-            // Some hydra sketches don't call the render function explicitly;
-            // detect when pixels actually appear instead.
-            let rendered = false;
-            function pollFirstFrame() {
-                if (rendered) return;
-                try {
-                    const gl = canvas.getContext('webgl') || canvas.getContext('webgl2');
-                    if (gl) {
-                        const x = Math.floor(canvas.width / 2);
-                        const y = Math.floor(canvas.height / 2);
-                        const px = new Uint8Array(4);
-                        gl.readPixels(x, canvas.height - 1 - y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
-                        if (px[0] > 0 || px[1] > 0 || px[2] > 0) {
-                            rendered = true;
-                            signalFirstFrame();
-                            return;
-                        }
-                    }
-                } catch (e) { /* not ready yet */ }
-                if (!rendered) requestAnimationFrame(pollFirstFrame);
-            }
-            requestAnimationFrame(pollFirstFrame);
-
             window.addEventListener('resize', () => {
                 const nextWidth = window.innerWidth || ${resolution.width};
                 const nextHeight = window.innerHeight || ${resolution.height};
@@ -537,8 +534,7 @@ export class GenericWrapper {
                 window.__hydraHeight = nextHeight;
                 if (typeof setResolution === 'function') setResolution(nextWidth, nextHeight);
             });
-            const go = () => {};
-            const o = typeof o0 !== 'undefined' ? o0 : undefined;
+            ${HYDRA_PIECE_PRELUDE}
 
             ${safeCode}
 
@@ -554,7 +550,6 @@ export class GenericWrapper {
 
   private static wrapShader(code: string): string {
     const normalizedCode = this.normalizeShaderForWebGL1(code);
-    const safeCode = normalizedCode.replace(/\u003c\/script\u003e/gi, '<\\/script>');
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -587,7 +582,7 @@ export class GenericWrapper {
         resize();
 
         const vsSource = \`attribute vec4 aVertexPosition; void main() { gl_Position = aVertexPosition; }\`;
-        const fsSource = \`${safeCode}\`;
+        const fsSource = ${scriptString(normalizedCode)};
 
         function loadShader(gl, type, source) {
             const shader = gl.createShader(type);
@@ -904,7 +899,7 @@ export class GenericWrapper {
         timeline.progress(0.35);
         if (typeof timeline.play === 'function') timeline.play(0);
       } catch (error) {
-        console.warn('HyperFrames preview timeline issue:', error);
+        console.error('HyperFrames preview timeline issue:', error);
       }
     }
   }
@@ -921,7 +916,13 @@ export class GenericWrapper {
     const lines = code.split('\n');
     const columns = lines.reduce((width, line) =>
       Math.max(width, Array.from(line.replace(/\t/g, '    ')).length), 1);
-    const fitFont = `min(34px, calc((min(980px, 96vw, calc(100vw - clamp(40px, 8vw, 112px))) - clamp(48px, 10vw, 144px) - 2px) / ${columns * 0.61}), calc((100vh - clamp(40px, 8vw, 112px) - clamp(48px, 10vw, 144px) - 50px) / ${Math.max(1, lines.length) * 1.2}))`;
+    // Previews are shown everywhere from a full browser tab down to a 360px
+    // gallery thumbnail. Fixed-px padding floors ate most of a small frame and
+    // the font shrank to unreadable, so chrome now scales with the smaller
+    // viewport side and a runtime fitter (below) sizes the text exactly.
+    const bodyPadding = compositionForeground ? 'clamp(20px, 4vw, 56px)' : 'clamp(4px, 3vmin, 56px)';
+    const bodyPad2 = compositionForeground ? 'clamp(40px, 8vw, 112px)' : 'clamp(8px, 6vmin, 112px)';
+    const prePad2 = compositionForeground ? 'clamp(48px, 10vw, 144px)' : 'clamp(12px, 8vmin, 144px)';
     const escaped = code
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
@@ -939,12 +940,61 @@ export class GenericWrapper {
     // over the other layers). Strip them when compositionForeground.
     const preBorder = compositionForeground ? 'none' : '1px solid rgba(134, 239, 172, 0.26)';
     const preBorderRadius = compositionForeground ? '0' : '24px';
-    const prePadding = compositionForeground ? '0' : 'clamp(24px, 5vw, 72px)';
+    const prePadding = compositionForeground ? '0' : 'clamp(6px, 4vmin, 72px)';
     const preMinWidth = compositionForeground ? 'auto' : 'min(760px, 100%)';
     const preMinHeight = compositionForeground ? 'auto' : '0';
     // A named page (title given) is a judged/shared artwork, not the ascii preview:
     // no generic label over it (a textgen poem was framed as "ASCII Art").
     const labelHtml = compositionForeground || title ? '' : '<div class="label">ASCII Art</div>';
+    const labelReserve = labelHtml || compositionForeground ? '50px' : '0px';
+    // Prose (a textgen poem) must be read, not shrunk to fit like a picture:
+    // it gets a readable size, wraps, and scrolls. ASCII art still fits whole.
+    const nonSpace = code.replace(/\s/g, '');
+    const prose = !compositionForeground && nonSpace.length > 0
+      && (nonSpace.match(/\p{L}/gu)?.length ?? 0) / nonSpace.length >= 0.7;
+    const modeAttr = prose ? ' data-text-mode="read"' : '';
+    const fitFont = `min(34px, calc((min(980px, 96vw, calc(100vw - ${bodyPad2})) - ${prePad2} - 2px) / ${columns * 0.61}), calc((100vh - ${bodyPad2} - ${prePad2} - ${labelReserve}) / ${Math.max(1, lines.length) * 1.2}))`;
+    // CSS can only estimate glyph width (0.61em) per font; the fitter measures
+    // the real text box at two sizes and solves for the largest font that fits.
+    const fitScript = compositionForeground ? '' : `
+    <script data-ascii-fit>
+    (function () {
+      var shell = document.querySelector('[data-ascii-preview-shell]');
+      var pre = shell && shell.querySelector('pre');
+      if (!pre) return;
+      function box(px) { pre.style.fontSize = px + 'px'; return [pre.offsetWidth, pre.offsetHeight]; }
+      var read = shell.getAttribute('data-text-mode') === 'read';
+      function fit() {
+        var cs = getComputedStyle(document.body);
+        var label = shell.querySelector('.label');
+        var availW = Math.min(980, window.innerWidth * 0.96, window.innerWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight));
+        var availH = window.innerHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom)
+          - (label ? label.offsetHeight + parseFloat(getComputedStyle(label).marginBottom) : 0);
+        var saved = [pre.style.minWidth, pre.style.width, pre.style.maxWidth];
+        pre.style.minWidth = '0';
+        pre.style.width = 'max-content';
+        pre.style.maxWidth = 'none';
+        var a = box(100), b = box(50);
+        var kw = (a[0] - b[0]) / 50, kh = (a[1] - b[1]) / 50;
+        var byW = (availW - (a[0] - 100 * kw)) / kw, byH = (availH - (a[1] - 100 * kh)) / kh;
+        var size = Math.min(34, byW, byH);
+        pre.style.minWidth = saved[0];
+        pre.style.width = saved[1];
+        pre.style.maxWidth = saved[2];
+        var wrap = read && byW < 8;
+        if (read) size = wrap ? 8 : Math.min(24, byW);
+        if (wrap) shell.setAttribute('data-text-wrap', ''); else shell.removeAttribute('data-text-wrap');
+        var tall = !read && size < 2.5 && byW > byH;
+        if (tall) size = Math.min(34, byW);
+        if (tall) shell.setAttribute('data-text-tall', ''); else shell.removeAttribute('data-text-tall');
+        if (!(size > 0)) { pre.style.fontSize = ''; return; }
+        pre.style.fontSize = Math.max(1, Math.floor(size * 10) / 10) + 'px';
+      }
+      fit();
+      window.addEventListener('resize', fit);
+      if (document.fonts && document.fonts.ready) document.fonts.ready.then(fit);
+    })();
+    </script>`;
     const pageTitle = GenericWrapper.escapeHTML(title ?? 'ASCII Art');
     const shellAttr = compositionForeground
       ? ' data-composition-foreground-ascii'
@@ -968,7 +1018,7 @@ export class GenericWrapper {
             align-items: center;
             min-height: 100vh;
             box-sizing: border-box;
-            padding: clamp(20px, 4vw, 56px);
+            padding: ${bodyPadding};
         }
         .container {
             text-align: center;
@@ -991,6 +1041,9 @@ export class GenericWrapper {
             text-shadow: 0 0 12px rgba(134, 239, 172, 0.6);
             box-shadow: ${preBoxShadow};
         }
+        body:has([data-text-mode="read"]), body:has([data-text-tall]) { align-items: flex-start; overflow-y: auto; scrollbar-width: none; }
+        [data-text-mode="read"] pre { text-align: left; }
+        [data-text-wrap] pre { white-space: pre-wrap; overflow-wrap: anywhere; }
         .label {
             color: #bbf7d0;
             font-size: 12px;
@@ -1002,10 +1055,10 @@ export class GenericWrapper {
     </style>
 </head>
 <body>
-    <div class="container" data-ascii-preview-shell${shellAttr}>
+    <div class="container" data-ascii-preview-shell${shellAttr}${modeAttr}>
         ${labelHtml}
         <pre><span>${escaped}</span></pre>
-    </div>
+    </div>${fitScript}
 </body>
 </html>`;
   }
@@ -1014,9 +1067,8 @@ export class GenericWrapper {
     const cleanedCode = this.stripLLMToolMarkup(code);
     if (this.isHTMLDocument(cleanedCode) || this.isHTMLFragment(cleanedCode)) return this.wrapToneHTML(cleanedCode);
 
-    // Only </script needs escaping in a raw <script> embed; backtick escaping
-    // corrupted legit template literals in the artwork (H5).
-    const safeCode = cleanedCode.replace(/<\/script/gi, '<\\/script');
+    // Backtick escaping corrupted legit template literals in the artwork (H5).
+    const safeCode = scriptSafe(cleanedCode);
     const bpm = this.extractToneBpm(cleanedCode) ?? 120;
 
     return `<!DOCTYPE html>
@@ -1045,6 +1097,9 @@ export class GenericWrapper {
             color: #f59e0b;
             margin-bottom: 20px;
         }
+        /* Artworks add full-page canvases and fixed panels and reuse #controls;
+           the shell's Play must stay pressable above them (#1757). */
+        [data-sinter-controls] { position: relative; z-index: 2147483647; }
         #controls {
             display: flex;
             gap: 16px;
@@ -1093,7 +1148,7 @@ export class GenericWrapper {
 </head>
 <body data-tone-preview-shell data-tone-tempo-sync="true" data-tone-bpm="${bpm}">
     <h3>🎹 Tone.js Audio Synthesizer</h3>
-    <div id="controls">
+    <div id="controls" data-sinter-controls>
         <button id="start">▶ Play</button>
         <button id="stop">⏹ Stop</button>
     </div>
@@ -1123,7 +1178,7 @@ export class GenericWrapper {
             ${safeCode}
         } catch (err) {
             toneArtifactError = err;
-            console.warn('Tone artifact runtime issue:', err);
+            console.error('Tone artifact runtime issue:', err);
             statusEl.className = 'ready';
             statusEl.textContent = 'Tone runtime issue: ' + err.message;
         } finally {
@@ -1131,7 +1186,8 @@ export class GenericWrapper {
         }
 
         playBtn.addEventListener('click', async () => {
-            await Tone.start();
+            // Autoplay policy can refuse the context; that is the page, not the artwork.
+            try { await Tone.start(); } catch (err) { console.warn('Tone audio context did not start:', err); }
             syncSinterToneTempo();
             if (window.Tone?.Transport?.start) Tone.Transport.start();
             isPlaying = true;
@@ -1139,7 +1195,21 @@ export class GenericWrapper {
             statusEl.textContent = toneArtifactError
                 ? 'Preview shell running; generated Tone code has issue: ' + toneArtifactError.message
                 : '🔊 Playing';
-            if (typeof play === 'function') play();
+            try {
+                if (typeof play === 'function') await play();
+                else {
+                    // Many pieces build their engine inside their own Play
+                    // button; press it, never a Stop (#1757).
+                    const own = [...document.querySelectorAll('button, [role="button"]')].find((el) =>
+                        !el.closest('[data-sinter-controls]') && !el.disabled &&
+                        /\\b(play|start|begin|listen)\\b|\u25B6/i.test([el.textContent, el.getAttribute('aria-label'), el.title, el.id, el.className].join(' ')) &&
+                        !/\\b(stop|pause|mute)\\b/i.test([el.textContent, el.getAttribute('aria-label'), el.title].join(' ')));
+                    if (own) own.click();
+                }
+            } catch (err) {
+                console.error('Tone artifact play error:', err);
+                statusEl.textContent = 'Generated Tone code has issue: ' + (err && err.message ? err.message : err);
+            }
         });
 
         stopBtn.addEventListener('click', () => {
@@ -1159,9 +1229,7 @@ export class GenericWrapper {
   private static wrapToneHTML(code: string): string {
     const bodyFragment = this.stripExecutableHTML(this.extractBodyFragment(code)) ||
       '<p class="tone-empty">The generated Tone artifact did not include visible body controls.</p>';
-    const inlineScripts = this.extractInlineScripts(code)
-      .map(script => this.escapeScript(script))
-      .join('\n\n');
+    const inlineScripts = scriptSafe(this.extractInlineScripts(code).join('\n\n'));
     const escapedSource = this.escapeHTML(code);
     const bpm = this.extractToneBpm(code) ?? 120;
 
@@ -1185,6 +1253,7 @@ export class GenericWrapper {
         h1 { margin: 0; font-size: clamp(36px, 6vw, 72px); line-height: .9; letter-spacing: -.06em; }
         .hint { color: #cbd5e1; line-height: 1.55; max-width: 46ch; }
         .controls { display: flex; gap: 12px; flex-wrap: wrap; }
+        [data-sinter-controls] { position: relative; z-index: 2147483647; }
         #sinter-tone-start, #sinter-tone-stop { border: 0; border-radius: 999px; padding: 12px 18px; color: #08111f; font-weight: 800; cursor: pointer; }
         #sinter-tone-start { background: linear-gradient(135deg, #facc15, #fb7185); }
         #sinter-tone-stop { background: #cbd5e1; }
@@ -1207,7 +1276,7 @@ export class GenericWrapper {
             <h1>Audio preview</h1>
             <p class="hint">A polished wrapper around the generated Tone HTML. Start the preview here, or use the embedded controls preserved on the right.</p>
             <canvas id="sinter-tone-visualizer" width="640" height="240"></canvas>
-            <div class="controls">
+            <div class="controls" data-sinter-controls>
                 <button id="sinter-tone-start" type="button">▶ Start preview</button>
                 <button id="sinter-tone-stop" type="button">⏹ Stop</button>
             </div>
@@ -1241,7 +1310,7 @@ export class GenericWrapper {
         try {
             ${inlineScripts}
         } catch (error) {
-            console.warn('Tone artifact script error:', error);
+            console.error('Tone artifact script error:', error);
             liminalToneStatus.textContent = 'Tone artifact script error: ' + error.message;
         } finally {
             syncSinterToneTempo();
@@ -1249,6 +1318,10 @@ export class GenericWrapper {
         document.getElementById('sinter-tone-start').addEventListener('click', async () => {
             try {
                 if (window.Tone?.start) await Tone.start();
+            } catch (error) {
+                console.warn('Tone audio context did not start:', error);
+            }
+            try {
                 syncSinterToneTempo();
                 liminalTonePlaying = true;
                 liminalToneStatus.textContent = 'Playing — embedded artifact controls are preserved.';
@@ -1259,7 +1332,7 @@ export class GenericWrapper {
                 setTimeout(syncSinterToneTempo, 120);
                 if (window.Tone?.Transport?.start && Tone.Transport.state !== 'started') Tone.Transport.start();
             } catch (error) {
-                console.warn('Tone preview start error:', error);
+                console.error('Tone preview start error:', error);
                 liminalToneStatus.textContent = 'Start error: ' + error.message;
             }
         });

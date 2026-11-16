@@ -24,6 +24,9 @@ import {
   verdictFromMeasure as sharedVerdictFromMeasure,
   type LuminanceMeasure,
 } from '../render/LuminanceVerdict.js';
+import { SOFTWARE_WEBGL_ARGS, sandboxOptOutArgs } from '../security/SandboxConfig.js';
+import { resolveChromiumExecutablePath } from '../utils/browserAssetFallbacks.js';
+import { missingChromiumError } from '../utils/browserPreflight.js';
 
 export type CompositeMeasure = LuminanceMeasure;
 
@@ -109,7 +112,16 @@ export async function measureCompositeHtml(
   const envTimeout = Number(process.env.SINTER_COMPOSITE_GATE_TIMEOUT_MS);
   const navTimeoutMs = options.navTimeoutMs ?? (Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : 30_000);
   const { default: puppeteer } = await import('puppeteer');
-  const browser = await puppeteer.launch({ headless: true });
+  const executablePath = resolveChromiumExecutablePath();
+  if (!executablePath) throw missingChromiumError();
+  const browser = await puppeteer.launch({
+    headless: true,
+    executablePath,
+    // Software WebGL, so the gate draws WebGL on a host with no GPU, as the
+    // scoring renderer does. Not getChromeArgs: the gate has no request
+    // interception, so it keeps Chrome's default web security.
+    args: [...sandboxOptOutArgs(), ...SOFTWARE_WEBGL_ARGS],
+  });
   try {
     const page = await browser.newPage();
     await page.setViewport({ width, height });

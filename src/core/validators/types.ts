@@ -2,6 +2,7 @@
  * Shared types and constants for validators
  */
 import type { DomainString } from '../../types/domains.js';
+import { hasThinkTags, fencedBlocks, splitThinking } from '../../llm/ModelOutput.js';
 
 export interface ValidationResult {
   valid: boolean;
@@ -10,6 +11,9 @@ export interface ValidationResult {
   /** Non-blocking analysis carried for downstream consumers; today only the
    * strudel music-theory assessment (S4) populates this. */
   theoryAssessment?: readonly string[];
+  /** Deterministic repairs applied to code the gate first rejected (`domain:class`);
+   * absent when the code passed as written. */
+  repairs?: readonly string[];
 }
 
 export interface DomainValidationResult {
@@ -46,10 +50,6 @@ export const REASONING_PATTERNS: RegExp[] = [
 // -----------------------------------------------------------------------------
 // LLM contamination patterns
 // -----------------------------------------------------------------------------
-export const CONTAMINATION_PATTERNS: RegExp[] = [
-  /<think>[\s\S]*?<\/think>/gi,
-  /<thinking>[\s\S]*?<\/thinking>/gi,
-];
 
 // -----------------------------------------------------------------------------
 // Code-start patterns (lines that indicate actual code begins)
@@ -79,10 +79,7 @@ export const CODE_START_PATTERNS: RegExp[] = [
 // Preprocessing functions
 // -----------------------------------------------------------------------------
 export function stripContamination(code: string, preserveWhitespace = false): string {
-  let cleaned = code;
-  for (const pattern of CONTAMINATION_PATTERNS) {
-    cleaned = cleaned.replace(pattern, '');
-  }
+  const cleaned = splitThinking(code).answer;
   return preserveWhitespace ? cleaned : cleaned.trim();
 }
 
@@ -100,51 +97,36 @@ export function stripReasoningText(code: string, domain?: string): string {
   if (domain !== undefined && TEXT_OUTPUT_DOMAINS.has(domain)) {
     return code.replace(/^\s*\n/, '').trimEnd();
   }
-  const lines = code.split('\n');
+  const lines = code.split(/\r?\n/);
   const kept: string[] = [];
-  let insideFence = false;
   let foundCodeStart = false;
-
-  for (const line of lines) {
+  let cursor = 0;
+  // Fence bodies are code; everything after the first fence is kept too.
+  const keepLine = (line: string): void => {
     const trimmed = line.trim();
-
-    if (trimmed.startsWith('```')) {
-      insideFence = !insideFence;
-      continue;
-    }
-    if (insideFence) {
-      kept.push(line);
-      foundCodeStart = true;
-      continue;
-    }
-
     if (foundCodeStart) {
       kept.push(line);
-      continue;
+      return;
     }
-
-    if (!trimmed) continue;
-    if (REASONING_PATTERNS.some(p => p.test(trimmed))) continue;
-    if (/^-\s+[A-Z]/.test(trimmed) && !/^-\s+(\d|--?)/.test(trimmed)) continue;
-
-    if (CODE_START_PATTERNS.some(p => p.test(trimmed))) {
+    if (!trimmed) return;
+    if (REASONING_PATTERNS.some(p => p.test(trimmed))) return;
+    if (/^-\s+[A-Z]/.test(trimmed) && !/^-\s+(\d|--?)/.test(trimmed)) return;
+    if (
+      CODE_START_PATTERNS.some(p => p.test(trimmed)) ||
+      /^[\w$]+\s*[=([{:]/.test(trimmed) ||
+      /[;{}]/.test(trimmed) || /\w+\(.*\)/.test(trimmed)
+    ) {
       foundCodeStart = true;
       kept.push(line);
-      continue;
     }
-
-    if (/^[\w$]+\s*[=([{:]/.test(trimmed)) {
-      foundCodeStart = true;
-      kept.push(line);
-      continue;
-    }
-
-    if (/[;{}]/.test(trimmed) || /\w+\(.*\)/.test(trimmed)) {
-      foundCodeStart = true;
-      kept.push(line);
-      continue;
-    }
+  };
+  for (const block of fencedBlocks(code)) {
+    lines.slice(cursor, block.start).forEach(keepLine);
+    kept.push(block.body);
+    foundCodeStart = true;
+    cursor = block.end;
   }
+  lines.slice(cursor).forEach(keepLine);
 
   return kept.join('\n').trim();
 }
@@ -156,7 +138,7 @@ export function isAlreadyWrapped(code: string): boolean {
 
 export function detectContamination(code: string): string[] {
   const errors: string[] = [];
-  if (/<think>/i.test(code) || /<thinking>/i.test(code)) {
+  if (hasThinkTags(code)) {
     errors.push('LLM contamination detected: <think> or <thinking> tags found in output');
   }
   return errors;

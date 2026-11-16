@@ -43,14 +43,27 @@ const LAN_GATEWAY_FREE_ROUTES: ReadonlySet<string> = new Set([
   'deepseek-ai/DeepSeek-V4-Flash-0731', 'mimo-v2.5-pro',
 ]);
 
-function glmCodingPlanPathVerified(baseUrl: string): boolean {
+/** Subscription models a cli://codex seat may name (exact ids, owner's Codex plan). */
+const CODEX_SEAT_MODELS: ReadonlySet<string> = new Set([
+  'gpt-6-luna', 'gpt-6.1-terra', 'gpt-6-astra', 'gpt-6-sol', 'gpt-6.1-sol',
+  'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol',
+]);
+
+/** Subscription models a cli://claude seat may name (exact ids, owner's Claude plan). */
+const CLAUDE_SEAT_MODELS: ReadonlySet<string> = new Set([
+  'claude-fable-5-2', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5',
+]);
+
+function exactPath(baseUrl: string, path: string): boolean {
   try {
-    const parsed = new URL(baseUrl);
-    const trimmed = parsed.pathname.replace(/\/+$/, '');
-    return trimmed === '/api/anthropic';
+    return new URL(baseUrl).pathname.replace(/\/+$/, '') === path;
   } catch {
     return false;
   }
+}
+
+function glmCodingPlanPathVerified(baseUrl: string): boolean {
+  return exactPath(baseUrl, '/api/anthropic');
 }
 
 /**
@@ -71,6 +84,7 @@ export function classifyProviderSurface(
   provider: string,
   baseUrl: string,
   options?: { readonly grokSubscriptionSeat?: boolean; readonly glmCodingPlanSeat?: boolean;
+    readonly minimaxTokenPlanSeat?: boolean;
     readonly model?: string },
 ): ProviderSurface {
   let hostname = '';
@@ -81,8 +95,12 @@ export function classifyProviderSurface(
     const cliSeatUrl = canonicalCliSeatUrl(baseUrl);
     if (parsed.protocol === 'grok-cli:') return 'grok-cli-seat';
     if (provider === 'cli' && cliSeatUrl === 'cli://codex'
-      && ['gpt-6-luna', 'gpt-6.1-terra', 'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol'].includes(options?.model ?? '')) {
+      && CODEX_SEAT_MODELS.has(options?.model ?? '')) {
       return 'codex-cli-seat';
+    }
+    if (provider === 'cli' && cliSeatUrl === 'cli://claude'
+      && CLAUDE_SEAT_MODELS.has(options?.model ?? '')) {
+      return 'claude-cli-seat';
     }
     // Hermes runs with its fallback chain off (--ignore-user-config), so the
     // named model is the one that answers. Funding stays metered: the seat
@@ -105,6 +123,14 @@ export function classifyProviderSurface(
     && provider === 'glm' && (port === '' || port === '443')
     && glmCodingPlanPathVerified(baseUrl)) {
     return 'glm-coding-plan-seat';
+  }
+  // A MiniMax Token Plan seat (flat subscription, the plan gjc uses) is
+  // caller-declared on the exact api.minimax.io Anthropic-compatible endpoint.
+  // An undeclared key on the same host stays minimax-direct (metered).
+  if (options?.minimaxTokenPlanSeat === true && protocol === 'https:' && hostname === 'api.minimax.io'
+    && provider === 'minimax' && (port === '' || port === '443')
+    && exactPath(baseUrl, '/anthropic')) {
+    return 'minimax-token-plan-seat';
   }
   // Exact HTTPS api.x.ai is subscription only when the caller marked the grok
   // seat. A pay-per-token xAI key on the same host stays metered/unknown.
@@ -147,9 +173,9 @@ export function classifyProviderSurface(
 }
 
 const ADAPTERS: readonly HostAdapterDescriptor[] = [
-  ['cliproxy-seat', true], ['kimi-cliproxy', true], ['codex-cli-seat', true], ['agy-cli-seat', true], ['command-code-cli-seat', true], ['grok-cli-seat', true], ['hermes-cli-seat', true], ['kilo-gateway-entitlement', true],
+  ['cliproxy-seat', true], ['kimi-cliproxy', true], ['codex-cli-seat', true], ['claude-cli-seat', true], ['agy-cli-seat', true], ['command-code-cli-seat', true], ['grok-cli-seat', true], ['hermes-cli-seat', true], ['kilo-gateway-entitlement', true],
   ['openai-direct', true], ['anthropic-direct', true], ['google-direct', true],
-  ['glm-direct', true], ['glm-coding-plan-seat', true], ['minimax-direct', true],
+  ['glm-direct', true], ['glm-coding-plan-seat', true], ['minimax-token-plan-seat', true], ['minimax-direct', true],
   ['moonshot-direct', true],
   ['lmstudio-local', true], ['lan-gateway-litellm', true], ['ollama-cloud', true],
   ['openrouter', false], ['unknown', false],
@@ -287,7 +313,8 @@ export function bootstrapExecutorAuthority(options: BootstrapOptions = {}): Harn
         console.warn(`[executor-authority] skipping torn attempt file (concurrent write): ${name}`);
         return null;
       }
-      const verified = verifyExecutorAttestation(registry, attestation, attestation.subject.issuedAt);
+      const verified = verifyExecutorAttestation(registry, attestation, attestation.subject.issuedAt,
+        { historical: true });
       if (!verified.ok) throw new ExecutorAuthorityUnavailableError(`attempt ledger verification failed: ${verified.reason}`);
       const record = toExecutorAttemptRecord(attestation);
       verifiedHistory.set(name, { digest: sha256Hex(content), record });
@@ -327,15 +354,17 @@ export function bootstrapExecutorAuthority(options: BootstrapOptions = {}): Harn
       return { seat, funding: offlineFunding({ quotaCounters }) };
     }
     if (context.surface === 'cliproxy-seat' || context.surface === 'kimi-cliproxy'
-      || context.surface === 'codex-cli-seat' || context.surface === 'agy-cli-seat' || context.surface === 'command-code-cli-seat' || context.surface === 'grok-cli-seat'
-      || context.surface === 'glm-coding-plan-seat'
+      || context.surface === 'codex-cli-seat' || context.surface === 'claude-cli-seat' || context.surface === 'agy-cli-seat' || context.surface === 'command-code-cli-seat' || context.surface === 'grok-cli-seat'
+      || context.surface === 'glm-coding-plan-seat' || context.surface === 'minimax-token-plan-seat'
       || context.surface.startsWith('kilo-')) {
       return { seat, funding: subscriptionFunding({ seatDigest, quotaCounters,
         quotaSurface: context.surface === 'codex-cli-seat' ? 'codex-cli-seat'
+          : context.surface === 'claude-cli-seat' ? 'claude-cli-seat'
           : context.surface === 'agy-cli-seat' ? 'agy-cli-seat'
           : context.surface === 'command-code-cli-seat' ? 'command-code-cli-seat'
           : context.surface === 'grok-cli-seat' ? 'grok-cli-seat'
           : context.surface === 'glm-coding-plan-seat' ? 'glm-coding-plan-seat'
+          : context.surface === 'minimax-token-plan-seat' ? 'minimax-token-plan-seat'
           : context.surface === 'cliproxy-seat' || context.surface === 'kimi-cliproxy'
             ? 'cliproxy-seat' : 'kilo-gateway-entitlement' }) };
     }
@@ -435,11 +464,15 @@ export function bootstrapTestCampaignExecutorAuthority(
   return authority;
 }
 
-/** One trust root shared by CLI, Studio, coordinator, and harness clients. */
+/**
+ * One trust root shared by CLI, Studio, coordinator, and harness clients.
+ * The signing side mints the host key on first run (0700 dir, 0600 file);
+ * verification and campaign paths keep requireExisting, so a fresh key can
+ * never vouch for receipts or seats it did not sign.
+ */
 export function getProductionExecutorAuthority(): HarnessTransportAuthority {
   if (!productionAuthority) {
-    productionAuthority = bootstrapExecutorAuthority({ rootDir: pinnedProductionHostAuthorityRoot(),
-      requireExisting: true });
+    productionAuthority = bootstrapExecutorAuthority({ rootDir: pinnedProductionHostAuthorityRoot() });
     bootstrappedAuthorities.add(productionAuthority);
   }
   return productionAuthority;

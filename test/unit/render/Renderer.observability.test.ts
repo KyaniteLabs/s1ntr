@@ -5,13 +5,15 @@ const {
   mockConsoleHandlers,
   mockPageErrorHandlers,
   mockCanvasHandle,
+  mockWriteFile,
   mockPage,
   mockBrowser,
 } = vi.hoisted(() => {
   const mockAccess = vi.fn();
   const mockConsoleHandlers: Array<(msg: { type: () => string; text: () => string }) => void> = [];
   const mockPageErrorHandlers: Array<(err: Error) => void> = [];
-  const mockCanvasHandle = { screenshot: vi.fn().mockResolvedValue(undefined) };
+  const mockCanvasHandle = { screenshot: vi.fn().mockResolvedValue(new Uint8Array([1])) };
+  const mockWriteFile = vi.fn().mockResolvedValue(undefined);
 
   const mockPage = {
     setViewport: vi.fn().mockResolvedValue(undefined),
@@ -35,11 +37,16 @@ const {
     mockConsoleHandlers,
     mockPageErrorHandlers,
     mockCanvasHandle,
+    mockWriteFile,
     mockPage,
     mockBrowser,
   };
 });
 
+vi.mock('../../../src/utils/browserAssetFallbacks.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../src/utils/browserAssetFallbacks.js')>()),
+  resolveChromiumExecutablePath: () => '/opt/chromium',
+}));
 vi.mock('puppeteer', () => ({
   default: {
     launch: vi.fn().mockResolvedValue(mockBrowser),
@@ -49,6 +56,8 @@ vi.mock('puppeteer', () => ({
 vi.mock('fs/promises', () => ({
   default: {
     access: mockAccess,
+    mkdir: vi.fn().mockResolvedValue(undefined),
+    writeFile: mockWriteFile,
   },
 }));
 
@@ -90,6 +99,45 @@ describe('Renderer observability', () => {
     await expect(renderer.render('function setup() {}', '/tmp/output.png')).rejects.toThrow(
       'Failed to render sketch: No canvas element found. The sketch may have failed to initialize. Diagnostics: page errors: p5 is not defined',
     );
+  });
+
+  it('refuses to save a canvas from a sketch that threw', async () => {
+    mockPage.setContent.mockImplementationOnce(async () => {
+      for (const handler of mockPageErrorHandlers) {
+        handler(new Error('undefinedThing is not defined'));
+      }
+    });
+
+    const renderer = new Renderer();
+    await expect(renderer.render('function draw() { undefinedThing(); }', '/tmp/output.png')).rejects.toThrow(
+      'Failed to render sketch: The sketch threw while rendering. Diagnostics: page errors: undefinedThing is not defined',
+    );
+    expect(mockWriteFile).not.toHaveBeenCalled();
+  });
+
+  it('refuses to save a canvas when the sketch throws during the capture', async () => {
+    mockCanvasHandle.screenshot.mockImplementationOnce(async () => {
+      for (const handler of mockPageErrorHandlers) {
+        handler(new Error('late frame threw'));
+      }
+      return new Uint8Array([1]);
+    });
+
+    await expect(new Renderer().render('function draw() {}', '/tmp/output.png')).rejects.toThrow(
+      'Failed to render sketch: The sketch threw while rendering. Diagnostics: page errors: late frame threw',
+    );
+    expect(mockWriteFile).not.toHaveBeenCalled();
+  });
+
+  it('saves the canvas of a sketch that only logged a console error', async () => {
+    mockPage.setContent.mockImplementationOnce(async () => {
+      for (const handler of mockConsoleHandlers) {
+        handler({ type: () => 'error', text: () => 'Failed to load resource: favicon.ico' });
+      }
+    });
+
+    await new Renderer().render('function setup() { createCanvas(10, 10); }', '/tmp/output.png');
+    expect(mockWriteFile).toHaveBeenCalledWith('/tmp/output.png', new Uint8Array([1]));
   });
 
   it('includes console errors in the thrown message', async () => {

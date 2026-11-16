@@ -4,16 +4,20 @@
  * Monitors code execution over time to detect:
  * - Memory leaks (growing heap usage)
  * - Frame rate degradation
- * - Console errors after startup
- * - Infinite accumulation (objects never cleaned up)
+ * - Uncaught page errors (console errors are counted, not failed: a
+ *   blocked font or a 404 does not stop a piece)
  * 
- * Requires Puppeteer to run code in headless browser.
+ * Runs p5 sketches only. Requires Puppeteer to run code in headless browser.
  */
 
 import puppeteer from 'puppeteer';
 import { getChromeArgs } from '../security/SandboxConfig.js';
+import { resolveChromiumExecutablePath } from '../utils/browserAssetFallbacks.js';
+import { missingChromiumError } from '../utils/browserPreflight.js';
 import { generateHTML } from '../utils/generateHTML.js';
 import { formatError } from '../utils/errors.js';
+import { pageScript } from '../utils/pageScript.js';
+import { inlineVendorAssets } from '../utils/vendorAssets.js';
 
 export interface RuntimeHealthResult {
   healthy: boolean;
@@ -21,8 +25,7 @@ export interface RuntimeHealthResult {
   checks: {
     memoryLeak: boolean;
     frameRateStable: boolean;
-    noConsoleErrors: boolean;
-    noInfiniteAccumulation: boolean;
+    noPageErrors: boolean;
   };
   metrics: {
     initialMemoryMB: number;
@@ -30,8 +33,8 @@ export interface RuntimeHealthResult {
     memoryGrowthMB: number;
     avgFPS: number;
     minFPS: number;
+    pageErrorCount: number;
     consoleErrorCount: number;
-    objectCountGrowth: number;
   };
   issues: string[];
 }
@@ -52,6 +55,28 @@ const DEFAULT_OPTIONS: Required<RuntimeHealthOptions> = {
   disableSandbox: false,
 };
 
+/**
+ * Runs in the page: records the interval between animation frames and a
+ * rough count of underscore globals at start and once a second.
+ */
+function installHealthTracker(): void {
+  if (window.__liminalMetrics) return;
+  const metrics = {
+    frameCount: 0,
+    lastFrameTime: performance.now(),
+    fpsSamples: [] as number[],
+  };
+  window.__liminalMetrics = metrics;
+  const trackFrame = () => {
+    const now = performance.now();
+    metrics.fpsSamples.push(1000 / (now - metrics.lastFrameTime));
+    metrics.lastFrameTime = now;
+    metrics.frameCount++;
+    requestAnimationFrame(trackFrame);
+  };
+  requestAnimationFrame(trackFrame);
+}
+
 export class RuntimeHealthMonitor {
   private options: Required<RuntimeHealthOptions>;
 
@@ -62,23 +87,29 @@ export class RuntimeHealthMonitor {
   /**
    * Monitor code health over time
    */
-  async monitor(code: string, _domain: string): Promise<RuntimeHealthResult> {
+  async monitor(code: string, domain: string): Promise<RuntimeHealthResult> {
+    // The page is a p5 page. Other code would run inside it as p5 JavaScript,
+    // and the result would describe a different program.
+    if (domain !== 'p5') {
+      throw new Error(`RuntimeHealthMonitor runs p5 sketches only, not ${domain}`);
+    }
+    const executablePath = resolveChromiumExecutablePath();
+    if (!executablePath) throw missingChromiumError();
     const browser = await puppeteer.launch({
       headless: true,
+      executablePath,
       args: getChromeArgs({ forceDisableSandbox: this.options.disableSandbox }),
     });
 
     const issues: string[] = [];
     const memorySamples: number[] = [];
     const fpsSamples: number[] = [];
+    let pageErrorCount = 0;
     let consoleErrorCount = 0;
-    let initialObjectCount = 0;
-    let finalObjectCount = 0;
 
     try {
       const page = await browser.newPage();
 
-      // Track console errors
       page.on('console', (msg) => {
         if (msg.type() === 'error') {
           consoleErrorCount++;
@@ -86,60 +117,28 @@ export class RuntimeHealthMonitor {
       });
 
       page.on('pageerror', () => {
-        consoleErrorCount++;
+        pageErrorCount++;
       });
 
-      // Inject performance tracker
-      await page.evaluateOnNewDocument(() => {
-        window.__liminalMetrics = {
-          frameCount: 0,
-          lastFrameTime: performance.now(),
-          fpsSamples: [] as number[],
-          objectCounts: [] as number[],
-        };
-
-        // Track FPS
-        function trackFrame() {
-          const metrics = window.__liminalMetrics!;
-          const now = performance.now();
-          const elapsed = now - metrics.lastFrameTime;
-          const fps = 1000 / elapsed;
-          metrics.fpsSamples.push(fps);
-          metrics.lastFrameTime = now;
-          metrics.frameCount++;
-          requestAnimationFrame(trackFrame);
-        }
-        requestAnimationFrame(trackFrame);
-
-        // Track object count (rough approximation)
-        setInterval(() => {
-          const metrics = window.__liminalMetrics!;
-          // Count various object types that might accumulate
-          let count = 0;
-          // Simple heuristic: count window properties starting with _
-          count += Object.keys(window).filter((k: string) => k.startsWith('_')).length;
-          metrics.objectCounts.push(count);
-        }, 1000);
-      });
-
-      // Generate and load HTML
-      const html = generateHTML({
+      // Inline the vendored libraries: a setContent page is about:blank,
+      // where /vendor URLs never load.
+      const html = await inlineVendorAssets(generateHTML({
         code,
         title: 'Runtime Health Check',
         bodyStyle: 'margin: 0; padding: 0; overflow: hidden;',
         fullscreen: true,
-      });
+      }));
 
-      await page.setContent(html, { waitUntil: 'networkidle0' });
-      
-      // Wait for canvas to appear
-      await page.waitForSelector('canvas', { timeout: 10000 });
-      
+      // The libraries are inlined, so there is no network to wait for. A
+      // networkidle wait never ends while a slow draw loop holds the page.
+      await page.setContent(html, { waitUntil: 'load' });
+
+      // Start the tracker after load: a new-document script never runs for a
+      // setContent page, so it would leave the metrics undefined.
+      await page.evaluate(pageScript(installHealthTracker, null));
+
       // Get initial metrics
       const initialMetrics = await page.metrics();
-      initialObjectCount = await page.evaluate(() => {
-        return window.__liminalMetrics?.objectCounts?.slice(-1)[0] || 0;
-      });
       memorySamples.push((initialMetrics.JSHeapUsedSize || 0) / 1024 / 1024);
 
       // Monitor over time
@@ -154,18 +153,14 @@ export class RuntimeHealthMonitor {
 
         // Get FPS samples from page
         const pageFps = await page.evaluate(() => {
-          const samples = window.__liminalMetrics?.fpsSamples || [];
-          window.__liminalMetrics!.fpsSamples = []; // Reset for next interval
+          const metrics = window.__liminalMetrics;
+          if (!metrics) return [];
+          const samples = metrics.fpsSamples;
+          metrics.fpsSamples = []; // Reset for next interval
           return samples;
         });
         fpsSamples.push(...pageFps);
       }
-
-      // Get final metrics
-      await page.metrics(); // Final metrics for completeness
-      finalObjectCount = await page.evaluate(() => {
-        return window.__liminalMetrics?.objectCounts?.slice(-1)[0] || 0;
-      });
 
       // Calculate results
       const initialMemory = memorySamples[0];
@@ -177,13 +172,11 @@ export class RuntimeHealthMonitor {
       const minFPS = fpsSamples.length > 0 
         ? Math.min(...fpsSamples) 
         : 0;
-      const objectCountGrowth = finalObjectCount - initialObjectCount;
 
       // Check for issues
       const memoryLeak = memoryGrowth > this.options.memoryLeakThresholdMB;
       const frameRateStable = minFPS >= this.options.minAcceptableFPS;
-      const noConsoleErrors = consoleErrorCount === 0;
-      const noInfiniteAccumulation = objectCountGrowth < 100; // Arbitrary threshold
+      const noPageErrors = pageErrorCount === 0;
 
       if (memoryLeak) {
         issues.push(`Memory leak detected: ${memoryGrowth.toFixed(1)}MB growth over ${this.options.durationMs}ms`);
@@ -191,21 +184,17 @@ export class RuntimeHealthMonitor {
       if (!frameRateStable) {
         issues.push(`Frame rate unstable: min FPS was ${minFPS.toFixed(1)}`);
       }
-      if (!noConsoleErrors) {
-        issues.push(`Console errors detected: ${consoleErrorCount} errors`);
-      }
-      if (!noInfiniteAccumulation) {
-        issues.push(`Object accumulation detected: ${objectCountGrowth} objects created`);
+      if (!noPageErrors) {
+        issues.push(`The page threw ${pageErrorCount} uncaught error(s)`);
       }
 
       return {
-        healthy: !memoryLeak && frameRateStable && noConsoleErrors && noInfiniteAccumulation,
+        healthy: !memoryLeak && frameRateStable && noPageErrors,
         duration: Date.now() - startTime,
         checks: {
           memoryLeak: !memoryLeak,
           frameRateStable,
-          noConsoleErrors,
-          noInfiniteAccumulation,
+          noPageErrors,
         },
         metrics: {
           initialMemoryMB: initialMemory,
@@ -213,8 +202,8 @@ export class RuntimeHealthMonitor {
           memoryGrowthMB: memoryGrowth,
           avgFPS,
           minFPS,
+          pageErrorCount,
           consoleErrorCount,
-          objectCountGrowth,
         },
         issues,
       };
@@ -228,8 +217,8 @@ export class RuntimeHealthMonitor {
         checks: {
           memoryLeak: false,
           frameRateStable: false,
-          noConsoleErrors: false,
-          noInfiniteAccumulation: false,
+          // Not measured: the run stopped before it could watch the page.
+          noPageErrors: false,
         },
         metrics: {
           initialMemoryMB: 0,
@@ -237,8 +226,8 @@ export class RuntimeHealthMonitor {
           memoryGrowthMB: 0,
           avgFPS: 0,
           minFPS: 0,
+          pageErrorCount,
           consoleErrorCount,
-          objectCountGrowth: 0,
         },
         issues,
       };

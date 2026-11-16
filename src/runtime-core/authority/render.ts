@@ -83,9 +83,23 @@ export const renderAuthorityRows: readonly ProductionAuthorityPath[] = [
     'render-observation-capability',
     'projection-only',
   ),
+  // The hill-climb renders only to give its judges evidence; it never admits an artifact.
+  authorityRow(
+    'src/cli/HillClimbLive.ts:renderer',
+    'renderer',
+    'render-observation-capability',
+    'projection-only',
+  ),
   // The duration fit renders only to measure length and ending; it never admits an artifact.
   authorityRow(
     'src/cli/ReverseFit.ts:renderer',
+    'renderer',
+    'render-observation-capability',
+    'projection-only',
+  ),
+  // Owner review renders each frozen candidate only to observe it; the capture never admits an artifact.
+  authorityRow(
+    'src/cli/OwnerReviewCapture.ts:renderer',
     'renderer',
     'render-observation-capability',
     'projection-only',

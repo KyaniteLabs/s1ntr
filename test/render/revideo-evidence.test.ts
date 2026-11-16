@@ -8,9 +8,13 @@ const source = 'import { makeScene } from "@revideo/core"; export default makeSc
 const decision = new DecisionModelClient({ baseUrl: 'http://127.0.0.1:9931', model: 'LiquidAI/d1-2B', fetchImpl: vi.fn() });
 
 describe('Revideo wrapper evidence', () => {
-  it('marks a Revideo source and its existing wrapper as not rendered without launching a browser', async () => {
+  // #1628: an explicit revideo domain with real scene source now renders in the
+  // contained harness (see HeadlessRenderer.revideo.test.ts). The HTML preview
+  // wrapper, and scene code that only looks like Revideo, are still refused.
+  it('marks a Revideo wrapper, and an unlabelled scene, as not rendered without launching a browser', async () => {
     const renderer = new HeadlessRenderer();
-    for (const [code, domain] of [[source, 'revideo'], [HTMLWrapper.wrap(source, 'revideo'), 'html']] as const) {
+    const wrapped = HTMLWrapper.wrap(source, 'revideo');
+    for (const [code, domain] of [[wrapped, 'revideo'], [wrapped, 'html'], [source, 'unknown']] as const) {
       const result = await renderer.renderWithEvidence(code, { domain });
       expect(result).toMatchObject({ rendered: false, candidateFailure: false, infraUnavailable: false });
       expect(result.screenshot).toBeUndefined();

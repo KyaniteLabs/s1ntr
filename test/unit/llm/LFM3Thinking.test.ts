@@ -16,24 +16,8 @@ it.each([
   expect(result.isOk() && result.value.success).toBe(success);
 });
 
-it('gets final code from local LFM3 without spending the whole budget on reasoning', async () => {
-  vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
-    const body = JSON.parse(init.body);
-    const direct = body.chat_template_kwargs?.enable_thinking === false;
-    return new Response(JSON.stringify({ choices: [{
-      finish_reason: direct ? 'stop' : 'length',
-      message: { content: direct ? 'function setup() {}' : '', reasoning_content: 'analysis' },
-    }] }), { headers: { 'Content-Type': 'application/json' } });
-  }));
-  const provider = new OpenAIProvider({ baseUrl: 'http://127.0.0.1:46407/v1', model: 'LFM3-1.7B-Q4_K_M.gguf' });
-  const result = await provider.generate({ systemPrompt: 'Code only', userPrompt: 'p5', maxTokens: 256 });
-  expect(result.isOk() && result.value.success).toBe(true);
-  expect(result.isOk() && result.value.content).toBe('function setup() {}');
-});
-
-it('keeps reasoning separate when the caller explicitly requests it', async () => {
-  vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
-    expect(JSON.parse(init.body).chat_template_kwargs?.enable_thinking).not.toBe(false);
+it('a thought that never reaches an answer is not an artifact', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => {
     return new Response(JSON.stringify({ choices: [{ finish_reason: 'length',
       message: { content: '', reasoning_content: 'unfinished code is not an artifact' },
     }] }));

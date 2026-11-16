@@ -1,0 +1,1 @@
+osc(8, 0.06, 1.3).rotate(time*0.07).modulate(noise(2,0.25),0.12).scale(1.5).kaleid(6).color(0.9,0.35,1.0).repeat(2).add(noise(1)).mult(0.8).blend(.5).out()

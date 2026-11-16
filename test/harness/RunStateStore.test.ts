@@ -137,6 +137,15 @@ describe('RunStateStore', () => {
     expect(context).toContain('Do NOT re-explore');
   });
 
+  it('includes a zero inspection budget and omits an absent budget', () => {
+    const context = formatResumeContext(makeRunState({
+      focusInspectionBudgetRemaining: 0,
+    }));
+
+    expect(context.split('\n')).toContain('Focus inspection reads remaining: 0');
+    expect(formatResumeContext(makeRunState())).not.toContain('Focus inspection reads remaining:');
+  });
+
   it('preserves all semantic boundary values in round-trip', async () => {
     for (const phase of Object.values(SemanticBoundary)) {
       const state = makeRunState({ phase });

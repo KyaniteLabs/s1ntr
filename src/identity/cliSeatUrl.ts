@@ -1,6 +1,11 @@
-/** Recognize only the OpenAI-compatible path emitted for known local CLI seats. */
+/**
+ * Reduce a known local CLI seat URL to its bare seat: drop the OpenAI-compatible
+ * path and a per-seat effort segment (cli://codex/xhigh, cli://claude/high).
+ * The effort is read by the provider, not by admission.
+ */
 export function canonicalCliSeatUrl(baseUrl: string): string {
-  return baseUrl.replace(/^(cli:\/\/(?:codex|agy|command-code))\/chat\/completions$/, '$1');
+  return baseUrl.replace(
+    /^(cli:\/\/(?:codex|agy|command-code|claude))(?:\/(?:low|medium|high|xhigh|max))?(?:\/chat\/completions)?$/, '$1');
 }
 
 /** Owner rule (2026-11-10): seats run between medium and xhigh reasoning. */

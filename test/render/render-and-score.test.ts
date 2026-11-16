@@ -144,6 +144,29 @@ describe('HeadlessRenderer rendering', () => {
 
     expect(result.logs.some(log => log.includes('test message'))).toBe(true);
   }, 30000);
+
+  // p5 makes its canvas before setup runs, so a sketch that throws still
+  // yields a frame. That frame is not a render (#1690).
+  it('fails a sketch that throws, names the error and keeps the frame', async () => {
+    const result = await renderer.render(`
+      function setup() { createCanvas(100, 100); background(40); undefinedHelper(); }
+    `, { width: 100, height: 100 });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('undefinedHelper is not defined');
+    expect(result.pageErrors).toHaveLength(1);
+    expect(result.screenshot?.success).toBe(true);
+  }, 30000);
+
+  it('passes a sketch whose only error went to the console', async () => {
+    const result = await renderer.render(`
+      function setup() { createCanvas(100, 100); console.error('font blocked'); background(40); noLoop(); }
+    `, { width: 100, height: 100 });
+
+    expect(result.success).toBe(true);
+    expect(result.errors).toContain('font blocked');
+    expect(result.pageErrors).toEqual([]);
+  }, 30000);
 });
 
 describe('VisualScorer', () => {

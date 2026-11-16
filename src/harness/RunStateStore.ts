@@ -278,6 +278,7 @@ export function formatResumeContext(state: RunState): string {
     `## Resume Context`,
     ``,
     `A previous run of this task was suspended after ${state.stepsCompleted}/${state.maxSteps} steps.`,
+    `Run ID: ${state.runId}`,
     `Started: ${state.startedAt}`,
     `Suspended: ${state.suspendedAt}`,
     `Phase at suspension: ${state.phase}`,

@@ -16,7 +16,7 @@ import { sanitizeOutput } from '../../../src/llm/LLMClient.js';
 describe('Universal Output Sanitizer', () => {
   describe('<think/> tag stripping', () => {
     it('strips simple think tags', () => {
-      const content = '<think<Let me think</think<\n```javascript\nfunction setup() { createCanvas(400, 400); }\n```';
+      const content = '<think>Let me think</think>\n```javascript\nfunction setup() { createCanvas(400, 400); }\n```';
       const result = sanitizeOutput(content);
       expect(result.code).not.toContain('<think');
       expect(result.code).not.toContain('Let me think');
@@ -24,11 +24,11 @@ describe('Universal Output Sanitizer', () => {
     });
 
     it('strips multiline think blocks', () => {
-      const content = `<think<Let me think about this step by step:
+      const content = `<think>Let me think about this step by step:
 1. Create canvas
 2. Draw circle
 3. Add color
-</think<
+</think>
 
 \`\`\`javascript
 function draw() { ellipse(200, 200, 100); }
@@ -40,14 +40,14 @@ function draw() { ellipse(200, 200, 100); }
     });
 
     it('handles case-insensitive think tags', () => {
-      const content = '<THINK<reasoning</THINK<\nconst x = 10;';
+      const content = '<THINK>reasoning</THINK>\nconst x = 10;';
       const result = sanitizeOutput(content);
-      expect(result.code).not.toContain('<THINK<');
+      expect(result.code).not.toContain('<THINK>');
       expect(result.code).toContain('const x = 10;');
     });
 
     it('handles nested think tags', () => {
-      const content = '<think<outer<think<inner</think<outer2</think<\nfunction code() {}';
+      const content = '<think>outer<think>inner</think>outer2</think>\nfunction code() {}';
       const result = sanitizeOutput(content);
       expect(result.code).not.toContain('<think');
       expect(result.code).toContain('function code()');
@@ -142,19 +142,18 @@ function draw() { ellipse(200, 200, 100); }
     });
 
     it('handles only think tags with no code', () => {
-      const content = '<think<thinking...</think<';
+      const content = '<think>thinking...</think>';
       const result = sanitizeOutput(content);
-      // Malformed tags don't match the stripping regex — content passes through as-is
-      expect(result.code).toBe('<think<thinking...</think<');
-      expect(result.success).toBe(true);
+      expect(result.code).toBe('');
+      expect(result.success).toBe(false);
     });
 
     it('handles mixed contamination', () => {
-      const content = `<think<
+      const content = `<think>
 Let me analyze the requirements:
 - Blue circle
 - 400x400 canvas
-</think<
+</think>
 
 Here's the code:
 

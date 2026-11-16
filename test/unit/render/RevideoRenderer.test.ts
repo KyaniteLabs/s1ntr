@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
+import { pathToFileURL } from 'url';
 
 // ── Hoisted mocks ──────────────────────────────────────────────────
 // Upstream renderer boundary (opt-in path only).
@@ -12,7 +13,10 @@ const mockRenderVideo = vi.hoisted(() => vi.fn(async () => ({ duration: 5 })));
 // a real browser or ffmpeg. esbuild is NOT mocked: it is fast, fully local, and
 // deterministic, so the real bundler runs and proves the harness compiles.
 const mockFramesToVideo = vi.hoisted(() => vi.fn(async () => {}));
-const mockScreenshot = vi.hoisted(() => vi.fn(async () => {}));
+const mockScreenshot = vi.hoisted(() => vi.fn(async () => new Uint8Array([0x89, 0x50, 0x4e, 0x47])));
+// The page fence: what the renderer installed, in order, and its request handler.
+const pageCalls = vi.hoisted(() => ({ order: [] as string[], seeks: [] as number[],
+  onRequest: undefined as undefined | ((r: unknown) => void) }));
 const mockBrowserClose = vi.hoisted(() => vi.fn(async () => {}));
 // Default harness state: ready with 3 frames so the capture loop captures 3.
 const harnessState = vi.hoisted(() => ({ ready: true, totalFrames: 3, error: null as string | null }));
@@ -20,14 +24,17 @@ const mockLaunch = vi.hoisted(() =>
   vi.fn(async () => ({
     newPage: async () => ({
       setViewport: async () => {},
-      on: () => {},
-      goto: async () => {},
+      setRequestInterception: async () => { pageCalls.order.push('intercept'); },
+      evaluateOnNewDocument: async () => { pageCalls.order.push('guards'); },
+      on: (event: string, handler: (r: unknown) => void) => { if (event === 'request') pageCalls.onRequest = handler; },
+      goto: async () => { pageCalls.order.push('goto'); },
       waitForFunction: async () => {},
-      evaluate: async (fn: unknown) => {
+      evaluate: async (fn: unknown, arg?: unknown) => {
         // First evaluate() reads harness state; later ones drive seekAndRender.
-        if (typeof fn === 'function' && fn.toString().includes('__sinter')) {
+        if (typeof fn === 'function' && fn.toString().includes('__sinter') && arg === undefined) {
           return { ready: harnessState.ready, total: harnessState.totalFrames, error: harnessState.error };
         }
+        if (typeof arg === 'number') pageCalls.seeks.push(arg);
         return undefined;
       },
       $: async () => ({ screenshot: mockScreenshot }),
@@ -39,6 +46,11 @@ const mockLaunch = vi.hoisted(() =>
 vi.mock('@revideo/renderer', () => ({ renderVideo: mockRenderVideo }));
 
 vi.mock('puppeteer', () => ({ default: { launch: mockLaunch } }));
+const mockResolve = vi.hoisted(() => vi.fn(() => '/opt/chromium' as string | null));
+vi.mock('../../../src/utils/browserAssetFallbacks.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../src/utils/browserAssetFallbacks.js')>()),
+  resolveChromiumExecutablePath: mockResolve,
+}));
 
 vi.mock('../../../src/export/VideoExporter.js', () => ({
   VideoExporter: class {
@@ -54,7 +66,7 @@ vi.mock('child_process', async (importOriginal) => {
 });
 
 // ── System under test ──────────────────────────────────────────────
-import { RevideoRenderer } from '../../../src/render/RevideoRenderer.js';
+import { HARNESS_ORIGIN, harnessFilePath, RevideoRenderer } from '../../../src/render/RevideoRenderer.js';
 
 const SCENE_CODE = `
 import { makeScene2D, Rect } from '@revideo/2d';
@@ -77,6 +89,7 @@ describe('RevideoRenderer', () => {
     mockFramesToVideo.mockClear();
     mockScreenshot.mockClear();
     mockLaunch.mockClear();
+    mockResolve.mockReturnValue('/opt/chromium');
     mockBrowserClose.mockClear();
     harnessState.ready = true;
     harnessState.totalFrames = 3;
@@ -273,5 +286,105 @@ describe('RevideoRenderer', () => {
     expect(callArg.settings.outDir).toBe(path.dirname(outputPath));
     expect(callArg.settings.outFile).toBe(path.basename(outputPath));
     expect(callArg.settings.projectSettings.size).toEqual({ x: 1920, y: 1080 });
+  });
+
+  describe('harnessFilePath', () => {
+    const work = path.resolve('/srv/work');
+    it.each([
+      ['/harness.js', path.join(work, 'harness.js')],
+      ['/a/b.js?x=1#y', path.join(work, 'a', 'b.js')],
+      ['//etc/passwd', path.join(work, 'etc', 'passwd')],
+      // The URL parser folds %2e%2e as a dot segment, so it never leaves the root.
+      ['/%2e%2e/%2e%2e/etc/passwd', path.join(work, 'etc', 'passwd')],
+    ])('maps %s inside the work dir', (p, want) => {
+      expect(harnessFilePath(work, `${HARNESS_ORIGIN}${p}`)).toBe(want);
+    });
+    it.each(['/', '/..%2F..%2Fetc%2Fpasswd', '/..%5C..%5Cetc', '/%E0%A4%A'])(
+      'refuses %s', (p) => {
+        expect(harnessFilePath(work, `${HARNESS_ORIGIN}${p}`)).toBeNull();
+      },
+    );
+  });
+
+  describe('browser resolution', () => {
+    it('launches the resolved Chromium', async () => {
+      await renderer.renderStills(SCENE_CODE, { fps: 30 });
+      expect(mockLaunch).toHaveBeenCalledWith(expect.objectContaining({ executablePath: '/opt/chromium' }));
+    });
+
+    it('throws the missing-browser error and never launches when nothing resolves', async () => {
+      mockResolve.mockReturnValue(null);
+      await expect(renderer.renderStills(SCENE_CODE, { fps: 30 })).rejects.toThrow(/Chromium executable not found/);
+      expect(mockLaunch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('contained stills (#1628)', () => {
+    beforeEach(() => {
+      pageCalls.order.length = 0; pageCalls.seeks.length = 0; pageCalls.onRequest = undefined;
+      harnessState.ready = true; harnessState.error = null;
+    });
+
+    it('seeks only the early and 80 % frames of the real scene', async () => {
+      harnessState.totalFrames = 300;
+      const stills = await new RevideoRenderer().renderStills(SCENE_CODE, { fps: 30, width: 960, height: 540 });
+      expect(pageCalls.seeks).toEqual([15, 240]);
+      expect(stills.early.length).toBeGreaterThan(0);
+      expect(stills.late.length).toBeGreaterThan(0);
+      expect(stills.durationSeconds).toBe(10);
+      expect(stills.containment).toMatchObject({ networkIsolated: true, permissionsDenied: true, cleanupSucceeded: true });
+      expect(mockFramesToVideo).not.toHaveBeenCalled();
+    });
+
+    it('a short scene takes its early still at a quarter, not past the end', async () => {
+      harnessState.totalFrames = 8;
+      await new RevideoRenderer().renderStills(SCENE_CODE, { fps: 30 });
+      expect(pageCalls.seeks).toEqual([2, 6]);
+    });
+
+    it('fences the page before it loads anything', async () => {
+      harnessState.totalFrames = 3;
+      await new RevideoRenderer().renderStills(SCENE_CODE, { fps: 30 });
+      expect(pageCalls.order.slice(0, 3)).toEqual(['intercept', 'guards', 'goto']);
+    });
+
+    it('serves only the harness files, admits data: and blob:, and counts every block', async () => {
+      harnessState.totalFrames = 3;
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'revideo-fence-'));
+      mockScreenshot.mockImplementationOnce(async () => {
+        // Each request must get exactly one verdict: respond, continue or abort.
+        const fire = async (url: string) => {
+          const r = {
+            url: () => url,
+            abort: vi.fn(async () => {}),
+            continue: vi.fn(async () => {}),
+            respond: vi.fn(async (_: { status: number; body?: unknown }) => {}),
+          };
+          pageCalls.onRequest!(r);
+          await vi.waitFor(() => expect(r.abort.mock.calls.length + r.continue.mock.calls.length + r.respond.mock.calls.length).toBe(1));
+          if (r.respond.mock.calls.length) return `respond:${r.respond.mock.calls[0][0].status}`;
+          return r.continue.mock.calls.length ? 'continue' : 'abort';
+        };
+        expect(await fire(`${HARNESS_ORIGIN}/harness.js`)).toBe('respond:200');
+        expect(await fire(`${HARNESS_ORIGIN}/index.html`)).toBe('respond:200');
+        expect(await fire(`${HARNESS_ORIGIN}/missing.js`)).toBe('respond:404');
+        expect(await fire('data:image/png;base64,AAAA')).toBe('continue');
+        expect(await fire(`blob:${HARNESS_ORIGIN}/1234`)).toBe('continue');
+        expect(await fire('https://cdn.example.com/x.js')).toBe('abort');
+        // An encoded ../ resolves outside the work dir: blocked, not served.
+        expect(await fire(`${HARNESS_ORIGIN}/..%2F..%2Fetc%2Fpasswd`)).toBe('abort');
+        // file:// is no longer how the harness loads, so it is outside the fence.
+        expect(await fire(pathToFileURL('/etc/passwd').href)).toBe('abort');
+        // A symlink inside the work dir that points out of it is blocked too.
+        const [workName] = (await fs.readdir(root)).filter((n) => n.startsWith('revideo-stills-'));
+        await fs.symlink(path.resolve('package.json'), path.join(root, workName, 'escape.js'));
+        expect(await fire(`${HARNESS_ORIGIN}/escape.js`)).toBe('abort');
+        return new Uint8Array([1]);
+      });
+      const stills = await new RevideoRenderer({ tempDir: root }).renderStills(SCENE_CODE, { fps: 30 });
+      expect(stills.containment.blockedRequests).toBe(4);
+      expect(await fs.readdir(root)).toEqual([]);
+      await fs.rm(root, { recursive: true, force: true });
+    });
   });
 });

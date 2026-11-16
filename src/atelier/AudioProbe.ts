@@ -31,8 +31,8 @@ export async function probeAudio(htmlPath: string): Promise<AudioProbeResult> {
   try {
     const { chromium } = await import('playwright');
     const { resolveChromiumExecutablePath } = await import('../utils/browserAssetFallbacks.js');
-    const { sandboxOptOutArgs } = await import('../security/SandboxConfig.js');
-    browser = await chromium.launch({ headless: true,
+    const { launchPlaywrightChromium, sandboxOptOutArgs } = await import('../security/SandboxConfig.js');
+    browser = await launchPlaywrightChromium(chromium, { headless: true,
       executablePath: resolveChromiumExecutablePath(),
       args: [...sandboxOptOutArgs(), '--autoplay-policy=no-user-gesture-required'] });
     const page = await browser.newPage({ viewport: { width: 800, height: 600 } });

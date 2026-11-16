@@ -301,16 +301,14 @@ function providerForGenerationPreflight() {
   return keyedProvider || 'anthropic';
 }
 
-function missingProviderKeyMessageForGeneration() {
-  // File-pinned seats (e.g. roles.generator with its own apiKey/baseUrl)
-  // satisfy the preflight: the sniff below only sees env keys and would
-  // otherwise demand an unrelated default-provider key.
+async function missingProviderKeyMessageForGeneration() {
+  // The resolved generator role is the witness: a file-pinned key, a cli://
+  // subscription seat or a keyless local server (Ollama, LM Studio, loopback)
+  // needs no env key. The sniff below only sees env keys and would otherwise
+  // demand an unrelated default-provider key (#1592).
   try {
-    const resolvedRole = LLMClient.getResolvedRoleConfig('generator');
-    if (resolvedRole?.apiKey) return null;
-    // CLI-lane rotation seats (cli://command) carry their own auth via the
-    // subscription CLI — demanding an API key here killed every cli:// turn.
-    if (resolvedRole?.baseUrl && resolvedRole.baseUrl.startsWith('cli://')) return null;
+    const { generatorRoleNeedsNoKey } = await import('../dist/cli/generationKeyPreflight.js');
+    if (generatorRoleNeedsNoKey(LLMClient.getResolvedRoleConfig('generator'))) return null;
   } catch { /* fall through to the sniff */ }
   const providerName = providerForGenerationPreflight();
   const provider = providerName ? CLI_PROVIDER_DEFAULTS[providerName] : undefined;
@@ -379,6 +377,15 @@ for (let i = 0; i < args.length; i++) {
     flags.maxProviderCalls = parseNumericFlag('--max-provider-calls', args[++i], {
       integer: true, min: 0, max: Infinity, expected: 'a non-negative integer',
     });
+  } else if (arg === '--reasoning') {
+    // #1735: per-run reasoning level for every role; same pin as SINTER_LLM_THINKING_EFFORT.
+    const level = String(args[++i] || '').toLowerCase();
+    if (!['none', 'low', 'medium', 'high', 'xhigh', 'max'].includes(level)) {
+      console.error('--reasoning needs one of: none, low, medium, high, xhigh, max');
+      process.exit(1);
+    }
+    process.env.SINTER_LLM_THINKING_EFFORT = level;
+    flags.reasoning = level;
   } else if (arg === '--stages') {
     flags.stages = args[++i];
   } else if (arg === '--output' || arg === '-o') {
@@ -886,6 +893,7 @@ function printHelp() {
   console.log('  --max-iterations, -m <num>  Max iterations (generate accepts only 1)');
   console.log('  --max-provider-calls <num>  Shared cap across nested provider attempts');
   console.log('  --retry-unknown             Start fresh after a timed-out run (may bill twice)');
+  console.log('  --reasoning <level>         Reasoning level for every model call: none|low|medium|high|xhigh|max');
   console.log('  --stages generate           Generation-only provider stage plan [not with generate]');
   console.log('  --domain <name>             Force a creative domain (else auto-detected from the prompt)');
   console.log('  --output, -o <path>         Output directory (relative to project or inside ~/.sinter)');
@@ -1229,12 +1237,29 @@ if (flags.recent || flags.favorites) {
 
 if (cmd === 'list' || cmd === 'ls') {
   const outDir = path.join(process.env.HOME || '/tmp', '.sinter', 'output');
-  console.log('📁 Sketches:');
-  if (fs.existsSync(outDir)) {
-    fs.readdirSync(outDir).filter(f => f.endsWith('.js')).forEach(f => console.log('  ' + f));
-  } else {
-    console.log('  (none yet)');
+  const artifactsDir = path.join(outDir, 'artifacts');
+  // Each saved artwork is a folder with playable.html (plus source and provenance).
+  const artworks = [];
+  if (fs.existsSync(artifactsDir)) {
+    for (const name of fs.readdirSync(artifactsDir)) {
+      const playable = path.join(artifactsDir, name, 'playable.html');
+      if (!fs.existsSync(playable)) continue;
+      let domain = '';
+      try {
+        domain = JSON.parse(fs.readFileSync(path.join(artifactsDir, name, 'provenance.txt'), 'utf8')).domain || '';
+      } catch { /* provenance is optional */ }
+      artworks.push({ playable, domain, mtime: fs.statSync(playable).mtimeMs });
+    }
   }
+  artworks.sort((a, b) => b.mtime - a.mtime);
+  const legacy = fs.existsSync(outDir) ? fs.readdirSync(outDir).filter(f => f.endsWith('.js')) : [];
+  console.log('📁 Artworks (newest first):');
+  for (const a of artworks) {
+    const when = new Date(a.mtime).toISOString().slice(0, 16).replace('T', ' ');
+    console.log('  ' + when + '  ' + (a.domain || '?').padEnd(8) + '  ' + a.playable);
+  }
+  legacy.forEach(f => console.log('  ' + path.join(outDir, f)));
+  if (artworks.length === 0 && legacy.length === 0) console.log('  (none yet)');
   process.exit(0);
 }
 
@@ -1464,7 +1489,7 @@ if (cmd === 'release') {
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, `${JSON.stringify({ terminal: true, generatedAt: new Date().toISOString(), ...report }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
     console.log(JSON.stringify(report, null, 2));
-    console.log(`Terminal receipt: ${path.relative(repoRoot, target)}`);
+    console.log(`Terminal receipt: ${path.relative(process.cwd(), target) || target}`);
     process.exit(report.ownerReleaseReady ? 0 : 1);
   }
   console.error('Usage: sinter release <gate|receipt> [--output report.json]');
@@ -1864,6 +1889,15 @@ if (cmd === 'report' && cmdArgs[0] === 'fitness') {
   process.exit(0);
 }
 
+if (cmd === 'hillclimb' && cmdArgs[0] !== 'run') {
+  // Calibrated accept/reject/escalate for the hill-climb (docs/design/lfm3-hillclimb-20261109.md).
+  // Pure arithmetic: dispatched before provider resolution so stdout stays machine-readable.
+  // `run` calls providers, so it is dispatched after role loading below.
+  const { runHillClimbCommand } = await import('../dist/cli/HillClimbCli.js');
+  await runHillClimbCommand(cmdArgs);
+  process.exit(process.exitCode ?? 0);
+}
+
 if (cmd === 'ledger' && cmdArgs[0] === 'query') {
   const { queryEventLedger } = await import('../dist/telemetry/EventLedger.js');
   const limit = flags.limit !== undefined
@@ -1918,6 +1952,13 @@ if (resolvedGeneratorRole) {
       );
     }
   }
+}
+
+if (cmd === 'hillclimb' && cmdArgs[0] === 'run') {
+  // Live climb (#1423 PR 7): roles are loaded, provider calls go through the governed runtime.
+  const { runHillClimbCommand } = await import('../dist/cli/HillClimbCli.js');
+  await runHillClimbCommand(cmdArgs);
+  process.exit(process.exitCode ?? 0);
 }
 
 // Normalize help-style colon commands (image:validate) before NL inference.
@@ -2171,7 +2212,7 @@ if (cmd === 'generate' || cmd === 'gen' || cmd === 'g' || (flags.prompt && (!cmd
     process.exit(1);
   }
 
-  const missingKeyMessage = missingProviderKeyMessageForGeneration();
+  const missingKeyMessage = await missingProviderKeyMessageForGeneration();
   if (missingKeyMessage) {
     console.error(missingKeyMessage);
     process.exit(1);
@@ -2186,6 +2227,9 @@ if (cmd === 'generate' || cmd === 'gen' || cmd === 'g' || (flags.prompt && (!cmd
   console.log('🔄 Governed candidates: 1');
   if (flags.maxProviderCalls !== undefined) {
     console.log(`🧾 Provider plan: generate,evaluate cap=${flags.maxProviderCalls}`);
+  }
+  if (flags.reasoning) {
+    console.log(`🧠 Reasoning: ${flags.reasoning} (all roles)`);
   }
   if (output) console.log('📁 Output: ' + output);
   console.log('');
@@ -2612,7 +2656,10 @@ else if (cmd === 'sing') {
   }
   const wantSingle = Boolean(flags.domain) || flags.single === true;
   const wantCompose = flags.compose === true || !wantSingle;
-  const { generateSingPreset } = await import('../dist/sing/SingPresetGenerator.js');
+  // Sing lives in simon/loopcover; the public snapshot has no dist/sing.
+  let generateSingPreset;
+  try { ({ generateSingPreset } = await import('../dist/sing/SingPresetGenerator.js')); }
+  catch { console.error('Sing is not part of this build (it moved to its own project).'); process.exit(1); }
   console.log('🎤 Generating Sing preset' + (flags.domain ? ' [' + flags.domain + ']' : wantCompose ? ' [composition]' : '') + '...');
   console.log('');
   try {
@@ -2762,8 +2809,9 @@ else if (cmd === 'compose') {
         campaign, ownerReviewPackage.plan, {
           input: campaignExecution,
           ownerReviewBriefIds: ownerReviewPackage.briefIds,
-          ownerReviews: (admission, candidateManifests) => ownerReviewPackage.buildInputs(
-            campaignService, admission, campaign, candidateManifests),
+          ownerReviews: async (admission, candidateManifests) => ownerReviewPackage.buildInputs(
+            campaignService, admission, campaign, candidateManifests,
+            await ownerReviewPackage.captureEvidence(candidateManifests)),
         });
       campaignResult = journey.result;
       campaignOwnerReviews = journey.ownerReviews;
@@ -4619,7 +4667,7 @@ else if (cmd === 'report' && cmdArgs[0] === 'provenance') {
     const emitter = new CreativeWeaknessEmitter();
     const builder = new ProvenanceNarrativeBuilder();
 
-    const weaknesses = emitter.getRecent ? [] : [];
+    const weaknesses = emitter.getEmitted();
     const narrative = builder.build(changes, weaknesses);
 
     console.log('');
@@ -4954,7 +5002,7 @@ else if (cmd === 'report' && cmdArgs[0] === 'readiness') {
     const manifest = new PolicyChangeManifest();
     const changes = manifest.getByStatus('promoted');
     const emitter = new CreativeWeaknessEmitter();
-    const weaknesses = emitter.getRecent ? [] : [];
+    const weaknesses = emitter.getEmitted();
 
     const builder = new LaunchSummaryBuilder();
     const readiness = builder.assess(health, changes, weaknesses);
@@ -5218,14 +5266,21 @@ else if (cmd === 'image' && (cmdArgs[0] === 'validate' || cmdArgs[0] === 'attach
       }
       console.log(JSON.stringify(m.attachmentReceipt(att, { cli: true }), null, 2));
     }).catch(async (e) => {
-      // pre-build: only magic-size check via mece o1 helper
-      console.error('image validate requires pnpm build (dist/media/ImageAttachment.js):', e.message || e);
+      const missingBuild = e?.code === 'ERR_MODULE_NOT_FOUND' && String(e.message).includes('/dist/media/');
+      console.error(missingBuild
+        ? `image validate requires pnpm build (dist/media/ImageAttachment.js): ${e.message}`
+        : `image validate: ${e?.message || e}`);
       process.exit(1);
     });
   } catch (err) {
     console.error(err);
     process.exit(1);
   }
+}
+else if ((cmd === 'mece' || cmd === 'rotation') && !fs.existsSync(path.join(repoRoot, 'scripts', cmd, 'cli.mjs'))) {
+  // npm ships only scripts/packaging; these tools live in the source repo.
+  console.error(`sinter ${cmd} is only available in a source checkout of S1NTR, not in the npm package.`);
+  process.exit(2);
 }
 else if (cmd === 'mece') {
   try {

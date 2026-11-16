@@ -1,6 +1,11 @@
 /* eslint-env node */
 'use strict';
 
+// Fence runs (``` ~~~ or a {3} quantifier on them) and think tags written any
+// way a regex or string can spell them.
+const MODEL_TEXT_MARKUP = '/```|~~~|`\\{3|~\\{3|<[^>]{0,12}think/i';
+const STRING_SCAN = '/^(startsWith|endsWith|includes|indexOf|lastIndexOf|split|replace|replaceAll|match|matchAll|search)$/';
+
 module.exports = {
   root: true,
   env: { node: true, es2022: true },
@@ -34,11 +39,46 @@ module.exports = {
     'no-eval': ['error', { allowIndirect: false }],
     'no-new-func': 'error',
     'no-implied-eval': 'error',
+    // Model output is read only through src/llm/ModelOutput.ts (answerCode,
+    // answerJson, splitThinking, fencedBlocks). Each hand-written fence or
+    // think regex drifted on a different reply shape and failed correct answers.
+    'no-restricted-syntax': ['error',
+      {
+        selector: `Literal[regex.pattern=${MODEL_TEXT_MARKUP}]`,
+        message: 'Read model output through src/llm/ModelOutput.ts, not a fence/think regex.',
+      },
+      {
+        selector: `CallExpression[callee.property.name=${STRING_SCAN}] > Literal.arguments[value=${MODEL_TEXT_MARKUP}]`,
+        message: 'Read model output through src/llm/ModelOutput.ts, not a fence/think string match.',
+      },
+      {
+        selector: `CallExpression[callee.property.name=${STRING_SCAN}] > TemplateLiteral.arguments > TemplateElement[value.cooked=${MODEL_TEXT_MARKUP}]`,
+        message: 'Read model output through src/llm/ModelOutput.ts, not a fence/think string match.',
+      },
+      {
+        selector: `NewExpression[callee.name="RegExp"] > Literal.arguments[value=${MODEL_TEXT_MARKUP}]`,
+        message: 'Read model output through src/llm/ModelOutput.ts, not a fence/think regex.',
+      },
+      {
+        selector: `NewExpression[callee.name="RegExp"] > TemplateLiteral > TemplateElement[value.cooked=${MODEL_TEXT_MARKUP}]`,
+        message: 'Read model output through src/llm/ModelOutput.ts, not a fence/think regex.',
+      },
+      {
+        selector: 'VariableDeclarator > Literal.init[value=/^\\s*(?:`{3,}|~{3,}|<\\/?think[^>]*>)\\s*$/i]',
+        message: 'A fence or think marker constant is a parser token: use src/llm/ModelOutput.ts.',
+      },
+    ],
   },
   overrides: [
     {
       files: ['*.ts', '*.tsx'],
       parser: '@typescript-eslint/parser',
+    },
+    {
+      // ModelOutput owns the parsing; StreamParser splits think tags out of a
+      // live token stream incrementally, where whole-text parsing cannot run.
+      files: ['src/llm/ModelOutput.ts', 'src/llm/StreamParser.ts'],
+      rules: { 'no-restricted-syntax': 'off' },
     },
     {
       files: ['src/tui/sanitizeTerminalText.ts'],

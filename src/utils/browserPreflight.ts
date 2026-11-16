@@ -507,33 +507,63 @@ export function scanLegacyBrowserCaches(): string | undefined {
   return undefined;
 }
 
-function scanChromiumUnder(browsersPath: string): string | undefined {
+/**
+ * A browser install interrupted mid-download can leave the executable without
+ * the rest of the bundle; launching it fails and every render reads as a
+ * degraded score (#1594). Playwright writes INSTALLATION_COMPLETE into the
+ * browser dir only after a full install, and a macOS app bundle cannot start
+ * without its Frameworks dir, so both are checked before a candidate is used.
+ */
+function isCompleteInstall(browsersPath: string, dir: string, binary: string): boolean {
+  const playwrightLayout = /^chromium(_headless_shell)?-\d+$/.test(dir);
+  if (playwrightLayout && !existsSync(join(browsersPath, dir, 'INSTALLATION_COMPLETE'))) return false;
+  const macOsAt = binary.lastIndexOf('/Contents/MacOS/');
+  if (macOsAt >= 0) {
+    const frameworks = join(binary.slice(0, macOsAt), 'Contents', 'Frameworks');
+    try {
+      if (readdirSync(frameworks).length === 0) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function scanChromiumUnder(browsersPath: string): string | undefined {
   try {
     const dirs = readdirSync(browsersPath);
     for (const dir of dirs) {
       if (!dir.startsWith('chromium') && !dir.startsWith('chrome')) continue;
-      for (const sub of [
-        'chrome-linux/chrome',
-        'chrome-linux64/chrome',
-        'chrome-mac/Chromium.app/Contents/MacOS/Chromium',
-        'chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
-        'chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
-        'chrome/mac_arm-*/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
-      ]) {
-        // Skip glob-like entries — only concrete relative paths
-        if (sub.includes('*')) continue;
-        const candidate = join(browsersPath, dir, sub);
-        if (existsSync(candidate)) return candidate;
-      }
-      // puppeteer chrome layout: chrome/mac_arm-*/...
-      const chromeDir = join(browsersPath, dir);
-      if (dir === 'chrome' || existsSync(chromeDir)) {
-        const nested = findChromeBinaryRecursive(chromeDir, 4);
-        if (nested) return nested;
-      }
+      const found = scanBrowserDir(browsersPath, dir);
+      if (!found) continue;
+      if (isCompleteInstall(browsersPath, dir, found)) return found;
+      Logger.warn('browserPreflight', `skipping incomplete browser install (interrupted download?): ${join(browsersPath, dir)}`);
     }
   } catch {
     return undefined;
+  }
+  return undefined;
+}
+
+function scanBrowserDir(browsersPath: string, dir: string): string | undefined {
+  for (const sub of [
+    'chrome-linux/chrome',
+    'chrome-linux64/chrome',
+    'chrome-mac/Chromium.app/Contents/MacOS/Chromium',
+    'chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
+    'chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
+    'chrome/mac_arm-*/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
+  ]) {
+    // Skip glob-like entries — only concrete relative paths
+    if (sub.includes('*')) continue;
+    const candidate = join(browsersPath, dir, sub);
+    if (existsSync(candidate)) return candidate;
+  }
+  // puppeteer chrome layout: chrome/mac_arm-*/...
+  const chromeDir = join(browsersPath, dir);
+  if (dir === 'chrome' || existsSync(chromeDir)) {
+    const nested = findChromeBinaryRecursive(chromeDir, 4);
+    if (nested) return nested;
   }
   return undefined;
 }

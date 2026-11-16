@@ -37,6 +37,7 @@
  */
 
 import { TierBasedGenerator, type TierBasedGeneratorOptions } from '../TierBasedGenerator.js';
+import { answerCode } from '../../llm/ModelOutput.js';
 
 /** Available text generative forms */
 export type TextGenForm =
@@ -145,10 +146,9 @@ export class TextGenerativeGenerator extends TierBasedGenerator {
    * We only check that it's not empty and not code.
    */
   protected validateOutput(code: string): { valid: boolean; error?: string } {
-    // Strip code fences and comments before validation (mirrors formatOutput preprocessing)
-    const stripped = code
+    const stripped = answerCode(code)
       .split('\n')
-      .filter(line => !line.startsWith('```') && !line.startsWith('//'))
+      .filter(line => !line.startsWith('//'))
       .join('\n')
       .trim();
 
@@ -188,16 +188,10 @@ export class TextGenerativeGenerator extends TierBasedGenerator {
    * - Handles Unicode vs ASCII preference
    */
   private formatOutput(raw: string, options?: TextGenOptions): string {
-    let lines = raw
+    let lines = answerCode(raw)
       .split('\n')
       .map(line => line.trimEnd())
-      .filter(line => {
-        // Remove markdown code blocks
-        if (line.startsWith('```')) return false;
-        // Remove comments
-        if (line.startsWith('//')) return false;
-        return line.trim().length > 0;
-      });
+      .filter(line => !line.startsWith('//') && line.trim().length > 0);
 
     // Apply max lines constraint
     const maxLines = options?.maxLines || 40;

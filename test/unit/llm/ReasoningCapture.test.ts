@@ -53,8 +53,14 @@ describe('ReasoningCapture', () => {
       const input = '<thinking>Let me analyze this</thinking>\nconst x = 1;';
       const { reasoning, code } = capture.extractReasoning(input);
 
-      // Multiple regex patterns may match the same tag (thinking + think variant)
-      expect(reasoning).toContain('Let me analyze this');
+      expect(reasoning).toBe('Let me analyze this');
+      expect(code).toBe('const x = 1;');
+    });
+
+    it('extracts <think> tags', () => {
+      const { reasoning, code } = capture.extractReasoning('<think>plan it</think>\nconst x = 1;');
+
+      expect(reasoning).toBe('plan it');
       expect(code).toBe('const x = 1;');
     });
 

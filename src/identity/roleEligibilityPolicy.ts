@@ -117,7 +117,7 @@ function isAmbiguousAlias(identity: ExecutorIdentity): boolean {
   return resolution.canonicalModel !== identity.model;
 }
 
-const EFFORT_ORDER: Readonly<Record<string, number>> = { low: 0, medium: 1, high: 2, max: 3 };
+const EFFORT_ORDER: Readonly<Record<string, number>> = { low: 0, medium: 1, high: 2, xhigh: 3, max: 4 };
 
 /**
  * Effort values arrive from attestations and config as plain strings at

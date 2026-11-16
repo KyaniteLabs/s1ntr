@@ -40,6 +40,7 @@ import {
   getBatteryMeta,
   honestLiveGap,
   isAuthFailureMessage,
+  isExecutorBlockMessage,
   findingsIndicateAuthFailure,
   listTaskIds,
   loadTaskPack,
@@ -265,13 +266,24 @@ function usageFromResponse(resp) {
   const reasoning = u.thinkingTokens ?? u.reasoning_tokens ?? u.reasoning ?? null;
   const total =
     (typeof prompt === 'number' ? prompt : 0)
-    + (typeof completion === 'number' ? completion : 0)
-    + (typeof reasoning === 'number' ? reasoning : 0);
+    + (typeof completion === 'number' ? completion : 0);
   return {
     prompt: prompt ?? null,
     completion: completion ?? null,
     reasoning: reasoning ?? null,
     total: total || null,
+  };
+}
+
+function sessionTokenUsage(u) {
+  if (!u || !(u.calls > u.callsWithUnknownUsage)) return null;
+  return {
+    prompt: u.prompt,
+    completion: u.completion,
+    reasoning: u.reasoning,
+    total: u.total || null,
+    calls: u.calls,
+    callsWithUnknownUsage: u.callsWithUnknownUsage,
   };
 }
 
@@ -397,7 +409,7 @@ export async function runBattery(seat, opts = {}) {
     findings.push(`Blind spots declared (${design.blindSpots.length}): ${design.blindSpots.map((b) => b.class).join(', ')}`);
   }
 
-  const runDir = out || makeRunDir(seat, model);
+  const runDir = path.resolve(out || makeRunDir(seat, model));
   await ensureDir(runDir);
   await ensureDir(path.join(runDir, 'receipts'));
 
@@ -2001,6 +2013,7 @@ async function runLiveHarness(task, ctx) {
       }
     }
 
+    const tokenUsage = sessionTokenUsage(session.llmUsage);
     const success = Boolean(verified || resumed) && !(diagnoseOnly && mutated.length > 0);
     // Wave 2: Kilo PAID_MODEL_AUTH / cliproxy auth_unavailable must not open product claims
     const authInstrumentFail = findingsIndicateAuthFailure(
@@ -2009,17 +2022,27 @@ async function runLiveHarness(task, ctx) {
       session?.lastError,
       session?.lastAgentError,
     );
-    if (authInstrumentFail && !failureClass) {
+    if (authInstrumentFail && (!failureClass || failureClass === 'missing-plan')) {
       failureClass = 'auth';
+      const refusal = [session?.lastPlanError, session?.lastError, session?.lastAgentError]
+        .find((e) => isAuthFailureMessage(e));
+      if (refusal) findings.push(`refused: ${String(refusal).slice(0, 240)}`);
       findings.push(
         'failureClass=auth — provider/auth instrument fail; suppress productCandidate',
       );
+    }
+    const block = [session?.lastPlanError, session?.lastError, session?.lastAgentError]
+      .find((e) => isExecutorBlockMessage(e));
+    if (block && (!failureClass || failureClass === 'missing-plan')) {
+      failureClass = 'executor-blocked';
+      findings.push(`refused: ${String(block).slice(0, 240)}`);
     }
     // Prefer explicit pack flag (W1-H1/H2 requeue); else self-improve / known product task ids
     const productCandidate =
       !diagnoseOnly
       && !success
       && !authInstrumentFail
+      && failureClass !== 'executor-blocked'
       && Boolean(
         task?.productCandidate
         || task?.kind === 'self-improve'
@@ -2032,8 +2055,8 @@ async function runLiveHarness(task, ctx) {
       success,
       verdict: verified || resumed ? (diagnoseOnly && mutated.length ? 'fail' : 'ok') : 'fail',
       latencyMs,
-      tokenUsage: null, // session-level usage not always aggregated — honest null
-      usagePresent: false,
+      tokenUsage,
+      usagePresent: tokenUsage != null,
       stepsToVerifiedEdit: diagnoseOnly ? null : (verified ? stepCount : null),
       rollbackCorrect: session.rollbackUsed != null ? Boolean(session.rollbackUsed) : null,
       selfCheckUsed,
@@ -2053,6 +2076,8 @@ async function runLiveHarness(task, ctx) {
     findings.push(`Live harness self-improve failed: ${msg}`);
     const { classifyRotationTimeoutMessage } = await import('./shared.mjs');
     const failureClass = classifyRotationTimeoutMessage(msg)
+      || (isAuthFailureMessage(msg) ? 'auth' : null)
+      || (isExecutorBlockMessage(msg) ? 'executor-blocked' : null)
       || (/parse|JSON/i.test(msg) ? 'json-parse' : null);
     let envelopePath = null;
     if (failureClass) {
@@ -2131,6 +2156,7 @@ async function runLiveHarness(task, ctx) {
     const publishFail = msg.includes('plan_publish_required');
     return {
       ...honestLiveGap('harness', task, findings, publishFail ? { verdict: 'fail' } : undefined),
+      ...(failureClass === 'auth' ? { verdict: 'auth_invalid' } : {}),
       latencyMs: Date.now() - t0,
       resumed: task.kind === 'resume' ? false : null,
       ...(failureClass ? { failureClass } : {}),

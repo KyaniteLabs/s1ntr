@@ -33,6 +33,18 @@ describe('HeadlessRenderer blender delegation', () => {
     expect(result.logs).toEqual(['done']);
   });
 
+  it('a bwrap render is contained; an unsandboxed one is not (#1628)', async () => {
+    renderBlenderMock.mockResolvedValue({ success: true, png: PNG, width: 640, height: 360, logs: [], sandbox: 'bwrap' });
+    const isolated = await new HeadlessRenderer().render(SCRIPT, { domain: 'blender' });
+    expect(isolated.containment).toMatchObject({ networkIsolated: true, permissionsDenied: true,
+      cleanupSucceeded: true, timeoutEnforced: true, outputBytes: Buffer.byteLength(SCRIPT) });
+
+    renderBlenderMock.mockResolvedValue({ success: true, png: PNG, width: 640, height: 360, logs: [], sandbox: 'none' });
+    const open = await new HeadlessRenderer().render(SCRIPT, { domain: 'blender' });
+    expect(open.containment?.networkIsolated).toBe(false);
+    expect(open.containment?.permissionsDenied).toBe(false);
+  });
+
   it('a bad script is a candidate failure the judge sees, not infrastructure', async () => {
     renderBlenderMock.mockResolvedValue({
       success: false, failureKind: 'script', logs: [],
@@ -93,7 +105,7 @@ describe('Blender runs only for an explicit blender domain', () => {
     const renderer = new HeadlessRenderer();
     const initialize = vi.spyOn(renderer, 'initialize');
     const result = await renderer.render(SCRIPT, domain ? { domain } : {});
-    expect(result).toEqual({ rendered: false, success: false, error: REFUSED, logs: [], errors: [REFUSED] });
+    expect(result).toEqual({ rendered: false, success: false, error: REFUSED, logs: [], errors: [REFUSED], pageErrors: [] });
     expect(renderBlenderMock).not.toHaveBeenCalled();
     expect(initialize).not.toHaveBeenCalled();
   });

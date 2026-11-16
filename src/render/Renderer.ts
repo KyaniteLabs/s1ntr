@@ -139,12 +139,15 @@ export class Renderer {
       if (!canvas) {
         throw new Error(`No canvas element found. The sketch may have failed to initialize.${this.formatDiagnostics(pageErrors, consoleErrors)}`);
       }
+      const image = await canvas.screenshot({ type: ext === '.png' ? 'png' : 'jpeg' });
+      // A sketch that threw up to the capture left a partial or blank canvas;
+      // saving it would pass a crash off as artwork.
+      if (pageErrors.length > 0) {
+        throw new Error(`The sketch threw while rendering.${this.formatDiagnostics(pageErrors, consoleErrors)}`);
+      }
 
       await fs.mkdir(outputDir, { recursive: true });
-      await canvas.screenshot({
-        path: outputPath,
-        type: ext === '.png' ? 'png' : 'jpeg',
-      });
+      await fs.writeFile(outputPath, image);
     } catch (error) {
       if (error instanceof Error) {
         const message = error.message.includes('Diagnostics:')

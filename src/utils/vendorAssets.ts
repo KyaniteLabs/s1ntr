@@ -19,6 +19,7 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import { VENDORED_LIBRARIES } from '../core/wrappers/VendoredLibraries.js';
 
 export const VENDOR_BASE_PATH = '/vendor';
 
@@ -39,7 +40,14 @@ export const VENDOR_ASSETS = {
 
 export type VendorAssetPath = (typeof VENDOR_ASSETS)[keyof typeof VENDOR_ASSETS];
 
-const VENDOR_ASSET_PATHS: ReadonlySet<string> = new Set(Object.values(VENDOR_ASSETS));
+// The capability libraries the prompts offer (VendoredLibraries) are served
+// too, so the two lists cannot drift: a library a model is told it may use
+// must never die at render as "unregistered". Prefix entries (thi.ng) are
+// directories, not files, and stay out.
+const VENDOR_ASSET_PATHS: ReadonlySet<string> = new Set([
+  ...Object.values(VENDOR_ASSETS),
+  ...Object.values(VENDORED_LIBRARIES).map((entry) => entry.file).filter((file) => !file.endsWith('/')),
+]);
 
 /** True when the path is one of the registered vendored asset URLs. */
 export function isVendorAssetPath(path: string): boolean {

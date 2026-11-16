@@ -45,6 +45,11 @@ export function executorForLane(lane: RotationLane): string | null {
       'gpt-5.6-terra': 'codex-terra',
       'gpt-5.6-sol': 'codex-sol',
     };
+    if (id === 'gpt-6.1-sol') {
+      // Dispatch runs Sol 6.1 as one executor per effort; only an exact effort inherits its health.
+      const effort = /^cli:\/\/codex\/(low|medium|high)(?:\/chat\/completions)?$/.exec(lane.baseUrl ?? '')?.[1];
+      return effort ? `codex-sol61-${effort}` : null;
+    }
     return codex[id] ?? null;
   }
   if (base === 'cli://agy' && id === 'gemini-3.7-flash-medium') return 'agy-gemini-flash';

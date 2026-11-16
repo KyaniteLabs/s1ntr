@@ -10,6 +10,7 @@ import { KINETIC_SYSTEM_PROMPT, buildKineticPrompt } from './kineticPrompt.js';
 import { KineticWrapper } from './KineticWrapper.js';
 import { Logger } from '../../utils/Logger.js';
 import { GenerationError } from '../../errors/GenerationError.js';
+import { answerCode } from '../../llm/ModelOutput.js';
 
 export type KineticGeneratorOptions = TierBasedGeneratorOptions;
 
@@ -182,8 +183,7 @@ export class KineticGenerator extends TierBasedGenerator {
   }
 
   private extractKineticHtml(text: string): string | null {
-    const fenced = text.match(/```(?:html)?\s*\n?([\s\S]*?)```/i)?.[1]?.trim();
-    const candidate = fenced || text.trim();
+    const candidate = answerCode(text, ['html']).trim();
     const start = candidate.search(/<!DOCTYPE\s+html|<html\b/i);
     if (start < 0) return null;
     const fromHtml = candidate.slice(start);
@@ -241,10 +241,7 @@ Regenerate a complete CSS-kinetic artwork:
   }
 
   private normalizeKineticHtml(code: string): string {
-    let cleaned = code
-      .replace(/^```(?:html)?\n?/i, '')
-      .replace(/\n?```$/i, '')
-      .trim();
+    let cleaned = answerCode(code, ['html']).trim();
 
     if (!/^<!DOCTYPE\s+html/i.test(cleaned) && /<html\b/i.test(cleaned)) {
       cleaned = `<!DOCTYPE html>\n${cleaned}`;

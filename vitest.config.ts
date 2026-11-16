@@ -28,6 +28,19 @@ const SLOW_TEST_PATTERNS = [
 const isFastCi = process.env.LIMINAL_CI_FAST === '1';
 const isSlowCi = process.env.LIMINAL_CI_SLOW === '1';
 
+// Coverage floors for the CI fast suite (`pnpm test:ci:fast:coverage`).
+// The fast suite skips SLOW_TEST_PATTERNS, so it covers less than a local full
+// run and cannot share the full-run ratchet below. These are the fast-suite
+// numbers CI measured (84.74 / 76.77 / 88.92 / 86.52) minus a 0.5-point margin
+// for run-to-run noise. They only go
+// UP: when a CI run reports higher coverage, raise them; never lower them.
+const FAST_CI_COVERAGE_FLOORS = {
+  statements: 84.2,
+  branches: 76.2,
+  functions: 88.4,
+  lines: 86.0,
+};
+
 const baseExclude = [
   'node_modules/**',
   'dist/**',
@@ -67,7 +80,8 @@ export default defineConfig({
       include: ['src/**/*.ts', 'src/**/*.tsx'],
       exclude: ['**/*.d.ts', '**/*.test.ts'],
       reportsDirectory: './coverage',
-      reporters: ['text', 'json', 'json-summary'],
+      // The per-file table is ~900 rows; CI only needs the totals.
+      reporter: isFastCi ? ['text-summary'] : ['text', 'json', 'json-summary'],
       thresholds: {
         // ━━━ Global coverage ratchet ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         // TARGET: 70% across all metrics (user-requested)
@@ -80,9 +94,9 @@ export default defineConfig({
         //
         // Ratchet is set to the current measured values (floor).
         // Coverage can only go UP, never DOWN, on local full-coverage runs.
-        // CI currently runs fast/slow suites with coverage disabled, so these
-        // thresholds are not a blocking CI gate until a coverage-producing CI
-        // path is restored.
+        // The four numbers below are the full-run ratchet. The Forgejo fast
+        // gate measures the fast suite and is held to FAST_CI_COVERAGE_FLOORS
+        // (spread in at the end of this object) instead.
         // autoUpdate will raise these as coverage improves toward 70%.
         //
         // autoUpdate rounds DOWN to 0.1% to prevent false failures
@@ -101,6 +115,9 @@ export default defineConfig({
         autoUpdate: isFastCi || isSlowCi
           ? undefined
           : (newThreshold: number) => Math.floor(newThreshold * 10) / 10,
+        // Keep this spread last, and the four literals above as literals:
+        // autoUpdate rewrites those literals in place.
+        ...(isFastCi ? FAST_CI_COVERAGE_FLOORS : {}),
       },
     },
   },

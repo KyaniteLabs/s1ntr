@@ -43,6 +43,7 @@ import {
   type ReviewerAttestationVerifier, type ReviewerExecutorAttestation,
   type SealedOwnerCampaignRef,
 } from './OwnerQualityReview.js';
+import { answerJson } from '../llm/ModelOutput.js';
 
 type OwnerReviewClient = Pick<LLMClient,
   'generate' | 'getHarnessExecutorProjection' | 'verifyPersistedExecutorCompletion'>;
@@ -238,9 +239,7 @@ function exactCompletion(client: OwnerReviewClient, digest: string): ExecutorAtt
 }
 
 function extractReviewJson(text: string): string {
-  const trimmed = text.trim();
-  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)```\s*$/i);
-  if (fenced) return fenced[1]!.trim();
+  const trimmed = answerJson(text);
   const start = trimmed.indexOf('{');
   const end = trimmed.lastIndexOf('}');
   return start >= 0 && end > start ? trimmed.slice(start, end + 1) : trimmed;

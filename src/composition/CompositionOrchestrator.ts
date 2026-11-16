@@ -59,6 +59,7 @@ import {
   type GenerationFailureProjection,
 } from '../runtime-core/generationAttemptSink.js';
 import type { GenerationAttemptTelemetryContext } from '../telemetry/generationAttemptEvent.js';
+import { answerJson } from '../llm/ModelOutput.js';
 
 export interface CompositionGenerationContext {
   runId: string;
@@ -637,7 +638,7 @@ export class CompositionOrchestrator {
     const validBlends = new Set<BlendMode>(['normal', 'screen', 'multiply', 'overlay', 'lighten', 'darken', 'difference', 'exclusion']);
     let parsed: unknown;
     try {
-      const json = raw.replace(/^[\s\S]*?```(?:json)?/i, '').replace(/```[\s\S]*$/i, '').trim() || raw.trim();
+      const json = answerJson(raw);
       const start = json.indexOf('{');
       const end = json.lastIndexOf('}');
       parsed = JSON.parse(start >= 0 && end > start ? json.slice(start, end + 1) : json);

@@ -724,6 +724,8 @@ describe('TierBasedGenerator (expanded)', () => {
       // Recovery call should include validation error text
       const recoveryCall = mockGenerateWithToolLoop.mock.calls[1][0];
       expect(recoveryCall.userPrompt).toContain('Test validation failed');
+      // The reply replaces the failed code whole, so the model must see it.
+      expect(recoveryCall.userPrompt).toContain('INVALID code that triggers validation failure');
     });
 
     it('throws when recovery also produces invalid code', async () => {

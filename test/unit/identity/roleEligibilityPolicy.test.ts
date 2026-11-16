@@ -171,12 +171,18 @@ describe('RoleEligibilityPolicy — Luna never harness', () => {
   });
 
   it('unrecognized requested effort fails closed even when resolved matches it (#1311)', () => {
-    const odd = { ...sol, effort: 'xhigh' } as unknown as ExecutorIdentity;
+    const odd = { ...sol, effort: 'ultra' } as unknown as ExecutorIdentity;
     const decision = decideRoleEligibility(request({ role: 'harness', requested: odd, resolved: odd }));
     expect(decision.ok).toBe(false);
     if (!decision.ok) {
       expect(decision.reason).toBe('effort-unknown');
     }
+  });
+
+  it('xhigh is a recognized effort between high and max (#1735)', () => {
+    const xhigh = { ...sol, effort: 'xhigh' } as ExecutorIdentity;
+    const decision = decideRoleEligibility(request({ role: 'harness', requested: xhigh, resolved: xhigh }));
+    expect(decision.ok).toBe(true);
   });
 
   it('missing effort fails closed (#1311)', () => {

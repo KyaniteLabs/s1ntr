@@ -20,6 +20,18 @@ import { bootstrapProductionLiminalRuntime } from
 const STRUDEL = 'stack(s("bd*4"), note("c3 e3 g3").s("sawtooth")).cpm(30)';
 const HYDRA = 'osc(10, 0.1, 1.2).rotate(0.3).out()';
 
+// Provider config is read from ~/.sinter when the modules above load, before any
+// beforeAll runs, so a developer host with a configured seat (e.g. GLM) leaked
+// into this file. Pin HOME to a temp dir before the imports evaluate.
+const pinnedHome = await vi.hoisted(async () => {
+  const { mkdtempSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'cli-provider-home-'));
+  process.env.HOME = dir;
+  return dir;
+});
+
 describe('governed CLI provider effect (#710): live-music and fix transports', () => {
   const roots: string[] = [];
   let fetchMock: ReturnType<typeof vi.fn>;
@@ -32,7 +44,7 @@ describe('governed CLI provider effect (#710): live-music and fix transports', (
   beforeAll(async () => {
     // The production executor authority is a process singleton bound to the
     // first HOME it sees, so one temp HOME serves the whole file.
-    home = await mkdtemp(path.join(os.tmpdir(), 'cli-provider-home-'));
+    home = pinnedHome;
     keyFile = path.join(home, '.sinter', 'authority', 'liminal-command-receipt.key');
     vi.stubEnv('HOME', home);
     vi.stubEnv('SINTER_EXECUTOR_AUTHORITY_ROOT', '');

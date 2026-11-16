@@ -80,6 +80,8 @@ describe('Dream research evidence admission', () => {
     expect(validateDreamEvidence({ ...base, interaction: { actions: 0,
       stateChanged: false } }, ['interaction']))
       .toContain('DREAM_INTERACTION_EVIDENCE_REQUIRED');
+    expect(validateDreamEvidence({ ...base, interaction: { actions: 1, stateChanged: null } }, ['interaction']))
+      .toEqual(['DREAM_INTERACTION_UNATTRIBUTABLE']);
     expect(validateDreamEvidence({ ...base, layerAblations: [] }, ['multi-layer']))
       .toContain('DREAM_LAYER_ABLATION_REQUIRED');
     expect(validateDreamEvidence({ ...base, interaction: { actions: 2,

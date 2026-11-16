@@ -395,8 +395,8 @@ describe('production Liminal runtime bootstrap', () => {
       .toBe(3);
     expect(retryA.prompt).toBe(command.prompt);
     await expect(Promise.resolve().then(() => runtime.createCommand({
-      prompt: 'text', domain: 'revideo' })))
-      .rejects.toThrow('LIMINAL_PRODUCTION_DOMAIN_UNSUPPORTED:revideo');
+      prompt: 'text', domain: 'nbe' })))
+      .rejects.toThrow('LIMINAL_PRODUCTION_DOMAIN_UNSUPPORTED:nbe');
     await runtime.close();
   });
 

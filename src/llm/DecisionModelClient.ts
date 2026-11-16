@@ -17,6 +17,7 @@
  */
 
 import { CapabilityRegistry } from './CapabilityRegistry.js';
+import { TIMEOUT_EVALUATOR_MS } from '../constants/limits.js';
 
 export type DecisionQuestion =
   | { readonly type: 'noul'; readonly instructions: string }
@@ -51,17 +52,45 @@ export interface DecisionModelClientConfig {
   readonly baseUrl: string;
   readonly model: string;
   readonly timeoutMs?: number;
+  /**
+   * Plain http to a non-loopback host sends the state and images unencrypted
+   * and unauthenticated; it needs this explicit opt-in. https is always allowed.
+   */
+  readonly allowRemoteHttp?: boolean;
+  /** Retries after a cold-start 503 or a connection failure (default 2). */
+  readonly retries?: number;
   /** Injected for tests; defaults to global fetch. */
   readonly fetchImpl?: typeof fetch;
+  /** Injected for tests; defaults to setTimeout. */
+  readonly sleepImpl?: (ms: number) => Promise<void>;
 }
 
-const DEFAULT_TIMEOUT_MS = 30_000;
+// d1 on llama.cpp can queue behind a cold load; 30 s failed real runs into
+// bug 17. Callers should pass the evaluator role timeout (#1423 bug 35).
+const DEFAULT_TIMEOUT_MS = TIMEOUT_EVALUATOR_MS;
+const DEFAULT_RETRIES = 2;
+const RETRY_BASE_MS = 1_000;
+
+function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  return host === 'localhost' || host === '::1' || /^127(\.\d{1,3}){3}$/.test(host);
+}
+
+/** Connection-level failures and llama.cpp's "model loading" 503 clear on their own. */
+function isRetryableDecisionFailure(error: unknown, status?: number): boolean {
+  if (status !== undefined) return status === 503;
+  if (!(error instanceof Error) || error.name === 'TimeoutError' || error.name === 'AbortError') return false;
+  return /fetch failed|econnrefused|econnreset|socket hang up/i.test(
+    `${error.message} ${String((error as { cause?: { code?: unknown } }).cause?.code ?? '')}`);
+}
 const SUPPORTED_TYPES = new Set(['noul', 'choice', 'score']);
 
 export class DecisionModelClient {
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;
+  private readonly retries: number;
+  private readonly sleep: (ms: number) => Promise<void>;
 
   constructor(private readonly config: DecisionModelClientConfig) {
     if (!config.model || !CapabilityRegistry.isDecisionModel(config.model)) {
@@ -70,9 +99,15 @@ export class DecisionModelClient {
     if (!/^https?:\/\//.test(config.baseUrl ?? '')) {
       throw new Error(`DECISION_MODEL_BASE_URL_INVALID: ${config.baseUrl || '(empty)'}`);
     }
+    const url = new URL(config.baseUrl);
+    if (url.protocol === 'http:' && !isLoopbackHost(url.hostname) && config.allowRemoteHttp !== true) {
+      throw new Error(`DECISION_MODEL_BASE_URL_REMOTE_HTTP: ${url.host} is not loopback; use https or set allowRemoteHttp`);
+    }
     this.baseUrl = config.baseUrl.replace(/\/+$/, '').replace(/\/v1$/, '');
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.fetchImpl = config.fetchImpl ?? fetch;
+    this.retries = Math.max(0, Math.floor(config.retries ?? DEFAULT_RETRIES));
+    this.sleep = config.sleepImpl ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
   }
 
   get model(): string {
@@ -87,20 +122,7 @@ export class DecisionModelClient {
         `data:${image.mimeType};base64,${image.data.toString('base64')}`),
       questions: request.questions,
     };
-    let response: Response;
-    try {
-      response = await this.fetchImpl(`${this.baseUrl}/v1/systemone`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(this.timeoutMs),
-      });
-    } catch (error) {
-      throw new Error(`DECISION_TRANSPORT_FAILED: ${error instanceof Error ? error.message : String(error)}`);
-    }
-    if (!response.ok) {
-      throw new Error(`DECISION_TRANSPORT_FAILED: HTTP ${response.status}`);
-    }
+    const response = await this.post(JSON.stringify(body));
     let payload: unknown;
     try {
       payload = await response.json();
@@ -108,6 +130,32 @@ export class DecisionModelClient {
       throw new Error('DECISION_RESPONSE_INVALID: body is not JSON');
     }
     return { model: this.config.model, answers: parseAnswers(payload, request.questions) };
+  }
+
+  private async post(body: string): Promise<Response> {
+    for (let attempt = 0; ; attempt++) {
+      let response: Response;
+      try {
+        response = await this.fetchImpl(`${this.baseUrl}/v1/systemone`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body,
+          signal: AbortSignal.timeout(this.timeoutMs),
+        });
+      } catch (error) {
+        if (attempt < this.retries && isRetryableDecisionFailure(error)) {
+          await this.sleep(RETRY_BASE_MS * 2 ** attempt);
+          continue;
+        }
+        throw new Error(`DECISION_TRANSPORT_FAILED: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (response.ok) return response;
+      if (attempt < this.retries && isRetryableDecisionFailure(undefined, response.status)) {
+        await this.sleep(RETRY_BASE_MS * 2 ** attempt);
+        continue;
+      }
+      throw new Error(`DECISION_TRANSPORT_FAILED: HTTP ${response.status}`);
+    }
   }
 }
 

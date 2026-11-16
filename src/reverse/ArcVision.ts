@@ -9,6 +9,7 @@ import { CapabilityRegistry } from '../llm/CapabilityRegistry.js';
 import { ArcValidationError, validateArc, type Arc } from './Arc.js';
 import { readLocalFile } from './ReferenceIngest.js';
 import { loadSharp } from './VisualFeatures.js';
+import { answerJson } from '../llm/ModelOutput.js';
 
 export const VISION_MAX_EDGE = 768;
 /** An image --arc may be a large photo; it is downscaled before it is sent. */
@@ -42,8 +43,7 @@ const SYSTEM = [
 ].join('\n');
 
 function extractJson(text: string): unknown {
-  const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
-  const body = (fenced ? fenced[1] : text).trim();
+  const body = answerJson(text);
   const from = body.indexOf('{');
   const to = body.lastIndexOf('}');
   return JSON.parse(from >= 0 && to > from ? body.slice(from, to + 1) : body);

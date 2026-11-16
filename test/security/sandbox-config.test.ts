@@ -33,6 +33,8 @@ describe('SandboxConfig', () => {
       expect(args).toContain('--disable-dev-shm-usage');
       expect(args).toContain('--no-first-run');
       expect(args).toContain('--disable-gpu');
+      // With --disable-gpu, WebGL draws only through software, as the renderer's does
+      expect(args).toContain('--enable-unsafe-swiftshader');
       
       // Should NOT include dangerous args
       expect(args).not.toContain('--no-sandbox');
@@ -135,7 +137,15 @@ describe('SandboxConfig', () => {
       expect(SECURE_CHROME_ARGS).toContain('--disable-dev-shm-usage');
       expect(SECURE_CHROME_ARGS).toContain('--no-first-run');
       expect(SECURE_CHROME_ARGS).toContain('--disable-gpu');
-      expect(SECURE_CHROME_ARGS).toContain('--disable-web-security=false');
+    });
+
+    // Chrome reads any --disable-web-security switch, "=false" included, as
+    // "turn web security off" (#1684).
+    it('never carries a --disable-web-security switch, in any form', () => {
+      const launches = [SECURE_CHROME_ARGS, getChromeArgs(), getChromeArgs({ forceDisableSandbox: true })];
+      for (const args of launches) {
+        expect(args.filter((arg) => arg.startsWith('--disable-web-security'))).toEqual([]);
+      }
     });
 
     it('should NOT contain --no-zygote or --single-process (incompatible with sandbox enabled)', () => {
@@ -189,6 +199,33 @@ describe('SandboxConfig', () => {
         }
       };
       walk(join(process.cwd(), 'src'));
+      expect(offenders).toEqual([]);
+    });
+
+    // Puppeteer adds no software WebGL, and with --disable-gpu (or no GPU)
+    // a WebGL sketch gets no context, so a check would judge a blank page
+    // the renderer never shows (#1681). Playwright adds the flag itself.
+    it('give every Puppeteer browser the software WebGL the renderer has', async () => {
+      const { readdirSync, readFileSync, statSync } = await import('node:fs');
+      const { join, relative } = await import('node:path');
+      const launches: string[] = [];
+      const offenders: string[] = [];
+      const walk = (dir: string): void => {
+        for (const name of readdirSync(dir)) {
+          const full = join(dir, name);
+          if (statSync(full).isDirectory()) { walk(full); continue; }
+          if (!/\.tsx?$/.test(name)) continue;
+          const code = readFileSync(full, 'utf8');
+          // A direct launch, or launch options handed to a library (Revideo).
+          for (const m of code.matchAll(/puppeteer(?:\.default)?\.launch\(\{[\s\S]*?\}\)|\bpuppeteer:\s*\{[\s\S]*?\}/g)) {
+            const where = `${relative(process.cwd(), full)}@${code.slice(0, m.index).split('\n').length}`;
+            launches.push(where);
+            if (!/getChromeArgs\(|SOFTWARE_WEBGL_ARGS|--enable-unsafe-swiftshader/.test(m[0])) offenders.push(where);
+          }
+        }
+      };
+      walk(join(process.cwd(), 'src'));
+      expect(launches.length).toBeGreaterThanOrEqual(8);
       expect(offenders).toEqual([]);
     });
   });

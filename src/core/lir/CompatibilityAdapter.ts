@@ -18,6 +18,7 @@ import type {
   LIRToken,
   SymbolKind,
 } from './types.js';
+import { fencedBlocks } from '../../llm/ModelOutput.js';
 
 /**
  * Language detection based on file extension
@@ -220,7 +221,7 @@ export function stringToLIR(source: string, content: string): LIRToken {
       codeReferences: [],
       metrics: {
         wordCount: countWords(content),
-        codeBlockCount: (content.match(/```/g) || []).length / 2,
+        codeBlockCount: fencedBlocks(content).length,
         linkCount: (content.match(/\[.*?\]\(.*?\)/g) || []).length,
         depth: 0,
       },

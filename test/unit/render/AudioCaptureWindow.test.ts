@@ -153,3 +153,64 @@ describe('summarizeAudioCapture', () => {
     expect(summarizeAudioCapture(undefined)).toBe(undefined);
   });
 });
+
+describe('audio judging window (#1641)', () => {
+  const g = globalThis as Record<string, unknown>;
+  afterEach(() => { delete g.window; vi.useRealTimers(); });
+  type Capture = (p: unknown, o: { stabilizationTime: number; audioCaptureMs?: number }) =>
+    Promise<{ samples: Float32Array; sampleRate: number; duration: number }>;
+  const capture = (page: unknown, o: { stabilizationTime: number; audioCaptureMs?: number }) => {
+    const r = new HeadlessRenderer();
+    return ((r as unknown as { captureAudio: Capture }).captureAudio).call(r, page, o);
+  };
+  /** A page whose buffer grows by `perWaitMs` of sound on every wait, on a fake clock. */
+  const growingPage = (startMs: number, perWaitMs: number) => {
+    const data: number[] = new Array(Math.round(44.1 * startMs)).fill(0.25);
+    g.window = { __audioCaptureData: data, __audioCaptureWarnings: [], __audioCaptureRate: 44_100 };
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const waits: number[] = [];
+    return {
+      waits,
+      waitForTimeout: async (ms: number) => {
+        waits.push(ms);
+        vi.setSystemTime(Date.now() + ms);
+        for (let i = 0; i < Math.round(44.1 * perWaitMs); i += 1) data.push(0.25);
+      },
+      evaluate: async (fn: (d?: number) => unknown, arg?: number) => fn(arg),
+    };
+  };
+
+  it('keeps a full 2 s window when the caller asks for one, not the 0.5 s settle time', async () => {
+    const page = growingPage(2_000, 0);
+    const r = await capture(page, { stabilizationTime: 500, audioCaptureMs: 2_000 });
+    expect(r.duration).toBe(2);
+    expect(r.samples.length).toBe(88_200);
+  });
+
+  it('waits for the window to fill when the sound is still arriving', async () => {
+    const page = growingPage(0, 250);
+    const r = await capture(page, { stabilizationTime: 500, audioCaptureMs: 2_000 });
+    expect(r.samples.length).toBe(88_200);
+    expect(r.samples.every((s) => s === 0.25)).toBe(true);
+  });
+
+  it('stops waiting at the window length when the piece never fills it', async () => {
+    const page = growingPage(0, 0);
+    const started = Date.now();
+    const r = await capture(page, { stabilizationTime: 500, audioCaptureMs: 2_000 });
+    expect(Date.now() - started).toBeLessThanOrEqual(2_500 + 250);
+    expect(r.duration).toBe(2);
+  });
+
+  it('keeps the old window when no audioCaptureMs is given', async () => {
+    const page = growingPage(2_000, 0);
+    const r = await capture(page, { stabilizationTime: 500 });
+    expect(r.samples.length).toBe(22_050);
+    expect(page.waits).toEqual([500]);
+  });
+
+  it('sizes the page-side buffer cap from the judging window', () => {
+    const script = (HeadlessRenderer as unknown as { audioCaptureScript: (ms: number) => string }).audioCaptureScript(10_000);
+    expect(script.endsWith(')(441000);</script>')).toBe(true);
+  });
+});

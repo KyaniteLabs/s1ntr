@@ -74,6 +74,7 @@ import {
   type ExperimentAuthorityPolicy,
   type ExperimentAuthorityReceipt,
 } from '../authority/ExperimentAuthority.js';
+import { pickCodeBlock, splitThinking } from '../../llm/ModelOutput.js';
 
 const AVAILABLE_TOOL_NAMES = [
   'readFile',
@@ -200,6 +201,17 @@ export interface AgentMessage {
   toolResult?: ToolResult;
 }
 
+/** Sum of the planning calls' reported usage; callsWithUnknownUsage > 0 means the totals are partial. */
+export interface SessionLLMUsage {
+  prompt: number;
+  completion: number;
+  /** null until a call reports thinking tokens; a provider that never reports them is unknown, not 0. */
+  reasoning: number | null;
+  total: number;
+  calls: number;
+  callsWithUnknownUsage: number;
+}
+
 export interface LLMSession {
   task: LLMTask;
   messages: AgentMessage[];
@@ -231,6 +243,8 @@ export interface LLMSession {
   exitReason?: string;
   /** Most recent planning-stage failure reason for operator diagnostics */
   lastPlanError?: string;
+  /** Token usage summed across this run's planning LLM calls */
+  llmUsage?: SessionLLMUsage;
   /** Current bounded focus file from the task packet's primary files */
   activeFocusFile?: string;
   /** Index of the active focus inside task.primaryFiles */
@@ -453,7 +467,11 @@ Task ID: ${task.id}
 Title: ${task.title}
 Description: ${task.description}${preflightSection}${resumeSection}${task.requiresMutation ? `
 
-Mutation requirement: this task is not complete until you make at least one successful writeFile/applyEdit mutation and then run the required verification target. Inspection-only/no-change outcomes are failures for this task.` : ''}
+Mutation requirement: this task is not complete until you make at least one successful writeFile/applyEdit mutation and then run the required verification target. Inspection-only/no-change outcomes are failures for this task.` : ''}${this.isBoundedInspectionTask(task) ? `
+
+${task.requiresMutation
+    ? `Step budget: ${maxSteps} steps. If no applyEdit/writeFile has landed by step ${this.boundedEditDeadlineStep(maxSteps)}, the run stops there and fails. Read the primary file, then edit early and spend the rest on verification.`
+    : `Step budget: ${maxSteps} steps. With no edit, the run ends after step ${this.boundedEditDeadlineStep(maxSteps)}; no edit is a valid outcome when none is warranted.`}` : ''}
 
 You are in LLM-driven mode. Plan your own steps. ${isResume ? 'Continue from where the previous run left off.' : 'Start by reading the relevant file(s).'}
 If readFile returns truncated=true with startLine/endLine, continue that file with offset=endLine rather than rereading from the top.
@@ -565,6 +583,8 @@ When the task is complete and build passes, respond with tool "complete".`;
 
         // Diagnose seats: after real inspection, force plan delivery — do not burn the budget on more recon.
         this.maybeInjectDiagnosePlanDeadline(session, maxSteps);
+        // Bounded mutation runs: warn before the 50% no-edit guardrail ends the run.
+        this.maybeInjectEditDeadline(session, maxSteps);
 
         // Get LLM's plan
         const toolCall = await this.getLLMPlan(session);
@@ -900,6 +920,25 @@ When the task is complete and build passes, respond with tool "complete".`;
   }
 
   /**
+   * `usage` undefined with `threw` means the call threw: it ran, so it counts as a call with unknown usage.
+   * Convention (same as OpenAIProvider and codex): outputTokens already includes thinkingTokens, so
+   * reasoning is a reported subset and total = prompt + completion, never adding reasoning again.
+   */
+  private recordPlanUsage(session: LLMSession | undefined, usage: PlanningLLMResult['usage']): void {
+    if (!session) return;
+    const sum = session.llmUsage ??= { prompt: 0, completion: 0, reasoning: null, total: 0, calls: 0, callsWithUnknownUsage: 0 };
+    sum.calls++;
+    if (usage?.inputTokens === undefined || usage.outputTokens === undefined) {
+      sum.callsWithUnknownUsage++;
+      return;
+    }
+    sum.prompt += usage.inputTokens;
+    sum.completion += usage.outputTokens;
+    if (usage.thinkingTokens !== undefined) sum.reasoning = (sum.reasoning ?? 0) + usage.thinkingTokens;
+    sum.total = sum.prompt + sum.completion;
+  }
+
+  /**
    * Get LLM's planned tool call
    */
   private async getLLMPlan(session: LLMSession): Promise<ToolCall | null> {
@@ -941,14 +980,21 @@ When the task is complete and build passes, respond with tool "complete".`;
       if (resolvePromptTier(llmConfig.model, llmConfig.provider) === 'compact')
         Logger.warn('LLMModeAgent', `Agentic planning requires full-tier prompts; model "${llmConfig.model}" resolved compact, proceeding with full prompt.`);
       const planMaxTokens = this.planningMaxTokens(session);
-      const response = await this.llmClient.complete({
-        systemPrompt,
-        prompt: conversation + '\n\nWhat is your next tool call? Respond with JSON only.',
-        maxTokens: planMaxTokens,
-        temperature: 0.2, // Low temperature for deterministic tool calls
-        imageInputs: visionInputs,
-        jsonMode: true,
-      }) as PlanningLLMResponse;
+      let response: PlanningLLMResponse;
+      try {
+        response = await this.llmClient.complete({
+          systemPrompt,
+          prompt: conversation + '\n\nWhat is your next tool call? Respond with JSON only.',
+          maxTokens: planMaxTokens,
+          temperature: 0.2, // Low temperature for deterministic tool calls
+          imageInputs: visionInputs,
+          jsonMode: true,
+        }) as PlanningLLMResponse;
+      } catch (error) {
+        this.recordPlanUsage(session, undefined);
+        throw error;
+      }
+      this.recordPlanUsage(session, response.usage);
 
       if (response.success === false) {
         return { failure: this.formatPlanningFailure(response), provider: response.provider, model: response.model };
@@ -1020,14 +1066,21 @@ When the task is complete and build passes, respond with tool "complete".`;
           messages = this.budgetPlanningMessages(messages);
           const conversation = messages.map(m => `${m.role}: ${m.content}`).join('\n\n---\n\n');
           const planMaxTokens = Math.max(this.planningMaxTokens(session), 16384);
-          const response = await this.llmClient.complete({
-            systemPrompt,
-            prompt: conversation + '\n\nWhat is your next tool call? Respond with JSON only.',
-            maxTokens: planMaxTokens,
-            temperature: 0.2,
-            imageInputs: visionInputs,
-            jsonMode: true,
-          }) as PlanningLLMResponse;
+          let response: PlanningLLMResponse;
+          try {
+            response = await this.llmClient.complete({
+              systemPrompt,
+              prompt: conversation + '\n\nWhat is your next tool call? Respond with JSON only.',
+              maxTokens: planMaxTokens,
+              temperature: 0.2,
+              imageInputs: visionInputs,
+              jsonMode: true,
+            }) as PlanningLLMResponse;
+          } catch (error) {
+            this.recordPlanUsage(session, undefined);
+            throw error;
+          }
+          this.recordPlanUsage(session, response.usage);
           if (response.success === false) {
             return { failure: this.formatPlanningFailure(response), provider: response.provider, model: response.model };
           }
@@ -1067,16 +1120,10 @@ When the task is complete and build passes, respond with tool "complete".`;
 
       // Strip <think/>, <thinkContent/>, and similar reasoning wrappers
       // Models like MiniMax M2.7 wrap reasoning in these tags before the JSON
-      text = text.replace(/<think\b[^>]*>[\s\S]*?<\/think>/gi, '')
-                 .replace(/<thinkContent\b[^>]*>[\s\S]*?<\/thinkContent>/gi, '')
-                 .replace(/<reasoning\b[^>]*>[\s\S]*?<\/reasoning>/gi, '')
-                 .trim();
+      text = splitThinking(text).answer.trim();
 
       // Extract JSON from markdown code blocks if present
-      const jsonMatch = text.match(/```json\s*([\s\S]*?)```/) ||
-                        text.match(/```\s*([\s\S]*?)```/) ||
-                        [null, text];
-      const jsonStr = jsonMatch[1] || text;
+      const jsonStr = pickCodeBlock(text, ['json'])?.body || text;
 
       const toolCall = await this.parseToolCallText(session, text);
       if (!toolCall) {
@@ -1127,10 +1174,7 @@ When the task is complete and build passes, respond with tool "complete".`;
   }
 
   private async parseToolCallText(session: LLMSession, text: string): Promise<ToolCall | null> {
-    const jsonMatch = text.match(/```json\s*([\s\S]*?)```/) ||
-      text.match(/```\s*([\s\S]*?)```/) ||
-      [null, text];
-    const jsonStr = jsonMatch[1] || text;
+    const jsonStr = pickCodeBlock(text, ['json'])?.body || text;
     const jsonText = this.extractFirstJsonObject(jsonStr);
 
     if (!jsonText) {
@@ -1185,23 +1229,27 @@ When the task is complete and build passes, respond with tool "complete".`;
   private async repairPlainTextToolCall(text: string): Promise<ToolCall | null> {
     if (text.trim().length === 0) return null;
     try {
-      const response = await this.llmClient.complete({
-        systemPrompt: 'Convert the previous agent response into one valid Sinter tool-call JSON object. Return JSON only.',
-        prompt: `Previous response:
+      let response: PlanningLLMResponse | undefined;
+      try {
+        response = await this.llmClient.complete({
+          systemPrompt: 'Convert the previous agent response into one valid Sinter tool-call JSON object. Return JSON only.',
+          prompt: `Previous response:
 ${text.slice(0, 4000)}
 
 Return exactly one JSON object with keys thought, tool, params, expectedResult. Use only an allowed tool such as readFile, search, applyEdit, writeFile, runTests, runBuild, typeCheck, or complete.`,
-        maxTokens: 800,
-        temperature: 0,
-        jsonMode: true,
-      }) as PlanningLLMResponse | undefined;
+          maxTokens: 800,
+          temperature: 0,
+          jsonMode: true,
+        }) as PlanningLLMResponse | undefined;
+      } catch (error) {
+        this.recordPlanUsage(this.currentSession, undefined);
+        throw error;
+      }
+      this.recordPlanUsage(this.currentSession, response?.usage);
       // Treat missing/undefined success as non-repair (tests + flaky providers).
       if (!response || response.success === false || !response.text) return null;
 
-      const cleaned = response.text.replace(/<think\b[^>]*>[\s\S]*?<\/think>/gi, '')
-        .replace(/<thinkContent\b[^>]*>[\s\S]*?<\/thinkContent>/gi, '')
-        .replace(/<reasoning\b[^>]*>[\s\S]*?<\/reasoning>/gi, '')
-        .trim();
+      const cleaned = splitThinking(response.text).answer.trim();
       const jsonText = this.extractFirstJsonObject(cleaned);
       if (!jsonText) return null;
       const parsed = JSON.parse(jsonText);
@@ -1946,11 +1994,44 @@ Return exactly one JSON object with keys thought, tool, params, expectedResult. 
   }
 
   private isBoundedInspectionRun(session: LLMSession): boolean {
+    return this.isBoundedInspectionTask(session.task);
+  }
+
+  private isBoundedInspectionTask(task: LLMTask): boolean {
     // Diagnose/plan seats are free inspection + complete(params.plan). They must not
     // hit the mutation-oriented "bounded inspection success with no edit" exit.
-    if (this.isDiagnoseOnlyTask(session.task)) return false;
-    return session.task.id.startsWith('tui-self-') ||
-      session.task.completionPolicy === 'stop_after_verification';
+    if (this.isDiagnoseOnlyTask(task)) return false;
+    return task.id.startsWith('tui-self-') ||
+      task.completionPolicy === 'stop_after_verification';
+  }
+
+  /** Last step a bounded run may plan before shouldStopForBoundedInspection ends a mutation-free run. */
+  private boundedEditDeadlineStep(maxSteps: number): number {
+    return Math.ceil(maxSteps / 2);
+  }
+
+  /**
+   * Once per bounded run with no mutation yet: warn before the bounded-inspection guardrail
+   * fires. Without it the model never learns the guardrail exists (crsi/team turn 1, 2026-11-16:
+   * Sol read 12/24 and 10/20 steps, then was cut off with no edit on all three self-improve tasks).
+   */
+  private maybeInjectEditDeadline(session: LLMSession, maxSteps: number): void {
+    if (!this.isBoundedInspectionRun(session) || session.task.requiresMutation !== true) return;
+    if (session.stepCount < 2) return;
+    if (session.mutatedFiles.size > 0 || session.backups.length > 0) return;
+    const last = this.boundedEditDeadlineStep(maxSteps);
+    const left = last - session.stepCount + 1;
+    if (left > 3 || left < 1) return;
+    const marker = 'EDIT DEADLINE';
+    if (session.messages.some(m => typeof m.content === 'string' && m.content.includes(marker))) return;
+    session.messages.push({
+      role: 'user',
+      content:
+        `${marker} (step ${session.stepCount}/${maxSteps}): no applyEdit/writeFile has landed yet. ` +
+        `This run stops after step ${last} unless one does: ${left} planning step${left === 1 ? '' : 's'} left, this one included. ` +
+        `Stop inspecting. Make your best scoped edit now with applyEdit or writeFile, then verify it.`,
+    });
+    Logger.info('LLMModeAgent', `${marker} injected at step ${session.stepCount}/${maxSteps} (last=${last})`);
   }
 
   private isMeaningfulInspectionTool(tool: string): boolean {
@@ -2171,7 +2252,7 @@ Return exactly one JSON object with keys thought, tool, params, expectedResult. 
     if (!this.isBoundedInspectionRun(session)) return false;
 
     // Must have spent more than half the budget
-    if (session.stepCount <= Math.ceil(maxSteps / 2)) return false;
+    if (session.stepCount <= this.boundedEditDeadlineStep(maxSteps)) return false;
 
     // Must have no mutations at all
     if (session.mutatedFiles.size > 0 || session.backups.length > 0) return false;

@@ -24,6 +24,7 @@ import { ThreeWrapper } from '../core/wrappers/ThreeWrapper.js';
 import { GenericWrapper } from '../core/wrappers/GenericWrapper.js';
 import { vendorPathForUrl } from './browserAssetFallbacks.js';
 import type { DomainString } from '../types/domains.js';
+import { answerCode } from '../llm/ModelOutput.js';
 
 export type Domain = Extract<DomainString, 'p5' | 'shader' | 'three' | 'strudel' | 'hydra' | 'tone' | 'revideo' | 'hyperframes' | 'svg' | 'html' | 'dataviz' | 'meta' | 'ascii' | 'blender'>;
 
@@ -163,9 +164,7 @@ export class HTMLWrapper {
    * Strip common LLM output contaminants that break HTML detection
    */
   private static stripLLMContaminants(code: string): string {
-    return code
-      .replace(/```\w*\n/g, '')
-      .replace(/```\s*$/g, '')
+    return answerCode(code)
       .replace(/^\uFEFF/, '')
       .replace(/[\u200B-\u200D\uFEFF]/g, '')
       .replace(/^Here is (the|your|a) (code|HTML|sketch|shader|scene):?\s*/i, '')
@@ -310,7 +309,7 @@ export class HTMLWrapper {
         wrapped = GenericWrapper.wrap(code, { domain: 'hyperframes', title });
         break;
       case 'ascii':
-        // A caller-named page (production's 'Liminal Artwork') must not show the
+        // A caller-named page (production's 'S1NTR' title) must not show the
         // generic "ASCII Art" chrome: textgen poems render through this wrapper.
         wrapped = GenericWrapper.wrap(code, {
           domain: 'ascii', asciiWidth, compositionForeground,

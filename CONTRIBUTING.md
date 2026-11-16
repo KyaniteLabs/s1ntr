@@ -6,8 +6,8 @@ Thank you for your interest in contributing to Sinter!
 
 ```bash
 # Clone and install
-git clone https://github.com/KyaniteLabs/liminal.git
-cd liminal
+git clone https://github.com/KyaniteLabs/s1ntr.git
+cd s1ntr
 pnpm install
 
 # Build
@@ -64,11 +64,11 @@ chore: update dependencies
 
 ### Test Coverage
 
-The project maintains a **70% coverage threshold** across lines, branches, functions, and statements. New code must include corresponding tests. CI runs the fast and slow suites with coverage off, so nothing in CI enforces the threshold; `pnpm run test:coverage` checks it locally. The slow suite exists to exercise browser, render, e2e, and provider-dependent paths without turning every PR into a long-running full-system burn. See [CLAUDE.md](./CLAUDE.md#coverage-target-mandatory--all-agents) for current metrics.
+The project maintains a **70% coverage threshold** across lines, branches, functions, and statements. New code must include corresponding tests. CI runs the fast and slow suites with coverage off, so nothing in CI enforces the threshold; `pnpm run test:coverage` checks it locally. The slow suite exists to exercise browser, render, e2e, and provider-dependent paths without turning every PR into a long-running full-system burn.
 
 ## Architecture
 
-See [Architecture & Philosophy](./docs/ARCHITECTURE_AND_PHILOSOPHY.md) for the system design and [Architecture Quick Reference](./docs/ARCHITECTURE_QUICKREF.md) for a visual overview. Key directories:
+The [handbook](https://docs.s1ntr.com/) covers the system design. Key directories:
 
 | Directory | Purpose |
 |-----------|---------|

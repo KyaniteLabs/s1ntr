@@ -44,7 +44,7 @@ describe('LLMClient Code Validation', () => {
     });
 
     it('strips <think/> tags from content', () => {
-      const content = '<think<Let me think about this...</think<\n```javascript\nfunction test() { return 42; }\n```';
+      const content = '<think>Let me think about this...</think>\n```javascript\nfunction test() { return 42; }\n```';
       const result = sanitizeOutput(content);
       expect(result.success).toBe(true);
       expect(result.code).not.toContain('<think');

@@ -17,6 +17,8 @@ import type { LayerAdapter, Export, Import } from './index.js';
 import type { RenderContext } from '../CompositionEngine.js';
 import { Logger } from '../../utils/Logger.js';
 import { VENDOR_ASSETS } from '../../utils/vendorAssets.js';
+import { hasStrudelPattern } from '../../core/validators/StrudelValidator.js';
+import { scriptString } from '../../utils/scriptEmbed.js';
 
 /** Strudel REPL interface */
 interface StrudelRepl {
@@ -301,13 +303,13 @@ export class StrudelAdapter implements LayerAdapter {
     }
 
     // Check for pattern functions
-    const hasPatternFunction = /\$:\s*s\(|\.stack\(|sound\(|note\(|\bs\(["']/.test(code);
-    if (!hasPatternFunction) {
+    if (!hasStrudelPattern(code)) {
       errors.push('Strudel code must contain pattern functions: s(), note(), stack(), or sound()');
     }
 
-    // Check for non-ASCII characters
-    if (/[\u4e00-\u9fff]/.test(code)) {
+    // Any non-ASCII character, comments included: the transpiler rejects em-dashes and curly quotes too
+    // eslint-disable-next-line no-control-regex -- the gate exists to detect non-ASCII
+    if (/[^\x00-\x7F]/.test(code)) {
       errors.push('Strudel code contains non-ASCII characters');
     }
 
@@ -338,7 +340,6 @@ export class StrudelAdapter implements LayerAdapter {
    * @returns HTML script element as a string
    */
   generateScript(layer: Layer, _settings: GlobalSettings): string {
-    const artwork = layer.code.replace(/`/g, '\\`');
 
     return `
 <!-- Strudel (vendored bundle) -->
@@ -346,7 +347,7 @@ export class StrudelAdapter implements LayerAdapter {
 <script>
 (function() {
   strudel.initStrudel().then(function () {
-    strudel.evaluate(\`${artwork}\`);
+    strudel.evaluate(${scriptString(layer.code)});
   });
 })();
 </script>`;

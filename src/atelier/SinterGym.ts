@@ -65,9 +65,13 @@ export class SinterGym {
           const q = (axes.D + axes.A) / 2;
           const list = seenDomains.get(domain) ?? [];
           list.push(q); seenDomains.set(domain, list);
-          this.controlMedians.set(domain, [...list].sort((a, b) => a - b)[Math.floor(list.length / 2)]);
           this.episodes.push({ turn: t.turn, domain, axes, arm: t.arm ?? '?', lessonIds: [] });
         } catch { /* skip */ }
+      }
+      // One sort per domain after the read: sorting inside the loop re-sorted a
+      // domain's whole history on every line (quadratic in logged turns).
+      for (const [domain, list] of seenDomains) {
+        this.controlMedians.set(domain, list.sort((a, b) => a - b)[Math.floor(list.length / 2)]);
       }
     }
     if (existsSync(controlPath)) {

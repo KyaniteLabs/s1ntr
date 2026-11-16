@@ -13,7 +13,7 @@ export interface ThinkingConfig {
   /** Anthropic: exact token count */
   budgetTokens?: number;
   /** OpenAI/Gemini/Anthropic adaptive: effort level */
-  effort?: 'low' | 'medium' | 'high' | 'max';
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 }
 
 export interface ToolDefinition {
@@ -89,7 +89,9 @@ export interface NormalizedThinking {
 
 export interface TokenUsage {
   inputTokens: number;
+  /** Every generated token, thinking included. */
   outputTokens: number;
+  /** The reasoning part of outputTokens, when the provider reports it. Never add it to outputTokens again. */
   thinkingTokens?: number;
 }
 
@@ -123,6 +125,8 @@ export interface ProviderConfig {
   logicalProvider?: string;
   /** Caller-declared GLM coding-plan subscription seat (A005/Sol seat law). */
   glmCodingPlanSeat?: boolean;
+  /** Caller-declared MiniMax Token Plan subscription seat. */
+  minimaxTokenPlanSeat?: boolean;
   apiKey?: string;
   model: string;
   temperature?: number;

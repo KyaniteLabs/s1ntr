@@ -134,10 +134,9 @@ export class ToneValidator {
     if (/^<!DOCTYPE|^<html/i.test(code.trim())) return [];
 
     try {
-      parse(code, {
-        sourceType: 'module',
-        allowReturnOutsideFunction: true,
-      });
+      // The shell runs the piece in a try block of a classic <script>: no
+      // top-level return, await or import.
+      parse(code, { sourceType: 'script' });
       return [];
     } catch (error) {
       return [`Tone.js code has invalid JavaScript syntax: ${error instanceof Error ? error.message : String(error)}`];

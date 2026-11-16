@@ -1548,8 +1548,9 @@ export function createApp(configPath, port = 5174, options = {}) {
         {
           input: campaignState.input,
           ownerReviewBriefIds: campaignState.ownerReviewPackage.briefIds,
-          ownerReviews: (admission, candidateManifests) => campaignState.ownerReviewPackage.buildInputs(
-            campaignState.campaignService, admission, campaignState.manifest, candidateManifests),
+          ownerReviews: async (admission, candidateManifests) => campaignState.ownerReviewPackage.buildInputs(
+            campaignState.campaignService, admission, campaignState.manifest, candidateManifests,
+            await campaignState.ownerReviewPackage.captureEvidence(candidateManifests)),
         },
       );
       const executions = journey.result?.executions ?? [];

@@ -1,5 +1,6 @@
 import type { RenderEvidence } from '../core/types/GenerationEvaluation.js';
 import type { AudioCaptureResult } from './HeadlessRenderer.js';
+import { audioFloorFailure, measureAudio } from './AudioFloor.js';
 
 /** Summarize measured samples without retaining the raw capture in evidence. */
 export function summarizeAudioCapture(audio?: AudioCaptureResult): RenderEvidence['audio'] {
@@ -12,6 +13,8 @@ export function summarizeAudioCapture(audio?: AudioCaptureResult): RenderEvidenc
     sumSquares += sample * sample;
   }
   const rmsAmplitude = audio.samples.length > 0 ? Math.sqrt(sumSquares / audio.samples.length) : 0;
+  const measured = audio.success ? measureAudio(audio.samples) : null;
+  const floorFailure = audioFloorFailure(measured);
   return {
     // Captured-but-all-zero is silence: 'audible' with peak 0 contradicted itself.
     success: audio.success && peakAmplitude > 0,
@@ -21,5 +24,8 @@ export function summarizeAudioCapture(audio?: AudioCaptureResult): RenderEvidenc
     rmsAmplitude: Math.round(rmsAmplitude * 1_000_000) / 1_000_000,
     error: audio.error,
     warningCount: audio.warnings?.length ?? 0,
+    ...(measured ? { silentShare: measured.silentShare, loudnessDb: measured.loudnessDb,
+      noisiness: measured.noisiness } : {}),
+    ...(floorFailure ? { floorFailure } : {}),
   };
 }

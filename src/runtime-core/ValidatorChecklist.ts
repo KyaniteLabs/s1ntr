@@ -81,6 +81,17 @@ export const DOMAIN_CHECKLISTS: Readonly<Record<string, readonly string[]>> = Ob
     'substantial output — a receipt under the minimum size fails validation',
     'vary the line lengths — fewer than 3 distinct lengths among non-empty lines is rejected as a non-generative receipt',
   ],
+  blender: [
+    'a raw Python script that imports bpy (no HTML, no markdown fences)',
+    'no network, subprocess, shell, os file access or exec/eval — those constructs are rejected before Blender runs',
+    'build objects, a light and a camera, and set bpy.context.scene.camera',
+    'never call bpy.ops.render or set the output path: the host renders one capped still',
+  ],  revideo: [
+    'one Revideo scene source file (TSX): export default makeScene2D("SceneName", function* (view) { ... }) — no HTML, no markdown fences',
+    'import only from @revideo/2d and @revideo/core; @revideo/react, Remotion, React.FC, useCurrentFrame, p5 setup()/draw() are rejected',
+    'nothing external: no fetch, no URL images or video, no staticFile, no Audio/Video nodes — the render is offline',
+    'the scene must animate (yield* on node signals) and end: total length between 4 and 20 seconds',
+  ],
 });
 
 /** User-prompt block for a domain; empty string when the domain has no list. */

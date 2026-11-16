@@ -44,7 +44,7 @@ describe('composition layer-plan export', () => {
     expect(plan.schema).toBe('sinter.layer-plan');
     expect(plan.schemaVersion).toBe('1.0');
     expect(plan.id).toBe('calm-orbit');
-    expect(plan.provenance.sinterVersion).toBe('2.4.0');
+    expect(plan.provenance.sinterVersion).toBe('2.5.0');
     expect(plan.provenance.creativeThesis?.thesisId).toBe(result.creativeThesis?.thesisId);
     expect(Number.isNaN(Date.parse(plan.provenance.generatedAt))).toBe(false);
     expect(plan.layers.map(layer => layer.sourceIndex)).toEqual([0, 2, 3]);

@@ -16,6 +16,7 @@ const KNOWN_COMMANDS = new Set([
   'prompt-next',
   'conductor',
   'rotate',
+  'hillclimb',
   'best-of',
   'second-judge',
   'third-judge',

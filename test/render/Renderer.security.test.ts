@@ -28,6 +28,10 @@ const { mockLaunch, mockRequestHandlers, mockPage, mockAccess, mockMkdir } = vi.
   return { mockLaunch, mockRequestHandlers, mockPage, mockAccess, mockMkdir };
 });
 
+vi.mock('../../src/utils/browserAssetFallbacks.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/utils/browserAssetFallbacks.js')>()),
+  resolveChromiumExecutablePath: () => '/opt/chromium',
+}));
 vi.mock('puppeteer', () => ({
   default: { launch: mockLaunch },
 }));
@@ -36,6 +40,7 @@ vi.mock('fs/promises', () => ({
   default: {
     access: mockAccess,
     mkdir: mockMkdir,
+    writeFile: vi.fn().mockResolvedValue(undefined),
   },
 }));
 

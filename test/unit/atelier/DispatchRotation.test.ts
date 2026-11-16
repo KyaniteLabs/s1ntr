@@ -10,6 +10,11 @@ describe('Dispatch rotation health', () => {
     expect(executorForLane({ modelId: 'glm-5.3', provider: 'anthropic', baseUrl: 'https://other.example/api.z.ai/' })).toBeNull();
     expect(executorForLane({ modelId: 'gpt-5.6-sol', provider: 'cli', baseUrl: 'cli://codex' })).toBe('codex-sol');
     expect(executorForLane({ modelId: 'gpt-5.6-sol', provider: 'cli', baseUrl: 'cli://codex/chat/completions' })).toBe('codex-sol');
+    // Sol 6.1 maps to the Dispatch executor for its exact effort; xhigh/max have none (#1611 bug).
+    expect(executorForLane({ modelId: 'gpt-6.1-sol', provider: 'cli', baseUrl: 'cli://codex/high' })).toBe('codex-sol61-high');
+    expect(executorForLane({ modelId: 'gpt-6.1-sol', provider: 'cli', baseUrl: 'cli://codex/low/chat/completions' })).toBe('codex-sol61-low');
+    expect(executorForLane({ modelId: 'gpt-6.1-sol', provider: 'cli', baseUrl: 'cli://codex/xhigh' })).toBeNull();
+    expect(executorForLane({ modelId: 'gpt-6.1-sol', provider: 'cli', baseUrl: 'cli://codex' })).toBeNull();
     expect(executorForLane({ modelId: 'gpt-6-luna', provider: 'cli', baseUrl: 'cli://codex' })).toBe('codex-luna');
     expect(executorForLane({ modelId: 'qwen/qwen3.8-27b:free', provider: 'openai', baseUrl: 'https://api.kilo.ai/api/gateway' })).toBe('kilo-free-auto');
     expect(executorForLane({ modelId: 'qwen/qwen3.8-27b:free', provider: 'openai', baseUrl: 'https://api.kilo.ai/v1' })).toBeNull();

@@ -30,6 +30,7 @@ import { TierBasedGenerator, type TierBasedGeneratorOptions } from '../TierBased
 import { HTMLValidator } from '../../core/validators/HTMLValidator.js';
 import { stripLeadingMetaDescriptor } from '../../core/validators/MetaDescriptor.js';
 import { GenerationError } from '../../errors/GenerationError.js';
+import { htmlBlock, splitThinking } from '../../llm/ModelOutput.js';
 
 export { stripLeadingMetaDescriptor } from '../../core/validators/MetaDescriptor.js';
 
@@ -222,17 +223,14 @@ export class MetaGenerator extends TierBasedGenerator {
    * Mirrors DataVizGenerator.extractHTML but keeps any leading descriptor comment.
    */
   private extractHTML(code: string): string {
-    const fenceMatch = code.match(/```html\s*([\s\S]*?)```/i);
-    if (fenceMatch) {
-      const prefix = code.slice(0, fenceMatch.index ?? 0);
+    const block = htmlBlock(code);
+    if (block) {
       // Preserve a descriptor comment the model emitted before the fence.
-      const descriptorBefore = this.sliceDescriptorComment(prefix);
-      return `${descriptorBefore}${fenceMatch[1].trim()}`;
+      return `${this.sliceDescriptorComment(block.before)}${block.body}`;
     }
-    if (code.includes(DESCRIPTOR_OPEN) || code.includes('<!DOCTYPE html>') || /<html[\s>]/i.test(code)) {
-      let cleaned = code.trim();
-      cleaned = cleaned.replace(/```(?:html)?\s*/gi, '');
-      cleaned = cleaned.replace(/```/g, '');
+    const { answer } = splitThinking(code);
+    if (answer.includes(DESCRIPTOR_OPEN) || answer.includes('<!DOCTYPE html>') || /<html[\s>]/i.test(answer)) {
+      let cleaned = answer.trim();
       // Drop any prose before the descriptor comment or the doctype, whichever comes first.
       const descIdx = cleaned.indexOf(DESCRIPTOR_OPEN);
       const docIdx = cleaned.search(/<!DOCTYPE html>|<html[\s>]/i);

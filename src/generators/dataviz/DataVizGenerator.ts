@@ -15,6 +15,7 @@
 import { TierBasedGenerator, type TierBasedGeneratorOptions } from '../TierBasedGenerator.js';
 import { HTMLValidator } from '../../core/validators/HTMLValidator.js';
 import { GenerationError } from '../../errors/GenerationError.js';
+import { htmlBlock, splitThinking } from '../../llm/ModelOutput.js';
 
 export interface DataVizGeneratorOptions extends TierBasedGeneratorOptions {
   title?: string;
@@ -109,18 +110,13 @@ export class DataVizGenerator extends TierBasedGenerator {
    * HTMLWebGenerator.extractHTML.
    */
   private extractHTML(code: string): string {
-    const fenceMatch = code.match(/```html\s*([\s\S]*?)```/i);
-    if (fenceMatch) {
-      const prefix = code.slice(0, fenceMatch.index).trim();
-      const doctype = /<!DOCTYPE\s+html>/i.test(prefix) ? '<!DOCTYPE html>\n' : '';
-      return `${doctype}${fenceMatch[1].trim()}`;
+    const block = htmlBlock(code);
+    if (block) {
+      const doctype = /<!DOCTYPE\s+html>/i.test(block.before) ? '<!DOCTYPE html>\n' : '';
+      return `${doctype}${block.body}`;
     }
-    if (code.includes('<!DOCTYPE html>') || /<html[\s>]/i.test(code)) {
-      let cleaned = code.trim();
-      cleaned = cleaned.replace(/```(?:html)?\s*/gi, '');
-      cleaned = cleaned.replace(/```/g, '');
-      return cleaned.trim();
-    }
+    const { answer } = splitThinking(code);
+    if (answer.includes('<!DOCTYPE html>') || /<html[\s>]/i.test(answer)) return answer.trim();
     throw new Error('DataVizGenerator: LLM output is not a valid HTML document');
   }
 

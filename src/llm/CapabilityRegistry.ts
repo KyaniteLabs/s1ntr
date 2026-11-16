@@ -189,14 +189,16 @@ const MODEL_CAPABILITIES: Record<string, Partial<ModelCapabilities>> = {
   'codestral*':         { thinking: false, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 32000, thinkingStyle: 'none', streamingStyle: 'json_lines' },
 
   // Liquid AI LFM3 family (released 2026-10-27; docs.liquid.ai/lfm/models).
-  // Six ~2B models on one LFM3-1.7B backbone. Tool use and thinking are not
-  // documented, so both stay off. Context: 256K is documented for the text
+  // Six ~2B models on one LFM3-1.7B backbone. Tool use is not documented, so
+  // it stays off. The generative models always think: the chat template opens a
+  // thought, llama.cpp returns it as reasoning_content, and OpenAIProvider gives
+  // every LFM3 call a thought budget. Context: 256K is documented for the text
   // model and 128K for d1-2B (built on VL-2B); the other generative variants'
   // context is undocumented, so they take the conservative 128K of their sibling.
-  '*lfm3-1.7b*':        { kind: 'generative', thinking: false, streaming: true, jsonMode: true, toolUse: false, maxContextTokens: 256000, thinkingStyle: 'none', streamingStyle: 'sse', inputModalities: ['text'], outputModalities: ['text'] },
-  '*lfm3-vl-2b*':       { kind: 'generative', thinking: false, streaming: true, jsonMode: true, toolUse: false, maxContextTokens: 128000, thinkingStyle: 'none', streamingStyle: 'sse', inputModalities: ['text', 'image'], outputModalities: ['text'] },
-  '*lfm3-audio-2b*':    { kind: 'generative', thinking: false, streaming: true, jsonMode: false, toolUse: false, maxContextTokens: 128000, thinkingStyle: 'none', streamingStyle: 'sse', inputModalities: ['text', 'audio'], outputModalities: ['text', 'audio'] },
-  '*lfm3-omni-2b*':     { kind: 'generative', thinking: false, streaming: true, jsonMode: false, toolUse: false, maxContextTokens: 128000, thinkingStyle: 'none', streamingStyle: 'sse', inputModalities: ['text', 'image', 'video', 'audio'], outputModalities: ['text', 'audio'] },
+  '*lfm3-1.7b*':        { kind: 'generative', thinking: true, streaming: true, jsonMode: true, toolUse: false, maxContextTokens: 256000, thinkingStyle: 'reasoning_content', streamingStyle: 'sse', inputModalities: ['text'], outputModalities: ['text'] },
+  '*lfm3-vl-2b*':       { kind: 'generative', thinking: true, streaming: true, jsonMode: true, toolUse: false, maxContextTokens: 128000, thinkingStyle: 'reasoning_content', streamingStyle: 'sse', inputModalities: ['text', 'image'], outputModalities: ['text'] },
+  '*lfm3-audio-2b*':    { kind: 'generative', thinking: true, streaming: true, jsonMode: false, toolUse: false, maxContextTokens: 128000, thinkingStyle: 'reasoning_content', streamingStyle: 'sse', inputModalities: ['text', 'audio'], outputModalities: ['text', 'audio'] },
+  '*lfm3-omni-2b*':     { kind: 'generative', thinking: true, streaming: true, jsonMode: false, toolUse: false, maxContextTokens: 128000, thinkingStyle: 'reasoning_content', streamingStyle: 'sse', inputModalities: ['text', 'image', 'video', 'audio'], outputModalities: ['text', 'audio'] },
   // Decision models: no token generation, no streaming, no JSON mode.
   '*d1-2b*':            { kind: 'decision', thinking: false, streaming: false, jsonMode: false, toolUse: false, maxContextTokens: 128000, thinkingStyle: 'none', streamingStyle: 'sse', inputModalities: ['text', 'image', 'video'], outputModalities: [] },
   '*d1-omni-2b*':       { kind: 'decision', thinking: false, streaming: false, jsonMode: false, toolUse: false, maxContextTokens: 128000, thinkingStyle: 'none', streamingStyle: 'sse', inputModalities: ['text', 'image', 'video', 'audio'], outputModalities: [] },

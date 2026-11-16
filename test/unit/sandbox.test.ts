@@ -38,6 +38,21 @@ describe('Sandbox runInSandbox', () => {
     }, 25000);
   });
 
+  describe('a sketch that throws', () => {
+    it('does not complete, and names the error', async () => {
+      const code = `function setup(){ createCanvas(100,100); } function draw(){ undefinedThing(); }`;
+      const result = await runInSandbox(code, { timeoutMs: 10000 });
+      expect(result.completed).toBe(false);
+      expect(result.error).toContain('undefinedThing is not defined');
+    }, 15000);
+
+    it('that throws in setup before any canvas does not complete', async () => {
+      const result = await runInSandbox(`function setup(){ undefinedThing(); }`, { timeoutMs: 10000 });
+      expect(result.completed).toBe(false);
+      expect(result.error).toContain('undefinedThing is not defined');
+    }, 15000);
+  });
+
   describe('escape attempts (no Node/fs or process)', () => {
     it('code containing require("fs") does not escape sandbox', async () => {
       const code = `function setup(){ try { require('fs'); } catch(e) {} createCanvas(100,100); noLoop(); } function draw(){}`;

@@ -83,6 +83,8 @@ export interface RoleProviderConfig {
   streaming?: boolean;
   /** True when this role rides the owner-authorized z.ai coding-plan seat. */
   glmCodingPlanSeat?: boolean;
+  /** True when this role rides the owner's MiniMax Token Plan (flat subscription, not metered). */
+  minimaxTokenPlanSeat?: boolean;
   /**
    * Optional decision head (e.g. Liquid AI d1-2B) paired with this seat's chat
    * model: the chat model writes, the decision head answers the seat's typed
@@ -128,6 +130,7 @@ export interface RoleConfigFile {
 export interface ResolvedRoleConfig {
   provider?: ProviderType;
   glmCodingPlanSeat?: boolean;
+  minimaxTokenPlanSeat?: boolean;
   baseUrl: string;
   apiKey?: string;
   model: string;
@@ -187,6 +190,11 @@ const DEFAULT_MAX_TOKENS = 4096;
 // calls (#708). The evaluator judge answers with a short JSON verdict (#709).
 function defaultRoleTimeout(role: string): number {
   return role === 'evaluator' ? TIMEOUT_EVALUATOR_MS : TIMEOUT_DEFAULT_MS;
+}
+
+/** Env timeout for a role: SINTER_/LIMINAL_<ROLE>_TIMEOUT_MS, then SINTER_/LIMINAL_LLM_TIMEOUT_MS. */
+export function envRoleTimeout(role: string): number | undefined {
+  return envTimeout(role);
 }
 
 function envTimeout(role: string): number | undefined {
@@ -376,9 +384,9 @@ export function resolveThinkingConfig(fileThinking?: ThinkingConfig): ThinkingCo
     if (v === '0' || v === 'false' || v === 'off' || v === 'none' || v === 'disabled') {
       return { enabled: false };
     }
-    const effort = (v === '1' || v === 'true' || v === 'on' ? 'high' : v) as 'low' | 'medium' | 'high' | 'max';
-    if (effort === 'low' || effort === 'medium' || effort === 'high' || effort === 'max') {
-      const budgetTokens = effort === 'max' ? 32_000
+    const effort = (v === '1' || v === 'true' || v === 'on' ? 'high' : v) as NonNullable<ThinkingConfig['effort']>;
+    if (effort === 'low' || effort === 'medium' || effort === 'high' || effort === 'xhigh' || effort === 'max') {
+      const budgetTokens = effort === 'max' ? 32_000 : effort === 'xhigh' ? 24_000
         : effort === 'high' ? 16_000 : effort === 'medium' ? 8_000 : 4_000;
       return { enabled: true, effort, budgetTokens };
     }
@@ -564,6 +572,7 @@ function resolveRole(
     thinking: resolveThinkingConfig(fileRole?.thinking),
     streaming: fileRole?.streaming ?? (role === 'harness' || role === 'studio'),
     glmCodingPlanSeat: fileRole?.glmCodingPlanSeat === true,
+    minimaxTokenPlanSeat: fileRole?.minimaxTokenPlanSeat === true,
   };
 }
 

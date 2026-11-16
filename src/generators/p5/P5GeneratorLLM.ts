@@ -6,6 +6,7 @@ import { isFatalRoleConfigError, loadRoleConfig } from '../../config/RoleConfig.
 import { GENERATOR_TOOLS, createGeneratorToolExecutor } from '../../harness/tools/generator-tools.js';
 import { P5Validator } from '../../core/validators/P5Validator.js';
 import { env } from '../../utils/env.js';
+import { fencedBlocks, splitThinking } from '../../llm/ModelOutput.js';
 
 export interface P5GeneratorOptions {
   maxIterations?: number;
@@ -246,18 +247,9 @@ export class P5GeneratorLLM {
   }
 
   private sanitizeP5Code(code: string): string {
-    let clean = code ?? '';
-    clean = clean.replace(/<think\b[^>]*>[\s\S]*?<\/think>/gi, '');
-    const fencedSketch = clean.match(/```(?:javascript|js)?\s*\n?([\s\S]*?)```/i);
-    if (fencedSketch?.[1] && /function\s+setup\s*\(/.test(fencedSketch[1])) {
-      clean = fencedSketch[1];
-    } else {
-      const unclosedFenceSketch = clean.match(/```(?:javascript|js)?\s*\n?([\s\S]*)/i);
-      if (unclosedFenceSketch?.[1] && /function\s+setup\s*\(/.test(unclosedFenceSketch[1])) {
-        clean = unclosedFenceSketch[1];
-      }
-    }
-    return clean.trim();
+    const { answer } = splitThinking(code ?? '');
+    const sketch = fencedBlocks(answer).find((block) => /function\s+setup\s*\(/.test(block.body));
+    return (sketch ? sketch.body : answer).trim();
   }
 
   /**

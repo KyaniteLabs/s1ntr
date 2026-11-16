@@ -29,10 +29,11 @@ export interface LiminalCreativeCommand {
   readonly canonicalMainSha: string;
   readonly sourceBinding?: {
     readonly sourceKind: 'explicit' | 'git-origin-main'
-      | 'forgejo-actions-pull-request' | 'forgejo-actions-main-push';
-    readonly sourceHeadSource: 'caller' | 'git-head' | 'forgejo-actions-github-sha';
+      | 'forgejo-actions-pull-request' | 'forgejo-actions-main-push' | 'package-stamp';
+    readonly sourceHeadSource: 'caller' | 'git-head' | 'forgejo-actions-github-sha'
+      | 'package-stamp';
     readonly canonicalMainSource: 'caller' | 'git-origin-main'
-      | 'forgejo-event-pull-request-base' | 'forgejo-event-main-push';
+      | 'forgejo-event-pull-request-base' | 'forgejo-event-main-push' | 'package-stamp';
     readonly eventHeadSha?: string;
   };
   readonly authorityPackageDigest: string;
@@ -76,12 +77,18 @@ export interface RenderedObservation {
       readonly audioContexts: number; readonly pagesBefore: number; readonly pagesAfter: number };
   };
   readonly playback?: { readonly controlsAccessible: boolean; readonly started: boolean };
-  readonly interaction?: { readonly actions: number; readonly stateChanged: boolean };
+  readonly interaction?: { readonly actions: number; readonly stateChanged: boolean | null;
+    readonly target?: 'control' | 'canvas-pointer' | 'none' | 'error' };
+  /** How far piece time got before the late frame was taken (#1637, #1647). */
+  readonly arc?: { readonly horizonMs: number; readonly reachedMs: number; readonly wallMs: number };
   readonly audio: {
     readonly relevant: boolean;
     readonly state: 'audible' | 'inaudible' | 'not-applicable' | 'unavailable';
     readonly peakAmplitude?: number;
     readonly rmsAmplitude?: number;
+    readonly silentShare?: number;
+    readonly noisiness?: number | null;
+    readonly floorFailure?: string;
   };
 }
 
@@ -106,6 +113,8 @@ export interface LiminalCommandEffects {
     domain: string;
     /** Generated source; audio domains are judged from it plus measured audio. */
     source?: string;
+    /** The user's request, so the judge scores adherence instead of guessing intent (#1638). */
+    prompt?: string;
     evidenceDigest: string | null;
     identity: string;
     startTransport(payload?: unknown): Promise<number>;
@@ -208,6 +217,7 @@ export interface BoundRenderedEvidence {
   readonly containment?: RenderedObservation['containment'];
   readonly playback?: RenderedObservation['playback'];
   readonly interaction?: RenderedObservation['interaction'];
+  readonly arc?: RenderedObservation['arc'];
   readonly audio: RenderedObservation['audio'];
   readonly evidenceDigest: string | null;
 }
@@ -313,6 +323,9 @@ function bindEvidence(observation: RenderedObservation): BoundRenderedEvidence {
     containment: observation.containment ? { ...observation.containment } : undefined,
     playback: observation.playback ? { ...observation.playback } : undefined,
     interaction: observation.interaction ? { ...observation.interaction } : undefined,
+    // Only when present: canonical() hashes an undefined key, and renders
+    // without an arc must keep their existing evidence digests.
+    ...(observation.arc ? { arc: { ...observation.arc } } : {}),
     audio: { ...observation.audio },
   };
   const evidenceDigest = earlyFrameDigest && lateFrameDigest ? digest(base) : null;
@@ -633,7 +646,11 @@ interface LiminalCommandServiceOptions {
   readonly authority: LiminalReceiptAuthority;
   readonly domainAuthority?: LiminalDomainDecisionAuthority;
   readonly verifyActionAuthority?: (input: Readonly<{
-    digest: string; parent: LiminalAuthorityReceipt; evidenceDigest: string;
+    /** Which child action the digest must authorize; a reevaluate grant never covers a re-render. */
+    action: 'reevaluate' | 'rerender-reevaluate';
+    digest: string; parent: LiminalAuthorityReceipt;
+    /** reevaluate: the supplied evidence. rerender-reevaluate: the parent evidence it replaces. */
+    evidenceDigest: string;
     maxTransportAttempts: 1;
   }>) => boolean;
   readonly idFactory?: () => string;
@@ -697,6 +714,7 @@ function decideAdmission(
   }
   if (evaluation.evidenceDigest !== evidence.evidenceDigest) reasons.push('evidence-digest-mismatch');
   if (evidence.audio.relevant && evidence.audio.state !== 'audible') reasons.push('audio-playback-unproven');
+  if (evidence.audio.relevant && evidence.audio.floorFailure) reasons.push('audio-floor-failed');
   return Object.freeze({ ...evaluation, admissionEligible: reasons.length === 0,
     rejectionReasons: Object.freeze(reasons) });
 }
@@ -737,6 +755,21 @@ function createTransportGrant(authority: LiminalReceiptAuthority,
     role,
   });
   return Object.freeze({ scope, proof: sealInternalAdmission(authority, scope) });
+}
+
+const INFRA_RENDER_ERROR = /failed to initialize headless browser|browser context not initialized|executable|sandbox unavailable|playwright|chromium|browser|spawn|econnrefused/i;
+
+/**
+ * Why a run that never reached the evaluator has no score: the render
+ * machinery was unavailable (`infra`), or the piece did not render (`render`).
+ * Both are existing LoopConfig classes; before this the line read
+ * `failureClass=unknown` (#1603).
+ */
+export function unscoredFailureClass(
+  evidence: Pick<BoundRenderedEvidence, 'status' | 'runtimeErrors'>,
+): 'infra' | 'render' {
+  if (evidence.status === 'missing') return 'infra';
+  return evidence.runtimeErrors.some(error => INFRA_RENDER_ERROR.test(error)) ? 'infra' : 'render';
 }
 
 function canEvaluateRenderedEvidence(
@@ -968,7 +1001,7 @@ export class LiminalCommandService {
         effect: reservation => withLiminalProductTransportAuthority(
           createTransportGrant(this.options.authority, reservation, 'evaluation', 'evaluator'),
           () => this.options.effects.evaluate({
-          observation, domain: command.domain, source: generated.source,
+          observation, domain: command.domain, source: generated.source, prompt: command.prompt,
           evidenceDigest: null, identity: roles.evaluator,
           startTransport: payload => this.options.journal.reserveTransportAttempt(
             operationId, command.maxTransportAttempts,
@@ -983,7 +1016,7 @@ export class LiminalCommandService {
         effect: reservation => withLiminalProductTransportAuthority(
           createTransportGrant(this.options.authority, reservation, 'evaluation', 'evaluator'),
           () => this.options.effects.evaluate({
-          observation, domain: command.domain, source: generated.source,
+          observation, domain: command.domain, source: generated.source, prompt: command.prompt,
           evidenceDigest: evidence.evidenceDigest, identity: roles.evaluator,
           startTransport: payload => this.options.journal.reserveTransportAttempt(
             operationId, command.maxTransportAttempts,
@@ -996,6 +1029,7 @@ export class LiminalCommandService {
       rawEvaluation = {
         score: 0,
         degraded: true,
+        failureClass: unscoredFailureClass(evidence),
         identityValid: true,
         evaluatorIdentity: roles.evaluator,
         evidenceDigest: evidence.evidenceDigest,
@@ -1056,6 +1090,81 @@ export class LiminalCommandService {
   ): Promise<LiminalCommandResult> {
     validateCommand(command);
     const roles = resolvedRoles(command);
+    this.assertReevaluationParent(command, prior, evidenceSource, roles);
+    await this.readVerifiedArtifact(prior);
+    if (!/^[0-9a-f]{64}$/.test(spec.actionAuthorityDigest)) {
+      throw new Error('REEVALUATION_ACTION_AUTHORITY_INVALID');
+    }
+    const evidence = bindEvidence(observation);
+    if (!canEvaluateRenderedEvidence(command, evidence)
+      || evidence.evidenceDigest !== evidenceSource.receipt.evidenceDigest) {
+      throw new Error('REEVALUATION_RENDERED_EVIDENCE_INVALID');
+    }
+    this.assertChildActionAuthority('reevaluate', prior, evidence.evidenceDigest!, spec);
+    const existing = await this.options.journal.findByIdempotencyKey(spec.idempotencyKey);
+    if (existing) return this.readVerifiedResult(spec.idempotencyKey, command);
+    const admission = await this.kernel.beginChild(spec.idempotencyKey,
+      digest({ kind: 'reevaluate-candidate', parent: prior.receipt.signature,
+        evidenceDigest: evidence.evidenceDigest,
+        actionAuthorityDigest: spec.actionAuthorityDigest }), prior.receipt);
+    await this.options.journal.authorizeDomain(admission.operationId, command.domain);
+    await this.persistObservedEvidence(admission.operationId, observation, evidence);
+    return this.judgeChild(command, prior, roles, spec, admission.operationId,
+      observation, evidence);
+  }
+
+  /**
+   * Re-render the exact persisted artifact on the current renderer, then judge the fresh
+   * evidence once (#1645). This is how a verified artifact gets re-judged after a renderer
+   * or judging fix: plain reevaluate only accepts the parent's own evidence bytes.
+   * The artifact, lineage and command stay bound to the parent; only the evidence is new.
+   * The parent evidence digest is bound into the admission (and the parent receipt the
+   * child begins from); the new one is in render-observed and the child receipt.
+   */
+  async rerenderAndReevaluate(
+    command: LiminalCreativeCommand,
+    prior: LiminalCommandResult,
+    spec: LiminalReevaluationSpec,
+  ): Promise<LiminalCommandResult> {
+    validateCommand(command);
+    const roles = resolvedRoles(command);
+    this.assertReevaluationParent(command, prior, prior, roles);
+    // A parent never bound to rendered evidence has nothing to replace.
+    const parentEvidenceDigest = prior.receipt.evidenceDigest;
+    if (!parentEvidenceDigest) throw new Error('REEVALUATION_PARENT_AUTHORITY_INVALID');
+    const artifact = await this.readVerifiedArtifact(prior);
+    if (!/^[0-9a-f]{64}$/.test(spec.actionAuthorityDigest)) {
+      throw new Error('REEVALUATION_ACTION_AUTHORITY_INVALID');
+    }
+    // Authorized before the render: the grant names the parent evidence it replaces.
+    this.assertChildActionAuthority('rerender-reevaluate', prior, parentEvidenceDigest, spec);
+    const existing = await this.options.journal.findByIdempotencyKey(spec.idempotencyKey);
+    if (existing) return this.readVerifiedResult(spec.idempotencyKey, command);
+    const admission = await this.kernel.beginChild(spec.idempotencyKey,
+      digest({ kind: 'rerender-reevaluate-candidate', parent: prior.receipt.signature,
+        parentEvidenceDigest,
+        actionAuthorityDigest: spec.actionAuthorityDigest }), prior.receipt);
+    await this.options.journal.authorizeDomain(admission.operationId, command.domain);
+    const observation = await this.broker.invoke({
+      operationId: admission.operationId, kind: 'render',
+      authority: { rendererIdentity: command.rendererIdentity },
+      effect: () => this.options.effects.render({
+        playable: artifact.playable,
+        domain: command.domain,
+      }),
+    });
+    const evidence = bindEvidence(observation);
+    if (!canEvaluateRenderedEvidence(command, evidence)) {
+      throw new Error('REEVALUATION_RENDERED_EVIDENCE_INVALID');
+    }
+    await this.persistObservedEvidence(admission.operationId, observation, evidence);
+    return this.judgeChild(command, prior, roles, spec, admission.operationId,
+      observation, evidence);
+  }
+
+  private assertReevaluationParent(command: LiminalCreativeCommand,
+    prior: LiminalCommandResult, evidenceSource: LiminalCommandResult,
+    roles: Readonly<Record<LiminalRole, string>>): void {
     const legacyDomain = (prior as Partial<LiminalCommandResult>).domain;
     if (!this.verifyReceipt(prior.receipt)
       || prior.receipt.operationId !== prior.operationId
@@ -1079,63 +1188,61 @@ export class LiminalCommandService {
       || evidenceSource.evidence.rendererIdentity !== command.rendererIdentity) {
       throw new Error('REEVALUATION_PARENT_AUTHORITY_INVALID');
     }
-    await this.readVerifiedArtifact(prior);
-    if (!/^[0-9a-f]{64}$/.test(spec.actionAuthorityDigest)) {
-      throw new Error('REEVALUATION_ACTION_AUTHORITY_INVALID');
-    }
-    const evidence = bindEvidence(observation);
-    if (!canEvaluateRenderedEvidence(command, evidence)
-      || evidence.evidenceDigest !== evidenceSource.receipt.evidenceDigest) {
-      throw new Error('REEVALUATION_RENDERED_EVIDENCE_INVALID');
-    }
+  }
+
+  private assertChildActionAuthority(action: 'reevaluate' | 'rerender-reevaluate',
+    prior: LiminalCommandResult, evidenceDigest: string, spec: LiminalReevaluationSpec): void {
     if (this.options.authority.tier === 'production'
       && (!this.options.verifyActionAuthority || !this.options.verifyActionAuthority({
-        digest: spec.actionAuthorityDigest, parent: prior.receipt,
-        evidenceDigest: evidence.evidenceDigest!,
-        maxTransportAttempts: spec.maxTransportAttempts,
+        action, digest: spec.actionAuthorityDigest, parent: prior.receipt,
+        evidenceDigest, maxTransportAttempts: spec.maxTransportAttempts,
       }))) {
       throw new Error('REEVALUATION_ACTION_AUTHORITY_INVALID');
     }
-    const existing = await this.options.journal.findByIdempotencyKey(spec.idempotencyKey);
-    if (existing) return this.readVerifiedResult(spec.idempotencyKey, command);
-    const admission = await this.kernel.beginChild(spec.idempotencyKey,
-      digest({ kind: 'reevaluate-candidate', parent: prior.receipt.signature,
-        evidenceDigest: evidence.evidenceDigest,
-        actionAuthorityDigest: spec.actionAuthorityDigest }), prior.receipt);
-    await this.options.journal.authorizeDomain(admission.operationId, command.domain);
+  }
+
+  private async persistObservedEvidence(operationId: string,
+    observation: RenderedObservation, evidence: ReturnType<typeof bindEvidence>): Promise<void> {
     const persistedEvidence = await this.options.artifacts.persistRenderedEvidence(
-      admission.operationId, observation);
+      operationId, observation);
     if (persistedEvidence.earlyFrameDigest !== evidence.earlyFrameDigest
       || persistedEvidence.lateFrameDigest !== evidence.lateFrameDigest) {
       throw new Error('LIMINAL_RENDERED_EVIDENCE_DIGEST_MISMATCH');
     }
-    await this.options.journal.append(admission.operationId, 'render-observed', evidence);
+    await this.options.journal.append(operationId, 'render-observed', evidence);
+  }
+
+  /** One evaluator transport on bound child evidence, then a never-learning-eligible receipt. */
+  private async judgeChild(command: LiminalCreativeCommand, prior: LiminalCommandResult,
+    roles: Readonly<Record<LiminalRole, string>>, spec: LiminalReevaluationSpec,
+    operationId: string, observation: RenderedObservation,
+    evidence: ReturnType<typeof bindEvidence>): Promise<LiminalCommandResult> {
     const rawEvaluation = await this.broker.invoke({
-      operationId: admission.operationId, kind: 'evaluation',
+      operationId, kind: 'evaluation',
       authority: { identity: roles.evaluator },
       effect: reservation => withLiminalProductTransportAuthority(
         createTransportGrant(this.options.authority, reservation, 'evaluation', 'evaluator'),
         () => this.options.effects.evaluate({
-        observation, domain: command.domain, evidenceDigest: evidence.evidenceDigest,
+        observation, domain: command.domain, prompt: command.prompt, evidenceDigest: evidence.evidenceDigest,
         identity: roles.evaluator,
         startTransport: payload => this.options.journal.reserveTransportAttempt(
-          admission.operationId, spec.maxTransportAttempts,
+          operationId, spec.maxTransportAttempts,
           { kind: 'evaluation', identity: roles.evaluator, ...(payload as object | undefined) },
         ),
-        failTransport: reason => this.options.journal.failTransportAttempt(admission.operationId, reason),
+        failTransport: reason => this.options.journal.failTransportAttempt(operationId, reason),
       })),
     });
     const evaluation = this.domainAuthority.decide({ mode: command.evalMode,
       evidence, evaluation: rawEvaluation, expectedRenderer: command.rendererIdentity,
       expectedEvaluator: roles.evaluator,
       renderAuthorization: command.renderAuthorization });
-    await this.options.journal.append(admission.operationId, 'domain-decided', {
+    await this.options.journal.append(operationId, 'domain-decided', {
       domain: command.domain, admissionEligible: evaluation.admissionEligible,
       rejectionReasons: evaluation.rejectionReasons,
     });
-    await this.options.journal.append(admission.operationId, 'evaluation-decided', evaluation);
+    await this.options.journal.append(operationId, 'evaluation-decided', evaluation);
     const receipt = await this.projector.project({
-      operationId: admission.operationId,
+      operationId,
       lineageId: prior.lineageId,
       commandDigest: prior.receipt.commandDigest,
       providerInputDigest: prior.receipt.providerInputDigest,
@@ -1147,14 +1254,14 @@ export class LiminalCommandService {
       // Re-evaluation repairs evidence judgment; it does not manufacture owner acceptance.
       learningEligible: false,
     });
-    await this.options.journal.append(admission.operationId, 'receipt-projected', {
+    await this.options.journal.append(operationId, 'receipt-projected', {
       authorityTier: receipt.authorityTier, signature: receipt.signature,
     });
-    const result = Object.freeze({ operationId: admission.operationId,
+    const result = Object.freeze({ operationId,
       lineageId: prior.lineageId, domain: command.domain,
       roles, artifacts: prior.artifacts,
       evidence, evaluation, attempts: Object.freeze({
-        consumed: await this.options.journal.attemptsConsumed(admission.operationId),
+        consumed: await this.options.journal.attemptsConsumed(operationId),
         maximum: spec.maxTransportAttempts,
       }), receipt });
     await this.options.journal.bindResult(spec.idempotencyKey, result);

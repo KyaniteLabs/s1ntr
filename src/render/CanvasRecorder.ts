@@ -8,7 +8,10 @@ import { Domain } from '../types/domains.js';
 import { Logger } from '../utils/Logger.js';
 import { ValidationError } from '../errors/ValidationError.js';
 import { getChromeArgs } from '../security/SandboxConfig.js';
-import { isAllowedRenderRequestUrl } from './HeadlessRenderer.js';
+import { resolveChromiumExecutablePath } from '../utils/browserAssetFallbacks.js';
+import { missingChromiumError } from '../utils/browserPreflight.js';
+import { isAllowedRenderRequestUrl, RENDER_ORIGIN } from './HeadlessRenderer.js';
+import { hasVendorImportMap, inlineVendorAssets, isVendorAssetPath, readVendorAsset } from '../utils/vendorAssets.js';
 
 export interface RecordingOptions {
   fps: number;
@@ -60,8 +63,11 @@ export class CanvasRecorder {
       // Respect SandboxConfig: launch sandboxed by default; only pass
       // --no-sandbox when LIMINAL_DISABLE_SANDBOX=true (containerized/CI).
       const disableSandbox = process.env.LIMINAL_DISABLE_SANDBOX === 'true';
+      const executablePath = resolveChromiumExecutablePath();
+      if (!executablePath) throw missingChromiumError();
       const browser = await puppeteer.default.launch({
         headless: true,
+        executablePath,
         args: getChromeArgs({ forceDisableSandbox: disableSandbox }),
       });
       try {
@@ -73,6 +79,15 @@ export class CanvasRecorder {
         await page.setRequestInterception(true);
         page.on('request', (request) => {
           const url = request.url();
+          if (url.startsWith(`${RENDER_ORIGIN}/`)) {
+            // The private origin serves a blank page and pinned /vendor/
+            // files only, as the renderer's does.
+            void CanvasRecorder.servePrivateOrigin(request).catch((err) => {
+              Logger.warn('CanvasRecorder', `Private origin request failed: ${url}`, err);
+              void request.abort('failed').catch(() => undefined);
+            });
+            return;
+          }
           if (isAllowedRenderRequestUrl(url)) {
             void request.continue().catch((err) => {
               Logger.debug('CanvasRecorder', 'Request continue failed:', err);
@@ -85,15 +100,39 @@ export class CanvasRecorder {
           });
         });
 
-        // Wrap code for rendering
-        const html = this.wrapForDomain(code, domain);
+        const thrown: string[] = [];
+        page.on('pageerror', (error) => {
+          thrown.push(error instanceof Error ? error.message : String(error));
+        });
+
+        // A sketch that threw is broken, so its frames are not the artwork.
+        // Any page error fails the export, as it fails the a11y check.
+        const crashed = () => (thrown.length > 0
+          ? new Error(`The sketch threw while recording: ${thrown[0]}`)
+          : null);
+
+        // setContent runs at about:blank, where /vendor/ URLs never resolve,
+        // so vendored scripts go inline (#924). ES modules (Three) cannot be
+        // inlined under the wrapper CSP, so those pages get the private
+        // origin first, where 'self' covers the served /vendor/ modules.
+        const wrapped = this.wrapForDomain(code, domain);
+        const servedOrigin = hasVendorImportMap(wrapped);
+        if (servedOrigin) {
+          await page.goto(`${RENDER_ORIGIN}/`, { waitUntil: 'domcontentloaded' });
+        }
+        const html = await inlineVendorAssets(wrapped, undefined, { keepImportMaps: servedOrigin });
         await page.setContent(html, { waitUntil: 'networkidle0' });
 
-        // Wait for canvas to appear
-        await page.waitForSelector('canvas', { timeout: 10000 });
+        try {
+          await page.waitForSelector('canvas', { timeout: 10000 });
+        } catch (error) {
+          throw crashed() ?? error;
+        }
 
         // Capture frames
         for (let frame = 0; frame < this.config.totalFrames; frame++) {
+          const failure = crashed();
+          if (failure) throw failure;
           // Advance animation by one frame
           const frameDelay = 1000 / this.config.fps;
           await page.evaluate((delay) => {
@@ -107,6 +146,9 @@ export class CanvasRecorder {
             await canvas.screenshot({ path: framePath, type: 'png' });
           }
         }
+
+        const failure = crashed();
+        if (failure) throw failure;
 
         // Stitch frames into video
         await fs.mkdir(path.dirname(outputPath), { recursive: true });
@@ -124,6 +166,24 @@ export class CanvasRecorder {
         const message = this.formatErrorMessage(error);
         Logger.error('CanvasRecorder', 'Cleanup failed:', message);
       }
+    }
+  }
+
+  private static async servePrivateOrigin(request: {
+    url(): string;
+    respond(response: { status: number; contentType: string; body: string }): Promise<void>;
+    abort(reason: 'blockedbyclient'): Promise<void>;
+  }): Promise<void> {
+    const pathname = new URL(request.url()).pathname;
+    if (pathname === '/') {
+      await request.respond({ status: 200, contentType: 'text/html; charset=utf-8',
+        body: '<!doctype html><html><head></head><body></body></html>' });
+    } else if (isVendorAssetPath(pathname)) {
+      await request.respond({ status: 200, contentType: 'application/javascript; charset=utf-8',
+        body: await readVendorAsset(pathname) });
+    } else {
+      Logger.warn('CanvasRecorder', `Blocked private-origin request: ${request.url()}`);
+      await request.abort('blockedbyclient');
     }
   }
 

@@ -2,6 +2,8 @@ import { TierBasedGenerator, type TierBasedGeneratorOptions } from '../TierBased
 import { GenerationError } from '../../errors/GenerationError.js';
 import { HydraValidator } from '../../core/validators/HydraValidator.js';
 import { VENDOR_ASSETS } from '../../utils/vendorAssets.js';
+import { answerCode, hasFence, withoutThinkTags } from '../../llm/ModelOutput.js';
+import { scriptSafe } from '../../utils/scriptEmbed.js';
 
 // Washout clamp constants (see capBlendWeights). Hydra's `.add(tex)` defaults to a
 // full additive (amount 1.0), and high `.add`/`.blend` weights pile sources toward
@@ -71,7 +73,7 @@ export class HydraGenerator extends TierBasedGenerator {
         error: 'Hydra preview must not depend on camera or screen input (s0.initCam, s0.initScreen, or src(s0)); use generated visual sources so headless previews are visible',
       };
     }
-    if (/^\s*[-*]\s|\*\*|```|✅|ready to paste|Hydra editor|—/im.test(code)) {
+    if (hasFence(code) || /^\s*[-*]\s|\*\*|✅|ready to paste|Hydra editor|—/im.test(code)) {
       return {
         valid: false,
         error: 'Hydra output must be raw executable Hydra code only, not markdown or prose explanation',
@@ -225,15 +227,7 @@ export class HydraGenerator extends TierBasedGenerator {
       return '';
     }
     
-    let clean = code;
-    
-    // Strip markdown code fences (only at start/end, preserve code inside)
-    clean = clean.replace(/^```(?:javascript|js)?\n?/gm, '');
-    clean = clean.replace(/\n?```$/gm, '');
-    clean = clean.replace(/^```$/gm, '');
-    
-    // Strip <think> tags and their content (LLM reasoning contamination)
-    clean = clean.replace(/<think>[\s\S]*?<\/think>/gi, '');
+    let clean = answerCode(code, ['javascript', 'js', 'hydra']);
     
     // Strip HTML-style comments
     clean = clean.replace(/<!--[\s\S]*?-->/g, '');
@@ -573,8 +567,7 @@ export class HydraGenerator extends TierBasedGenerator {
       .filter(snippet => /\.out\s*\(/.test(snippet));
     if (snippets.length > 0) return snippets[snippets.length - 1];
 
-    const lines = text
-      .replace(/<\/?think[^>]*>/gi, '')
+    const lines = withoutThinkTags(text)
       .split('\n')
       .map(line => line.trim())
       .filter(line => line.length > 0)
@@ -641,7 +634,7 @@ window.addEventListener('resize', () => {
   const nextHydraSize = sizeHydraCanvas();
   if (typeof setResolution === 'function') setResolution(nextHydraSize.width, nextHydraSize.height);
 });
-${code}
+${scriptSafe(code)}
 </script>
 </body>
 </html>`;

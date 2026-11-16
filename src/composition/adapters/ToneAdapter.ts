@@ -14,6 +14,7 @@ import type { RenderContext } from '../CompositionEngine.js';
 import { Logger } from '../../utils/Logger.js';
 import { compileGeneratedCode } from '../../guardrails/GeneratedCodeGuard.js';
 import { VENDOR_ASSETS } from '../../utils/vendorAssets.js';
+import { scriptSafe } from '../../utils/scriptEmbed.js';
 
 /** Tone.js types (simplified) */
 interface ToneSynth {
@@ -295,7 +296,7 @@ export class ToneAdapter implements LayerAdapter {
   document.addEventListener('click', initAudio, { once: true });
   
   // Execute layer code
-${layer.code.split('\n').map(line => '  ' + line).join('\n')}
+${scriptSafe(layer.code).split('\n').map(line => '  ' + line).join('\n')}
 })();
 </script>`;
   }

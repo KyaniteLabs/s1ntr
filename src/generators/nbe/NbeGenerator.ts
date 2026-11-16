@@ -34,6 +34,7 @@
  */
 
 import type { GeneratorResult } from '../GeneratorRegistry.js';
+import { scriptString } from '../../utils/scriptEmbed.js';
 
 // ---------------------------------------------------------------------------
 // Cascade neural-field weights
@@ -239,8 +240,6 @@ export class NbeGenerator {
     const cascadeJson = JSON.stringify(weightSet.weights);
     const paletteJson = JSON.stringify(weightSet.palette);
     const initialJson = JSON.stringify(initial);
-    // Escape the prompt for safe embedding in a JS string literal + HTML comment.
-    const safePrompt = prompt.replace(/<\/script>/gi, '<\\/script>').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -257,7 +256,7 @@ export class NbeGenerator {
 <canvas id="stage"></canvas>
 <!--
   nbe_render.html — produced by NbeGenerator (domain: 'nbe').
-  Prompt: ${prompt.replace(/-->/g, '--&gt;')}
+  Prompt: ${prompt.replace(/--!?>/g, '--&gt;')}
   Convergence contract: posts window.postMessage('nbe:converged', '*') once after
   ${convergenceSteps} simulation steps.
 -->
@@ -269,7 +268,7 @@ export class NbeGenerator {
   var PALETTE = ${paletteJson};
   var INITIAL = ${initialJson};
   var CONVERGENCE_STEPS = ${convergenceSteps};
-  var PROMPT = '${safePrompt}';
+  var PROMPT = ${scriptString(prompt)};
 
   var W = INITIAL.gridWidth, H = INITIAL.gridHeight;
   var canvas = document.getElementById('stage');

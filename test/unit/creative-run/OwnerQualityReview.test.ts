@@ -288,7 +288,10 @@ function buildOtherCampaignManifest(campaignRunId: string): CampaignManifest {
   });
 }
 
-async function fixture(setup: FixtureSetup, options: { audio?: 'required' | 'optional'; omitAudio?: boolean } = {}) {
+async function fixture(setup: FixtureSetup, options: {
+  audio?: 'required' | 'optional'; omitAudio?: boolean; reviewLimitations?: string[];
+  omitCaptures?: ('timeSamples' | 'interactionTrace' | 'runtimeState' | 'clockEvents' | 'accessibility')[];
+} = {}) {
   const thesis = buildCrossModalArtifact({ brief: INTENT, artifactId: 'thesis' }).thesis;
   const manifest = await buildCandidateManifest(INTENT, { creativeThesis: thesis });
   // Audio modality is derived from the frozen brief slot (campaign thesis),
@@ -363,6 +366,8 @@ async function fixture(setup: FixtureSetup, options: { audio?: 'required' | 'opt
     clockEvents: asset(`${candidate.blindId}.clock`, '0,16,32'),
     accessibility: asset(`${candidate.blindId}.a11y`, 'keyboard:pass;contrast:pass'),
     knownFailures: [], hardFloorFailures: [],
+    ...(options.reviewLimitations ? { reviewLimitations: options.reviewLimitations } : {}),
+    ...Object.fromEntries((options.omitCaptures ?? []).map((key) => [key, undefined])),
   }));
   const { authority, reservation, withAdmission } = await admitOwnerReviewFor(
     campaignManifest,
@@ -520,6 +525,43 @@ describe('OwnerQualityReview', () => {
     const { session, packet, envelope } = await fixture(setup, { audio: 'required', omitAudio: true });
     expect(packet.candidates.every((c) => c.audioRequirement === 'required')).toBe(true);
     expect(packet.candidates.every((c) => c.inconclusiveReasons.includes('missing-required-audio'))).toBe(true);
+    const sealed = sealOwnerQualityReview({
+      session, packet, envelope, envelopeAuthority: setup.envelopeAuthority,
+      captureAuthority: setup.captureAuthority, attestationVerifier: setup.attestationVerifier,
+      evidenceJudgments: evidenceJudgments(session), reviews: cleanReviews(setup, packet),
+    });
+    expect(sealed.candidates.every((c) => c.outcome === 'inconclusive')).toBe(true);
+  });
+
+  it('keeps a review inconclusive when its evidence says it was not captured from the candidate', async () => {
+    const setup = makeSetup();
+    const limitation = 'temporal-interaction-runtime-clock-planned-from-brief-not-captured-from-candidate';
+    const { session, packet, envelope } = await fixture(setup, { reviewLimitations: [limitation, limitation, '<b>x'] });
+    expect(packet.candidates.every((c) => c.inconclusiveReasons.filter((r) => r === limitation).length === 1)).toBe(true);
+    expect(packet.contactSheetHtml).toContain(`<li>${limitation}</li>`);
+    expect(packet.contactSheetHtml).toContain('<li>&lt;b&gt;x</li>');
+    const sealed = sealOwnerQualityReview({
+      session, packet, envelope, envelopeAuthority: setup.envelopeAuthority,
+      captureAuthority: setup.captureAuthority, attestationVerifier: setup.attestationVerifier,
+      evidenceJudgments: evidenceJudgments(session), reviews: cleanReviews(setup, packet),
+    });
+    expect(sealed.candidates.every((c) => c.outcome === 'inconclusive')).toBe(true);
+  });
+
+  it('seals nothing for a class the render did not observe, names it, and keeps the review inconclusive', async () => {
+    const setup = makeSetup();
+    const omitCaptures = ['timeSamples', 'interactionTrace', 'runtimeState', 'clockEvents', 'accessibility'] as const;
+    const { session, packet, envelope } = await fixture(setup, { omitCaptures: [...omitCaptures] });
+    for (const candidate of packet.candidates) {
+      expect(candidate.evidence.map((item) => item.evidenceClass).sort()).toEqual(['audio', 'source', 'visual']);
+      expect(candidate.prohibitedClaims).toEqual(expect.arrayContaining(
+        ['temporal', 'interaction', 'runtime', 'clock', 'accessibility']));
+      expect(candidate.inconclusiveReasons).toEqual(expect.arrayContaining([
+        'temporal-not-captured-from-candidate', 'interaction-not-captured-from-candidate',
+        'runtime-not-captured-from-candidate', 'clock-not-captured-from-candidate',
+        'accessibility-not-captured-from-candidate']));
+    }
+    expect(verifyOwnerReviewPacket(packet, setup.captureAuthority).conclusive).toBe(true);
     const sealed = sealOwnerQualityReview({
       session, packet, envelope, envelopeAuthority: setup.envelopeAuthority,
       captureAuthority: setup.captureAuthority, attestationVerifier: setup.attestationVerifier,

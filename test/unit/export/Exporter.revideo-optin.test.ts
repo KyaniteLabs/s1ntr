@@ -24,11 +24,13 @@ import path from 'path';
 
 const mockRenderVideo = vi.hoisted(() => vi.fn(async () => ({ duration: 5 })));
 const mockFramesToVideo = vi.hoisted(() => vi.fn(async () => {}));
-const mockScreenshot = vi.hoisted(() => vi.fn(async () => {}));
+const mockScreenshot = vi.hoisted(() => vi.fn(async () => new Uint8Array([0x89, 0x50, 0x4e, 0x47])));
 const mockLaunch = vi.hoisted(() =>
   vi.fn(async () => ({
     newPage: async () => ({
       setViewport: async () => {},
+      setRequestInterception: async () => {},
+      evaluateOnNewDocument: async () => {},
       on: () => {},
       goto: async () => {},
       waitForFunction: async () => {},
@@ -45,6 +47,10 @@ const mockLaunch = vi.hoisted(() =>
 );
 
 vi.mock('@revideo/renderer', () => ({ renderVideo: mockRenderVideo }));
+vi.mock('../../../src/utils/browserAssetFallbacks.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../src/utils/browserAssetFallbacks.js')>()),
+  resolveChromiumExecutablePath: () => '/opt/chromium',
+}));
 vi.mock('puppeteer', () => ({ default: { launch: mockLaunch } }));
 vi.mock('../../../src/export/VideoExporter.js', () => ({
   VideoExporter: class {

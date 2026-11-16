@@ -9,6 +9,7 @@ import type { Layer, GlobalSettings } from '../types.js';
 import type { LayerAdapter, Export, Import } from './index.js';
 import type { RenderContext } from '../CompositionEngine.js';
 import { getWebGLBlendFunc } from '../utils/blendModes.js';
+import { scriptString } from '../../utils/scriptEmbed.js';
 
 /** WebGL shader instance data */
 interface ShaderInstance {
@@ -545,11 +546,10 @@ export class ShaderAdapter implements LayerAdapter {
   }
 
   // Vertex Shader
-  const vertexSource = \`${vertexSource.replace(/`/g, '\\`')}\`;
+  const vertexSource = ${scriptString(vertexSource)};
 
   // Fragment Shader
-  const fragmentSource = \`precision mediump float;
-${fragmentSource.replace(/`/g, '\\`')}\`;
+  const fragmentSource = ${scriptString(`precision mediump float;\n${fragmentSource}`)};
 
   // Compile shaders
   function compileShader(gl, type, source) {

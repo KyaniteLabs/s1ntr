@@ -1,3 +1,4 @@
+import { pickCodeBlock, splitThinking } from '../../llm/ModelOutput.js';
 /**
  * Deterministic repair for near-JSON tool-call objects from harness models
  * (e.g. GLM omitting quotes on expectedResult). Prefer extracting tool+params
@@ -111,15 +112,11 @@ export function extractToolAndParams(text: string): { tool: string; params: Reco
  * Returns null if tool cannot be recovered.
  */
 export function repairToolCallFromText(text: string): RepairedToolCall | null {
-  const stripped = text
-    .replace(/<think\b[^>]*>[\s\S]*?<\/think>/gi, '')
-    .replace(/<thinkContent\b[^>]*>[\s\S]*?<\/thinkContent>/gi, '')
-    .replace(/<reasoning\b[^>]*>[\s\S]*?<\/reasoning>/gi, '')
-    .trim();
+  const stripped = splitThinking(text).answer.trim();
 
   const candidates: string[] = [];
-  const code = stripped.match(/```json\s*([\s\S]*?)```/) || stripped.match(/```\s*([\s\S]*?)```/);
-  if (code?.[1]) candidates.push(code[1].trim());
+  const code = pickCodeBlock(stripped, ['json']);
+  if (code) candidates.push(code.body.trim());
   const obj = extractFirstJsonObject(stripped);
   if (obj) candidates.push(obj);
   candidates.push(stripped);

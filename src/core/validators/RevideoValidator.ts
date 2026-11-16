@@ -8,6 +8,47 @@
  * React.FC, or useCurrentFrame/AbsoluteFill/Composition API.
  */
 
+import { parse } from '@babel/parser';
+import traverseModule, { type NodePath } from '@babel/traverse';
+import type { Node } from '@babel/types';
+
+import { hasFence } from '../../llm/ModelOutput.js';
+
+const traverse = typeof traverseModule === 'function'
+  ? traverseModule
+  : (traverseModule as unknown as { default: typeof traverseModule }).default;
+
+/** Wrappers that do not change which value an expression holds: a!, a as T, (a). */
+const TRANSPARENT = new Set(['TSNonNullExpression', 'TSAsExpression', 'TSSatisfiesExpression', 'TSTypeAssertion', 'ParenthesizedExpression']);
+
+type RefUse = 'call' | 'bind' | 'add' | 'read' | 'inert';
+
+/** What one reference to a createRef() name does with the ref. */
+function refUse(reference: NodePath): { use: RefUse; property?: string } {
+  let path: NodePath = reference;
+  while (path.parentPath && TRANSPARENT.has(path.parentPath.node.type)) path = path.parentPath;
+  const node = path.node;
+  const parent = path.parentPath?.node;
+  if (!parent || parent.type === 'TSTypeQuery') return { use: 'inert' };
+  if ((parent.type === 'CallExpression' || parent.type === 'OptionalCallExpression') && parent.callee === node) {
+    return { use: parent.arguments.length > 0 ? 'bind' : 'call' };
+  }
+  if ((parent.type === 'MemberExpression' || parent.type === 'OptionalMemberExpression') && parent.object === node) {
+    return { use: 'read', property: parent.property.type === 'Identifier' && !parent.computed ? parent.property.name : '[...]' };
+  }
+  if (parent.type === 'JSXExpressionContainer') {
+    const attribute = path.parentPath?.parentPath?.node;
+    return { use: attribute?.type === 'JSXAttribute' && attribute.name.name === 'ref' ? 'bind' : 'inert' };
+  }
+  if (parent.type === 'CallExpression' && parent.callee.type === 'MemberExpression') {
+    const { object, property } = parent.callee;
+    if (property.type === 'Identifier' && property.name === 'add') return { use: 'add' };
+    if (object.type === 'Identifier' && object.name === 'console') return { use: 'inert' };
+  }
+  // { ref: x }, x handed to a helper, a constructor, an array or an alias: a node may be attached there.
+  return { use: 'bind' };
+}
+
 export interface RevideoValidationResult {
   valid: boolean;
   errors: string[];
@@ -49,6 +90,7 @@ export class RevideoValidator {
     errors.push(...this.validateStructure(trimmed));
     errors.push(...this.validateImports(trimmed));
     errors.push(...this.validateSemantics(trimmed));
+    errors.push(...this.validateRefs(trimmed));
 
     return { valid: errors.length === 0, errors };
   }
@@ -162,6 +204,51 @@ export class RevideoValidator {
       errors.push('Revideo code should export default makeScene2D("SceneName", ...) or makeScene(...)');
     }
 
+    return errors;
+  }
+
+  /**
+   * Ref gate. createRef() returns a function that holds nothing until a node
+   * binds it with ref={name}; name() then returns the node. A ref that is
+   * never bound, built with arguments, or read without the call
+   * (name.opacity) is undefined at render, and the scene dies with
+   * "Cannot read properties of undefined" after validation passed (both
+   * LFM3 revideo renders in Kaggle shard v7).
+   */
+  private static validateRefs(code: string): string[] {
+    if (hasFence(code)) {
+      return ['Revideo scene is wrapped in a markdown fence: return the TSX source only, with no ``` lines'];
+    }
+    let ast: ReturnType<typeof parse>;
+    try {
+      ast = parse(code, { sourceType: 'module', plugins: ['jsx', 'typescript'] });
+    } catch (error) {
+      return [`Revideo scene has a syntax error and cannot render: ${error instanceof Error ? error.message : String(error)}`];
+    }
+    const errors: string[] = [];
+    traverse(ast as unknown as Node, {
+      VariableDeclarator(path) {
+        const { id, init } = path.node;
+        if (id.type !== 'Identifier' || init?.type !== 'CallExpression' || init.callee.type !== 'Identifier' || init.callee.name !== 'createRef') return;
+        const name = id.name;
+        const binding = path.scope.getBinding(name);
+        if (!binding) return;
+        const uses = binding.referencePaths.map(refUse);
+        const bound = binding.constantViolations.length > 0 || uses.some(({ use }) => use === 'bind');
+        if (init.arguments.length > 0) {
+          errors.push(`Revideo createRef() takes no arguments (${name} = createRef(...)): declare it empty and bind a node with <Rect ref={${name}} ... />`);
+        }
+        if (uses.some(({ use }) => use === 'add')) {
+          errors.push(`Revideo .add(${name}) adds the ref, not a node: add the element with ref={${name}} on it, like view.add(<Rect ref={${name}} ... />)`);
+        }
+        for (const property of new Set(uses.filter(({ use }) => use === 'read').map(({ property: p }) => p))) {
+          errors.push(`Revideo ${name} is a ref, so ${name}.${property} is undefined: call it to get the node, ${name}().${property}`);
+        }
+        if (!bound && uses.some(({ use }) => use === 'call' || use === 'read')) {
+          errors.push(`Revideo ref ${name} is never bound to a node, so ${name}() is undefined at render: add ref={${name}} to the JSX element it should hold`);
+        }
+      },
+    });
     return errors;
   }
 

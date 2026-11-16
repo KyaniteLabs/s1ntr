@@ -144,7 +144,7 @@ describe('Error Formatting Patterns (Characterization)', () => {
         'src/plugins/PluginLoader.ts:123',
         'src/guardrails/SemanticValidator.ts:99',
         'src/guardrails/AccessibilityGuardrails.ts:175',
-        'src/guardrails/RuntimeHealthMonitor.ts:229',
+        'src/guardrails/RuntimeHealthMonitor.ts:207',
         'src/core/RalphLoop.ts:520',
       ];
 

@@ -1035,6 +1035,16 @@ describe('ScoringEngine', () => {
       });
     });
 
+    it('names the thrown message in the repair advice when the piece threw', async () => {
+      const result = await scoreRenderedEvidence(
+        { timingMs: 100, infraUnavailable: false, candidateFailure: true,
+          failure: 'The page threw: gsap is not defined' },
+        'code',
+        'brief',
+      );
+      expect(result.repairAdvice?.issue).toBe('The artwork failed to render: The page threw: gsap is not defined');
+    });
+
     it('returns fallback evaluation when no LLM is available', async () => {
       const { LLMClient } = await import('../../../src/llm/LLMClient.js');
       vi.mocked(LLMClient).mockImplementationOnce(function () {
@@ -1520,6 +1530,44 @@ describe('ScoringEngine', () => {
       expect(result.confidence).toBe(0);
       expect(isEvaluationDegraded(result.confidence, result.failureClass)).toBe(true);
       expect(isHonestFitnessScore(result.confidence, result.failureClass)).toBe(false);
+    });
+
+    it('retries a stalled evaluator once and keeps the real score', async () => {
+      mockLLMClientInstance.generate.mockReset();
+      mockLLMClientInstance.generate
+        .mockReturnValueOnce(new Promise(() => undefined))
+        .mockResolvedValueOnce({ code: '{"score":0.7,"confidence":0.9,"reasoning":"fine"}', success: true });
+      const fakeLLM = new (await import('../../../src/llm/LLMClient.js')).LLMClient({ role: 'evaluator' });
+      const result = await scoreRenderedEvidence(
+        { timingMs: 200, infraUnavailable: false, candidateFailure: false },
+        'code', 'brief', fakeLLM, undefined, { timeoutMs: 20 },
+      );
+      expect(mockLLMClientInstance.generate).toHaveBeenCalledTimes(2);
+      expect(result.scoreState).toBeUndefined();
+      expect(result.confidence).toBe(0.9);
+    });
+
+    it('gives up after the one retry when the evaluator stalls again', async () => {
+      mockLLMClientInstance.generate.mockReset();
+      mockLLMClientInstance.generate.mockReturnValue(new Promise(() => undefined));
+      const fakeLLM = new (await import('../../../src/llm/LLMClient.js')).LLMClient({ role: 'evaluator' });
+      const result = await scoreRenderedEvidence(
+        { timingMs: 200, infraUnavailable: false, candidateFailure: false },
+        'code', 'brief', fakeLLM, undefined, { timeoutMs: 20 },
+      );
+      expect(mockLLMClientInstance.generate).toHaveBeenCalledTimes(2);
+      expect(result.scoreState).toBe('unscored');
+    });
+
+    it('does not retry an evaluator error that is not a timeout', async () => {
+      mockLLMClientInstance.generate.mockReset();
+      mockLLMClientInstance.generate.mockRejectedValue(new Error('401 invalid key'));
+      const fakeLLM = new (await import('../../../src/llm/LLMClient.js')).LLMClient({ role: 'evaluator' });
+      await scoreRenderedEvidence(
+        { timingMs: 200, infraUnavailable: false, candidateFailure: false },
+        'code', 'brief', fakeLLM, undefined, { timeoutMs: 20 },
+      );
+      expect(mockLLMClientInstance.generate).toHaveBeenCalledTimes(1);
     });
 
     it('does not mark a successful evaluation unscored (#709)', async () => {

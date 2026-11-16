@@ -5,6 +5,7 @@
 
 import { P5_SENSOR_POLICY_SCRIPT, SECURITY_HEADERS } from './SecurityHeaders.js';
 import { VENDOR_ASSETS } from '../../utils/vendorAssets.js';
+import { scriptSafe } from '../../utils/scriptEmbed.js';
 
 const P5_CDN = VENDOR_ASSETS.p5;
 const P5_SOUND_CDN = VENDOR_ASSETS.p5Sound;
@@ -49,7 +50,7 @@ export class P5Wrapper {
   static wrap(code: string, options: P5WrapOptions = {}): string {
     const { title = 'p5.js Sketch', includeP5Sound = false } = options;
     
-    const safeCode = code.replace(/\u003c\/script\u003e/gi, '<\\/script>');
+    const safeCode = scriptSafe(code);
     const usesWebAudio = /AudioContext|createOscillator|p5\.sound/i.test(code);
     const soundComment = usesWebAudio
       ? '\n    <!-- Sound may require user click to start (browser policy). -->'

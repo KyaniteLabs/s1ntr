@@ -77,4 +77,26 @@ describe('integration proof LLM server', () => {
       suggestions: [],
     });
   });
+
+  it('returns a sketch when a generation prompt carries a seed mentioning "Acceptance Criteria:"', async () => {
+    // Compost seed frag-1ff739f0d6fc is a game spec with an "Acceptance Criteria:" list;
+    // RalphLoop injects a random seed into generation prompts, so routing must not read it.
+    const proof = await startIntegrationProofLLMServer();
+    cleanup = proof.close;
+
+    const completion = await fetch(`${proof.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'sinter-integration-proof-model',
+        messages: [
+          { role: 'system', content: 'You generate code.' },
+          { role: 'user', content: 'Make a sketch\n\n---\nCreative seed from compost:\n**Acceptance Criteria:**\n- [ ] Player can control a cell' },
+        ],
+      }),
+    });
+    const body = await completion.json();
+
+    expect(body.choices[0].message.content).toContain('function setup');
+  });
 });

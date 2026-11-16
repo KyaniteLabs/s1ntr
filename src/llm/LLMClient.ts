@@ -12,7 +12,7 @@ import {
 import { verifyCreativeAdmission, type CreativeAdmissionProof } from
   '../runtime-core/CreativeAdmissionAuthority.js';
 
-import { LLMError, LLMTimeoutError, LLMAuthError, LLMRateLimitError } from './errors.js';
+import { LLMError, LLMTimeoutError, LLMAuthError, LLMRateLimitError, isTransientNetworkError } from './errors.js';
 import { providerRequestDigest } from './ProviderRequestDigest.js';
 import { LLMGenerationError } from '../errors/LLMGenerationError.js';
 export { LLMError, LLMTimeoutError, LLMRateLimitError, LLMAuthError } from './errors.js';
@@ -28,6 +28,7 @@ import { TIMEOUT_DEFAULT_MS, TIMEOUT_EVALUATOR_MS, TIMEOUT_OLLAMA_MS, TRUNCATE_S
 import { CacheManager } from './CacheManager.js';
 import { eventBus, EventTypes } from '../core/EventBus.js';
 import { isCodeComplete as isCodeCompleteShared } from '../core/isCodeComplete.js';
+import { pickCodeBlock, proseOutsideFences, splitThinking } from './ModelOutput.js';
 import { validateUrl, getAllowedHostsFromEnv, SSRFError } from '../security/UrlValidator.js';
 import { failureLogger } from '../harness/FailureLogger.js';
 import { detectProviderFromUrl } from '../harness/MultiProviderConfig.js';
@@ -145,12 +146,11 @@ export function normalizeSystemPrompt(systemPrompt: string | undefined | null): 
 }
 
 // ── Provider system imports ──
-import { createProvider } from './ProviderFactory.js';
+import { createProvider, transportEndpoint } from './ProviderFactory.js';
 import { BaseProvider } from './providers/BaseProvider.js';
-import { anthropicMessagesEndpoint } from './providers/AnthropicProvider.js';
 import type { ProviderImageInput, ProviderRequest, ProviderResponse, StreamEvent, ThinkingConfig, TokenUsage } from './ProviderTypes.js';
 import type { ModelRole, ResolvedRoleConfig, RoleConfigFile } from '../config/RoleConfig.js';
-import { loadRoleConfig, getFallbacks, isFatalRoleConfigError, resolveUserConfigPath, resolveThinkingConfig } from '../config/RoleConfig.js';
+import { loadRoleConfig, getFallbacks, isFatalRoleConfigError, resolveUserConfigPath, resolveThinkingConfig, envRoleTimeout } from '../config/RoleConfig.js';
 import { GLM_CODING_PLAN_MODEL as GLMCodingPlanModelRef } from '../identity/GLMCodingPlanSeat.js';
 import { KILO_SEAT_FALLBACKS, isKiloGatewayUrl, isCodexProxyUrl, isOllamaCloudUrl } from '../config/KiloGateway.js';
 import { getActiveGeneratorOverride } from './generatorOverrideContext.js';
@@ -250,8 +250,27 @@ export interface LLMConfig {
   /** Grok OIDC / grok-cli subscription seat. Hostname alone is not enough. */
   grokSubscriptionSeat?: boolean;
   glmCodingPlanSeat?: boolean;
+  /** MiniMax Token Plan seat: flat subscription on the exact api.minimax.io/anthropic endpoint. */
+  minimaxTokenPlanSeat?: boolean;
   /** Credential provenance; `grok-oidc` marks the Grok subscription seat. */
   keySource?: string;
+}
+
+const TRANSPORT_FAILURE_PATTERN = /fetch failed|econnrefused|econnreset|enotfound|etimedout|socket hang up|network/i;
+
+/**
+ * Whether an error says the provider itself is unhealthy, so it should count
+ * toward the circuit breaker: timeouts, transport failures and 5xx only.
+ * Aborts, authority refusals, auth, rate limits, other 4xx and model-declared
+ * failures do not (#1423 bug 29).
+ */
+export function isBreakerFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (error.name === 'AbortError') return false;
+  if (error instanceof LLMTimeoutError) return true;
+  if (error instanceof LLMAuthError || error instanceof LLMRateLimitError) return false;
+  if (error instanceof LLMError && error.statusCode !== undefined) return error.statusCode >= 500;
+  return TRANSPORT_FAILURE_PATTERN.test(error.message);
 }
 
 export interface LLMResponse {
@@ -266,6 +285,9 @@ export interface LLMResponse {
   error?: string;
   fromCache?: boolean;
   isComplete?: boolean;
+  /** Provider finish reason; 'length' means the reply hit the output-token cap
+   * (#1643), and then success is false (#1423 bug 7). */
+  finishReason?: ProviderResponse['finishReason'];
   /** Trace ID linking to a ReasoningCapture file */
   reasoningTraceId?: string;
   /** Source of thinking extraction (think_tags, narrative, provider_api, none) */
@@ -478,10 +500,12 @@ export class LLMClient {
     let roleTimeout: number | undefined;
 
     let roleSeatFlag: boolean | undefined;
+    let roleMinimaxSeatFlag: boolean | undefined;
     if (this.role) {
       const roleCfg = LLMClient.getRoleConfigSync(this.role);
       if (roleCfg) {
         roleSeatFlag = roleCfg.glmCodingPlanSeat;
+        roleMinimaxSeatFlag = roleCfg.minimaxTokenPlanSeat;
         roleBaseUrl = roleCfg.baseUrl;
         roleApiKey = roleCfg.apiKey;
         roleModel = roleCfg.model;
@@ -519,19 +543,22 @@ export class LLMClient {
       description: config?.description,
       temperature: config?.temperature ?? roleTemperature ?? 0.7,
       maxTokens: config?.maxTokens ?? roleMaxTokens ?? 4096,
+      // Role timeout (env SINTER_<ROLE>_TIMEOUT_MS > file > role default,
+      // resolved in RoleConfig) outranks the legacy global env (#1423 bug 32).
       timeout: config?.timeout
+        ?? roleTimeout
         ?? (() => {
           const n = Number.parseInt(
             process.env.LIMINAL_HARNESS_TIMEOUT || process.env.LIMINAL_LLM_TIMEOUT || '',
             10,
           );
           return Number.isFinite(n) && n > 0 ? n : undefined;
-        })()
-        ?? roleTimeout,
+        })(),
       role: this.role,
       thinking: config?.thinking ?? resolveThinkingConfig(roleThinking),
       glmCodingPlanSeat: (config?.glmCodingPlanSeat ?? roleSeatFlag) === true
         ? LLMClient.codingPlanDeclarationVerified(model) : false,
+      minimaxTokenPlanSeat: (config?.minimaxTokenPlanSeat ?? roleMinimaxSeatFlag) === true,
       // apiStyle is deprecated — silently accepted but ignored
       apiStyle: config?.apiStyle,
       endpointPath: config?.endpointPath,
@@ -598,8 +625,8 @@ export class LLMClient {
         maxTokens: 4096,
         // Generator and harness calls reach reasoning models that think for
         // minutes before answering (#708); the evaluator judge gets 3 minutes (#709).
-        timeout: role === 'evaluator' ? TIMEOUT_EVALUATOR_MS
-          : role === 'studio' ? TIMEOUT_OLLAMA_MS : TIMEOUT_DEFAULT_MS,
+        timeout: envRoleTimeout(role) ?? (role === 'evaluator' ? TIMEOUT_EVALUATOR_MS
+          : role === 'studio' ? TIMEOUT_OLLAMA_MS : TIMEOUT_DEFAULT_MS),
         thinking: resolveThinkingConfig(),
         streaming: role === 'harness',
       };
@@ -688,6 +715,7 @@ export class LLMClient {
     const roleSeat = roleConfig as ResolvedRoleConfig & {
       grokSubscriptionSeat?: boolean;
       glmCodingPlanSeat?: boolean;
+      minimaxTokenPlanSeat?: boolean;
       keySource?: string;
     };
     this.config = {
@@ -705,6 +733,8 @@ export class LLMClient {
         || roleSeat.keySource === 'grok-oidc',
       glmCodingPlanSeat: this.config.glmCodingPlanSeat
         || roleSeat.glmCodingPlanSeat,
+      minimaxTokenPlanSeat: this.config.minimaxTokenPlanSeat
+        || roleSeat.minimaxTokenPlanSeat,
       keySource: this.config.keySource ?? roleSeat.keySource,
     };
     this.provider = null;
@@ -808,6 +838,7 @@ export class LLMClient {
         // declarations — the primary role's must not shadow them (A005/Sol).
         logicalProvider: cfg.provider,
         glmCodingPlanSeat: cfg.glmCodingPlanSeat === true,
+        minimaxTokenPlanSeat: cfg.minimaxTokenPlanSeat === true,
         // Fallback configs may omit apiKey — resolve it endpoint-aware from
         // the environment (KILO_API_KEY for kilo.ai, GLM_API_KEY for z.ai).
         apiKey: cfg.apiKey ?? selectApiKeyForEndpoint(cfg.baseUrl, cfg.model),
@@ -863,7 +894,7 @@ export class LLMClient {
     });
     if (!decision.ok) {
       throw new LLMError(`Harness executor blocked before transport: ${decision.reason}: ${decision.detail}`,
-        provider.name, undefined, false, { model: actualModel, endpoint: provider.getConfig().baseUrl });
+        provider.name, undefined, false, { model: actualModel, endpoint: this.providerEndpoint(provider.getConfig().baseUrl, actualModel) });
     }
   }
 
@@ -876,11 +907,14 @@ export class LLMClient {
   }
 
   private classifySurface(provider: string, baseUrl: string,
-    fallbackSeatOverride?: boolean) {
+    fallbackSeatOverride?: boolean, minimaxTokenPlanSeat?: boolean) {
     return classifyProviderSurface(provider, baseUrl, {
       grokSubscriptionSeat: this.config.grokSubscriptionSeat === true
         || this.config.keySource === 'grok-oidc',
       glmCodingPlanSeat: fallbackSeatOverride ?? this.config.glmCodingPlanSeat === true,
+      // Per attempt: a fallback on the same host with a pay-per-token key
+      // must not inherit the primary's subscription declaration.
+      minimaxTokenPlanSeat: (minimaxTokenPlanSeat ?? this.config.minimaxTokenPlanSeat) === true,
       model: this.config.model,
     });
   }
@@ -890,6 +924,7 @@ export class LLMClient {
     const cliSeatUrl = canonicalCliSeatUrl(this.config.baseUrl);
     const hermesSeat = parseHermesSeat(this.config.baseUrl);
     const providerHint = cliSeatUrl === 'cli://codex' ? 'openai'
+      : cliSeatUrl === 'cli://claude' ? 'anthropic'
       : cliSeatUrl === 'cli://agy' ? 'google'
         : cliSeatUrl === 'cli://command-code' ? undefined
           // Hermes provider names: openai-api is OpenAI's API; the rest map as-is.
@@ -1009,7 +1044,8 @@ export class LLMClient {
       surface: this.classifySurface(providerFamily, attemptProviderCfg.baseUrl,
         this.glmCodingPlanEndpointFlag(attemptProviderCfg.baseUrl,
           attemptProviderCfg.glmCodingPlanSeat === true)
-          || undefined),
+          || undefined,
+        attemptProviderCfg.minimaxTokenPlanSeat === true),
       seatDigest: sha256Hex(attemptProviderCfg.apiKey ?? routeDigest),
     };
     const authority = this.currentHarnessAuthority();
@@ -1383,7 +1419,10 @@ export class LLMClient {
       breaker.recordSuccess();
       return result;
     } catch (error) {
-      breaker.recordFailure();
+      // Only provider-health failures trip the breaker: timeouts, transport
+      // errors and 5xx. Aborts, authority refusals, 4xx and model-declared
+      // failures say nothing about whether the provider is up (#1423 bug 29).
+      if (isBreakerFailure(error)) breaker.recordFailure();
       throw error;
     }
   }
@@ -1403,8 +1442,8 @@ export class LLMClient {
 
       // These allowlisted endpoints invoke local subscription CLIs, not HTTP.
       // Rotation may append the OpenAI-compatible path to the CLI address.
-      const localCli = /^cli:\/\/(?:codex|agy|command-code|grok)(?:\/chat\/completions)?$/.test(
-        this.config.baseUrl
+      const localCli = /^cli:\/\/(?:codex|agy|command-code|claude|grok)$/.test(
+        canonicalCliSeatUrl(this.config.baseUrl).replace(/^(cli:\/\/grok)\/chat\/completions$/, '$1')
       ) || parseHermesSeat(this.config.baseUrl) !== null;
       if (!localCli && !this.config.baseUrl.startsWith('grok-cli:')) {
         try {
@@ -1421,6 +1460,7 @@ export class LLMClient {
       this.provider = createProvider({
         baseUrl: this.config.baseUrl,
         logicalProvider: this.config.provider,
+        minimaxTokenPlanSeat: this.config.minimaxTokenPlanSeat === true,
         apiKey: this.config.apiKey,
         model: this.config.model,
         temperature: this.config.temperature,
@@ -1457,13 +1497,8 @@ export class LLMClient {
     return provider === Provider.LMSTUDIO || provider === Provider.OLLAMA;
   }
 
-  private providerEndpoint(providerName = this.detectProvider(), baseUrlValue = this.config.baseUrl, model = this.config.model): string {
-    const baseUrl = baseUrlValue.replace(/\/+$/, '');
-    if (providerName === 'grok-cli') return baseUrl;
-    if (providerName === Provider.OLLAMA && !baseUrl.endsWith('/v1')) return `${baseUrl}/api/generate`;
-    if (providerName === 'anthropic') return anthropicMessagesEndpoint(baseUrl);
-    if (providerName === 'google') return `${baseUrl}/models/${model}:generateContent`;
-    return `${baseUrl}/chat/completions`;
+  private providerEndpoint(baseUrl = this.config.baseUrl, model = this.config.model): string {
+    return transportEndpoint({ baseUrl, model });
   }
 
   private requestProvenanceForProvider(
@@ -1476,7 +1511,7 @@ export class LLMClient {
     return {
       provider: providerName,
       model,
-      endpoint: this.providerEndpoint(providerName, config.baseUrl, model),
+      endpoint: this.providerEndpoint(config.baseUrl, model),
       endpointStyle: apiStyleForEndpoint(config.baseUrl),
       fallbackUsed: fallback?.fallbackUsed ?? false,
       fallbackFrom: fallback?.fallbackFrom,
@@ -1818,8 +1853,9 @@ export class LLMClient {
       let primaryAttemptOrdinal = 0;
       const executorAttestations: ExecutorAttestationRef[] = [];
 
-      const result = await RetryManager.executeWithRetry(async () => {
-        return this.generateWithBreaker(providerName, async () => {
+      // The breaker wraps the retry loop, so one logical request counts as at
+      // most one breaker failure however many retries it spent (#1423 bug 6).
+      const result = await this.generateWithBreaker(providerName, () => RetryManager.executeWithRetry(async () => {
           const provider = await this.getProvider();
           const req: ProviderRequest = {
             systemPrompt,
@@ -1836,14 +1872,16 @@ export class LLMClient {
         const response = await this.executeProviderAttempt(provider, req,
           retryOrdinal === 0 ? 'pre-primary-transport' : 'pre-retry-transport', 0, retryOrdinal, executorAttestations);
         if (!response.success) {
+          // A provider-declared failure is deterministic unless its text names
+          // a transient network fault; retrying it only burns backoff (#1423 bug 30).
           throw new LLMError(
             response.error || 'Provider returned unsuccessful response',
             provider.name,
             undefined,
-            true,
+            isTransientNetworkError(response.error ?? ''),
             {
               model: provider.getModel(),
-              endpoint: this.providerEndpoint(provider.name),
+              endpoint: this.providerEndpoint(provider.getConfig().baseUrl, provider.getModel()),
               responseBody: response.error,
             },
           );
@@ -1852,8 +1890,7 @@ export class LLMClient {
           ...this.mapProviderResponse(response),
           provenance: this.requestProvenanceForProvider(provider),
         };
-      });
-      }, { signal }).catch(async (primaryError: unknown) => {
+      }, { signal })).catch(async (primaryError: unknown) => {
         // Only attempt fallbacks on network/auth errors
         if (!this.isFallbackableError(primaryError)) {
           throw primaryError;
@@ -1895,7 +1932,7 @@ export class LLMClient {
                 false,
                 {
                   model: fallback.getModel(),
-                  endpoint: this.providerEndpoint(fallback.name, fallback.getConfig().baseUrl, fallback.getModel()),
+                  endpoint: this.providerEndpoint(fallback.getConfig().baseUrl, fallback.getModel()),
                   responseBody: fbResponse.error,
                 },
               );
@@ -2160,7 +2197,7 @@ export class LLMClient {
             false,
             {
               model: provider.getModel(),
-              endpoint: this.providerEndpoint(provider.name),
+              endpoint: this.providerEndpoint(provider.getConfig().baseUrl, provider.getModel()),
               responseBody: response.error,
             },
           );
@@ -2171,7 +2208,7 @@ export class LLMClient {
           success: true as const,
           provider: provider.name,
           model: provider.getModel(),
-          endpoint: this.providerEndpoint(provider.name, provider.getConfig().baseUrl, provider.getModel()),
+          endpoint: this.providerEndpoint(provider.getConfig().baseUrl, provider.getModel()),
           endpointStyle: apiStyleForEndpoint(provider.getConfig().baseUrl),
           fallbackUsed: false,
           provenance: this.requestProvenanceForProvider(provider),
@@ -2885,6 +2922,7 @@ export class LLMClient {
         success: false,
         error: response.error || 'Provider returned unsuccessful response',
         usage: response.usage,
+        finishReason: response.finishReason,
       };
     }
 
@@ -2905,8 +2943,14 @@ export class LLMClient {
       thinking,
       thinkingSource,
       recoveredFromThinking: false,
-      success: code.length > 0,
-      isComplete: sanitized.isComplete,
+      success: code.length > 0 && response.finishReason !== 'length',
+      // A reply cut at the token cap is never complete, whatever the
+      // sanitizer infers from its last line (#1423 bug 7).
+      isComplete: response.finishReason === 'length' ? false : sanitized.isComplete,
+      finishReason: response.finishReason,
+      ...(response.finishReason === 'length'
+        ? { error: `Provider stopped at the token cap (finish_reason=length, maxTokens reached)` }
+        : {}),
       usage: response.usage,
     };
 
@@ -2988,30 +3032,18 @@ export function sanitizeOutputWithReasoning(content: string): {
   sanitized: { code: string; success: boolean; isComplete: boolean };
   extractedReasoning: string;
 } {
-  // Step 1: Extract <think/> tags first (some models do emit them)
-  const thinkPattern = /<think\b[^>]*>([\s\S]*?)<\/think>/gi;
-  let tagReasoning = '';
-  let cleanCode = content;
-  const thinkMatches = content.matchAll(thinkPattern);
-  for (const m of thinkMatches) {
-    tagReasoning += m[1] + '\n';
-  }
-  cleanCode = content.replace(thinkPattern, '');
+  const reply = splitThinking(content);
+  const tagReasoning = reply.thinking;
+  let cleanCode = reply.answer;
 
-  // Step 2: Extract code from markdown fences
-  const markdownMatch = cleanCode.match(/```(?:\w+)?\n([\s\S]*?)```/);
-  if (markdownMatch) {
-    // Everything before the first ``` is narrative/reasoning
-    const beforeFence = cleanCode.substring(0, cleanCode.indexOf('```')).trim();
-    const narrativeReasoning = beforeFence
+  const block = pickCodeBlock(cleanCode);
+  if (block) {
+    const narrativeReasoning = proseOutsideFences(cleanCode)
       .split('\n')
       .filter(line => line.trim().length > 0)
       .join('\n');
-
-    cleanCode = markdownMatch[1].trim();
-
-    // Combine: explicit think tags + narrative before code
-    const extractedReasoning = [tagReasoning.trim(), narrativeReasoning]
+    cleanCode = block.body.trim();
+    const extractedReasoning = [tagReasoning, narrativeReasoning]
       .filter(Boolean)
       .join('\n\n');
 
@@ -3074,7 +3106,7 @@ export function sanitizeOutputWithReasoning(content: string): {
   const narrativeReasoning = narrativeLines.join('\n');
   cleanCode = lines.slice(codeStartIndex).join('\n').trim();
 
-  const extractedReasoning = [tagReasoning.trim(), narrativeReasoning]
+  const extractedReasoning = [tagReasoning, narrativeReasoning]
     .filter(Boolean)
     .join('\n\n');
 
@@ -3090,52 +3122,7 @@ export function sanitizeOutputWithReasoning(content: string): {
  * Exported as a standalone function for reuse across the codebase.
  */
 export function sanitizeOutput(content: string): { code: string; success: boolean; isComplete: boolean } {
-  // Step 1: Strip <think/> tags (Qwen, DeepSeek, etc.)
-  let cleanCode = content.replace(/<think\b[^>]*>[\s\S]*?<\/think>/gi, '');
-
-  // Step 2: Extract code from markdown fences
-  const markdownMatch = cleanCode.match(/```(?:\w+)?\n([\s\S]*?)```/);
-  if (markdownMatch) {
-    cleanCode = markdownMatch[1].trim();
-  }
-
-  // Step 3: Strip leading narrative text
-  const lines = cleanCode.split('\n');
-  const codeStartPatterns = [
-    /^(let|const|var|function|class|if|for|while|import|export|return|precision|void|vec|uniform)\b/,
-    /^<!DOCTYPE/i,
-    /^<html/i,
-    /^<script/i,
-    /^\$/,
-    /^osc\(|^src\(|^render\(/,
-  ];
-
-  let codeStartIndex = 0;
-  for (let i = 0; i < lines.length; i++) {
-    const trimmed = lines[i].trim();
-    if (!trimmed) continue;
-
-    if (codeStartPatterns.some(p => p.test(trimmed))) {
-      codeStartIndex = i;
-      break;
-    }
-
-    // Skip narrative lines
-    if (/^(Here|I'll|Let me|This|The user)/i.test(trimmed)) {
-      codeStartIndex = i + 1;
-    }
-  }
-
-  cleanCode = lines.slice(codeStartIndex).join('\n').trim();
-
-  // Step 4: Validate code completeness
-  const isComplete = isCodeComplete(cleanCode);
-
-  return {
-    code: cleanCode,
-    success: cleanCode.length > 0,
-    isComplete,
-  };
+  return sanitizeOutputWithReasoning(content).sanitized;
 }
 
 /**

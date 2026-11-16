@@ -1,5 +1,8 @@
+import { existsSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { readProductionAuthorityStamp } from './ProductionPackageStamp.js';
+import { readCurrentGitCommit } from './ProofReceiptValidator.js';
 
 const SENSITIVE_PATTERNS = Object.freeze([
   { kind: 'provider', pattern: /(?:new\s+LLMClient|createProvider)\s*\(/ },
@@ -158,8 +161,25 @@ export async function scanProductionAuthorityLocators(root: string): Promise<rea
 export async function scanProductionEntrypointAuthorityLocators(
   root: string, entries: readonly string[],
 ): Promise<readonly string[]> {
+  // A packed install ships dist only (no src, no git); use the census taken from the real
+  // tree at pack time. A git checkout missing src fails the real scan instead of trusting dist.
+  if (!existsSync(path.join(root, 'src')) && readCurrentGitCommit(root) === null) {
+    return stampedEntrypointLocators(root, entries);
+  }
   const { files, readSource } = await reachableFiles(root, entries);
   return Object.freeze((await locatorsForFiles(root, files, readSource)).sort());
+}
+
+function stampedEntrypointLocators(root: string, entries: readonly string[]): readonly string[] {
+  const stamp = readProductionAuthorityStamp(root);
+  if (!stamp) throw new Error('PRODUCTION_AUTHORITY_STAMP_MISSING');
+  const locators = new Set<string>();
+  for (const entry of entries) {
+    const stamped = stamp.entrypoints[entry];
+    if (!stamped) throw new Error(`PRODUCTION_AUTHORITY_STAMP_INVALID:entrypoint:${entry}`);
+    for (const locator of stamped) locators.add(locator);
+  }
+  return Object.freeze([...locators].sort());
 }
 
 /** Direct shipped-surface guard for regressions hidden inside monolithic entrypoints. */

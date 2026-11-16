@@ -1,0 +1,1 @@
+src(o0).scale(()=>0.99+Math.sin(time*0.11)*0.01).rotate(()=>time*0.08).modulate(noise(3,0.2).scale(()=>1+Math.sin(time*0.19)*0.3),0.15).mult(()=>0.93+Math.sin(time*0.17)*0.06).add(shape(4,0.25,0.1).rotate(()=>time*0.7).scale(()=>1+Math.sin(time*0.31)*0.2).color(1.5,0.8,0.5).kaleid(3)).out()

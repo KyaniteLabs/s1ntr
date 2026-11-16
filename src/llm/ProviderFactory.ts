@@ -9,7 +9,7 @@ import type { ProviderConfig } from './ProviderTypes.js';
 import { detectProviderAdapter } from '../config/ProviderRuntime.js';
 import { BaseProvider } from './providers/BaseProvider.js';
 import { OpenAIProvider } from './providers/OpenAIProvider.js';
-import { AnthropicProvider } from './providers/AnthropicProvider.js';
+import { AnthropicProvider, anthropicMessagesEndpoint } from './providers/AnthropicProvider.js';
 import { OllamaProvider } from './providers/OllamaProvider.js';
 import { OpenRouterProvider } from './providers/OpenRouterProvider.js';
 import { GoogleProvider } from './providers/GoogleProvider.js';
@@ -25,6 +25,29 @@ export type ProviderName = 'openai' | 'anthropic' | 'ollama' | 'openrouter' | 'g
  */
 export function detectProvider(config: ProviderConfig): ProviderName {
   return detectProviderAdapter(config);
+}
+
+/** The URL the adapter createProvider picks for this config posts to; error records and receipts name this one. */
+export function transportEndpoint(config: { baseUrl: string; model: string }): string {
+  const { baseUrl } = config;
+  switch (detectProvider(config)) {
+    case 'grok-cli':
+    case 'cli':
+      return baseUrl;
+    case 'anthropic':
+      return anthropicMessagesEndpoint(baseUrl);
+    case 'google': {
+      const trimmed = baseUrl.replace(/\/+$/, '');
+      const base = trimmed.includes('generativelanguage') ? trimmed : 'https://generativelanguage.googleapis.com';
+      return `${base}/v1beta/models/${config.model}:generateContent`;
+    }
+    case 'ollama':
+      return baseUrl.endsWith('/v1') ? `${baseUrl}/chat/completions` : `${baseUrl}/api/generate`;
+    case 'minimax':
+      return baseUrl.toLowerCase().includes('/anthropic') ? `${baseUrl}/v1/messages` : `${baseUrl}/chat/completions`;
+    default:
+      return `${baseUrl}/chat/completions`;
+  }
 }
 
 /**

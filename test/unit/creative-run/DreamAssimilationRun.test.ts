@@ -206,7 +206,7 @@ describe('Dream and Assimilate production run', () => {
     expect(store.writes).toEqual([
       'started', 'produced', 'specialist-reviewed', 'reviewed', 'completed',
     ]);
-  });
+  }, 30_000); // whole production graph: 5 s default timed out on the public runner (db1b666)
 
   it('rejects source stacking instead of calling it Dream synthesis', async () => {
     const sourceCode = '<!doctype html><html><body>unchanged parent</body></html>';

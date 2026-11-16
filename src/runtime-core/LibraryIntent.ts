@@ -23,6 +23,7 @@
  */
 
 import { assertVendoredLibraries } from '../core/wrappers/VendoredLibraries.js';
+import { fencedBlocks } from '../llm/ModelOutput.js';
 
 /** Hard budget: a piece may request at most this many distinct libraries. */
 export const MAX_LIBRARIES_PER_PIECE = 3;
@@ -43,12 +44,9 @@ const LAYERS_RE = /^\s*layers?\s*:\s*(.+)$/im;
 const LAYER_SPEC_RE = /([a-z0-9]+)\[([^\]]*)\]/gi;
 
 function trailingBlock(text: string): string {
-  const tail = text.slice(-TRAILING_CHARS);
-  // if the response ends inside a code fence, the declaration zone is empty
-  // (the model didn't emit a trailing block after its code)
-  const fenceCount = (tail.match(/```/g) ?? []).length;
-  if (fenceCount % 2 === 1) return '';
-  return tail;
+  // A response that ends inside a code fence has no declaration zone.
+  if (fencedBlocks(text).at(-1)?.closed === false) return '';
+  return text.slice(-TRAILING_CHARS);
 }
 
 /**

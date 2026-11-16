@@ -9,6 +9,7 @@ import { writeFileSync, mkdirSync, existsSync, readFileSync, readdirSync } from 
 import { join } from 'path';
 import { homedir } from 'os';
 import { Logger } from '../utils/Logger.js';
+import { splitThinking } from '../llm/ModelOutput.js';
 
 export interface ReasoningTrace {
   id: string;
@@ -132,7 +133,7 @@ const REASONING_PATTERNS: Array<{
   },
   {
     type: 'code_in_thinking',
-    regex: /<think>[\s\S]*?(function\s+\w+|const\s+\w+|let\s+\w+|var\s+\w+)[\s\S]*?<\/think>/gi,
+    regex: /\bfunction\s+\w+\s*\(|\b(?:const|let|var)\s+\w+\s*=/g,
     confidence: 0.85,
     description: 'Model put code inside <think> tags instead of main output',
   },
@@ -158,29 +159,8 @@ export class ReasoningCapture {
    * Extract reasoning traces from LLM output
    */
   extractReasoning(output: string): { reasoning: string; code: string } {
-    // Pattern to match reasoning tags
-    const reasoningPatterns = [
-      /<thinking>([\s\S]*?)<\/thinking>/gi,
-      /<thinking>([\s\S]*?)<\/thinking>/gi,
-      /<reasoning>([\s\S]*?)<\/reasoning>/gi,
-      /<analysis>([\s\S]*?)<\/analysis>/gi,
-    ];
-
-    let reasoning = '';
-    let cleanedOutput = output;
-
-    for (const pattern of reasoningPatterns) {
-      const matches = output.matchAll(pattern);
-      for (const match of matches) {
-        reasoning += match[1] + '\n';
-        cleanedOutput = cleanedOutput.replace(match[0], '');
-      }
-    }
-
-    return {
-      reasoning: reasoning.trim(),
-      code: cleanedOutput.trim(),
-    };
+    const reply = splitThinking(output);
+    return { reasoning: reply.thinking, code: reply.answer.trim() };
   }
 
   /**

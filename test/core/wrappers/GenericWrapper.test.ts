@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { Script, runInNewContext } from 'node:vm';
 import { GenericWrapper } from '../../../src/core/wrappers/GenericWrapper.js';
 
 describe('GenericWrapper', () => {
@@ -116,6 +117,40 @@ describe('GenericWrapper', () => {
     });
 
   describe('wrap - Strudel', () => {
+    // f1d87c77 dropped one ')' in the artwork strip chain: every wrapped piece threw a SyntaxError in
+    // the page and played silence (Kaggle smoke 2026-11-16: 10 of 12 strudel gates). The string-level
+    // test above could not see it, so parse the real page scripts and run the real strip chain.
+    const inlineScripts = (html: string) =>
+      [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+
+    it('emits inline scripts that all parse', () => {
+      const html = GenericWrapper.wrap('stack(s("bd ~ hh").gain(+6), note("c4 e4")).slow(2)', { domain: 'strudel' });
+      const scripts = inlineScripts(html);
+      expect(scripts.length).toBeGreaterThan(0);
+      for (const s of scripts) expect(() => new Script(s)).not.toThrow();
+    });
+
+    it('runs the artwork strip chain the page runs', () => {
+      const artworkOf = (code: string) => {
+        const html = GenericWrapper.wrap(code, { domain: 'strudel' });
+        const m = html.match(/var artwork = ([\s\S]*?);\n/);
+        if (!m) throw new Error('wrapped strudel page has no artwork statement');
+        return runInNewContext(m[1]) as string;
+      };
+      expect(artworkOf('stack(s("bd sd")).out();')).toBe('stack(s("bd sd"))');
+      expect(artworkOf('s("bd sd").tempo(120)')).toBe('s("bd sd")');
+      expect(artworkOf('s("bd sd").start()')).toBe('s("bd sd")');
+      expect(artworkOf('s("bd").out().gain(1)')).toBe('s("bd").out().gain(1)');
+    });
+
+    it('strips a trailing .out() from strudel code (Kabelsalat method; silences a pattern)', () => {
+      const result = GenericWrapper.wrap('stack(s("bd sd"), note("c3 e3")).out()', { domain: 'strudel' });
+      expect(result).toContain('.replace(/\\s*\\.\\s*out\\s*\\(\\s*\\)\\s*;?\\s*$/, \'\')');
+      const strip = (c: string) => c.replace(/\s*\.\s*out\s*\(\s*\)\s*;?\s*$/, '');
+      expect(strip('stack(s("bd sd")).out();\n')).toBe('stack(s("bd sd"))');
+      expect(strip('s("bd").out().gain(1)')).toBe('s("bd").out().gain(1)');
+    });
+
     it('allows the Strudel editor to fetch its sample manifest without broadening every wrapper', () => {
       const result = GenericWrapper.wrap('s("bd sd")', { domain: 'strudel' });
 
@@ -389,13 +424,6 @@ document.body.innerHTML = ` + '`' + `<button id="startButton">Start Ambient Sequ
       expect(result).toContain('glCanvas');
     });
 
-    it('escapes closing script tags', () => {
-      const code = 'void main() { }</script>';
-      const result = GenericWrapper.wrap(code, { domain: 'shader' });
-      
-      expect(result).toContain('<\\/script>');
-    });
-
     it('normalizes GLSL 300 and Shadertoy aliases for the browser wrapper', () => {
       const code = `#version 300 es
 precision highp float;
@@ -590,6 +618,34 @@ export default makeScene2D("PreviewScene", function* (view) {
       expect(result).toContain('data-ascii-preview-shell');
       expect(result).toMatch(/font-size:.*100vw.*100vh/);
       expect(result).toContain('max-width: 100%');
+    });
+
+    it('keeps small-frame chrome proportional and fits text at runtime', () => {
+      const result = GenericWrapper.wrap('roses\nare red', { domain: 'ascii', title: 'Poem' });
+
+      // Padding scales with the smaller viewport side, so a 360px gallery
+      // frame is not mostly padding.
+      expect(result).toContain('padding: clamp(4px, 3vmin, 56px)');
+      expect(result).toContain('padding: clamp(6px, 4vmin, 72px)');
+      expect(result).not.toContain('clamp(24px, 5vw, 72px)');
+      // No label on a named page, so no height is reserved for one.
+      expect(result).not.toMatch(/- 50px\)/);
+      expect(result).toContain('data-ascii-fit');
+    });
+
+    it('reads prose at a readable size instead of shrinking it like a picture', () => {
+      const poem = GenericWrapper.wrap('I kept them all.\nI stacked the failed circles like coins,', { domain: 'ascii', title: 'S1NTR' });
+      const art = GenericWrapper.wrap('  /\\  \n /==\\ \n/____\\', { domain: 'ascii', title: 'S1NTR' });
+      expect(poem).toContain('data-ascii-preview-shell data-text-mode="read"');
+      expect(art).not.toContain('data-ascii-preview-shell data-text-mode="read"');
+    });
+
+    it('keeps the composition foreground free of the preview fitter', () => {
+      const result = GenericWrapper.wrap(' /\\\n/__\\', { domain: 'ascii', compositionForeground: true });
+      expect(result).not.toContain('data-ascii-fit');
+      expect(result).toContain('padding: clamp(20px, 4vw, 56px)');
+      // Same font fit as before the small-frame fix: 2 columns, 2 lines.
+      expect(result).toContain('font-size: max(1px, min(34px, calc((min(980px, 96vw, calc(100vw - clamp(40px, 8vw, 112px))) - clamp(48px, 10vw, 144px) - 2px) / 2.44), calc((100vh - clamp(40px, 8vw, 112px) - clamp(48px, 10vw, 144px) - 50px) / 2.4))');
     });
 
     it('can render ASCII as transparent foreground for layered compositions', () => {

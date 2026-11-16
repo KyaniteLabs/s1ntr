@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.5.0] - 2026-11-15
+
+User-facing changes merged since 2.4.0 (#1482–#1535, 2026-11-14).
+
+### Added
+
+- Reverse mode takes any reference. `sinter generate` and `sinter compose` accept `--ref`, `--arc`, `--duration` and `--cues`: audio, image, video, SVG diagrams, storyboards, mood boards and text each become a feature card, and the cards plus an energy arc steer the piece. The run writes a `reverse-provenance.json` (#1508, part of #711).
+- Tone and Strudel pieces fit an exact `--duration`. The piece is rendered and measured (length within 50 ms, a final hit, envelope against the arc, ending decay), then revised once if it misses; the measured fit goes into the provenance file (#1509, closes #711).
+- Sinter has a Blender domain: the model writes a `bpy` script, Sinter renders it headless in a locked-down subprocess and judges the PNG like the other visual domains. It has not yet been run against a real Blender install, so treat it as unverified until it has (#1507).
+- SVG pieces can be generated as page-ready fragments bound to host CSS tokens: `--output-mode fragment --tokens ... --container WxH --motion ...`. Standalone SVG output is unchanged (#1504, part of #1162).
+- `sinter sss-score` reads its second vision eye from `~/.sinter/config.json`; the default is unchanged (#1482).
+
+### Fixed
+
+- Long reasoning calls no longer die at 300 s with a bare "fetch failed"; provider timeouts are honored, and a timed-out evaluator run is marked unscored instead of scored (#1506, #708, #709).
+- Concurrent `sinter generate` runs on different keys no longer block each other, the same key still runs once, and the shared store no longer loses updates between processes (#1503, #707).
+- `sinter live-music` and `sinter fix` run their provider calls under a journal-reserved grant, like `compose` (#1505, #710).
+- Sing's microphone no longer prompts twice, can be cancelled while starting, survives a quick restart, and offline renders find ffmpeg on Linux (#1512).
+- SVG pieces can only reference their own `#id` fragments; `file:` and relative `href`/`src` values are rejected (#1514).
+- Swarm voting calibration no longer loses updates when two processes share the ledger (#1518, #1295).
+- File operations report errors instead of swallowing them in compaction, backup, preferences, SinterFS persistence and state resets (#1519, #1525, #1529), and a SeedBank load race is closed (#1517).
+- Writing tests for 16 more modules exposed and fixed real bugs (#1531).
+
+### Security and safety
+
+- LLM-generated art code now runs behind one AST-based guard instead of a regex denylist. It blocks prototype pollution, window and document reach, `eval` and `Function` by alias, and `__proto__` literals, and `eval` and `new Function` are lint errors elsewhere (#1527).
+- The public mirror publishes a snapshot with no private history, never force-pushes, and refuses to push unless the public CI command passes on the sanitized tree (#1534, #1536, #1538).
+
+### Internal
+
+- Public CI for the `s1ntr` snapshot, a merge-safe split of the shared ledger and registry, a CI gate that names the stalled step, and the TUI bridge split into modules (#1535, #1522, #1521, #1530).
+- 460+ weak assertions replaced with exact values, silent-pass test suites now run against a recorded provider, and dozens of previously untested modules covered (#1511, #1513, #1515, #1516, #1520, #1523, #1524, #1526, #1528, #1531, #1532).
+
 ## [2.4.0] - 2026-11-14
 
 The QA-stack release: user-facing changes merged since 2.3.0, including the 18-PR QA stack (#1484–#1501).

@@ -6,6 +6,7 @@
 
 import { TierBasedGenerator, type TierBasedGeneratorOptions } from '../TierBasedGenerator.js';
 import { StrudelValidator } from '../../core/validators/StrudelValidator.js';
+import { answerCode, pickCodeBlock, splitThinking, withoutThinkTags } from '../../llm/ModelOutput.js';
 
 export interface StrudelGeneratorOptions extends TierBasedGeneratorOptions {
   bpm?: number;
@@ -46,15 +47,7 @@ export class StrudelGenerator extends TierBasedGenerator {
       return '';
     }
     
-    let clean = code;
-    
-    // Strip markdown code fences (only at start/end, preserve code inside)
-    clean = clean.replace(/^```(?:javascript|js|strudel)?\n?/gm, '');
-    clean = clean.replace(/\n?```$/gm, '');
-    clean = clean.replace(/^```$/gm, '');
-    
-    // Strip <think> tags and their content (LLM reasoning contamination)
-    clean = clean.replace(/<think>[\s\S]*?<\/think>/gi, '');
+    let clean = answerCode(code, ['strudel', 'javascript', 'js']);
     
     // Strip HTML-style comments
     clean = clean.replace(/<!--[\s\S]*?-->/g, '');
@@ -123,7 +116,7 @@ export class StrudelGenerator extends TierBasedGenerator {
         `Create a Strudel pattern for: ${prompt}`,
         `Use bpm ${options?.bpm ?? 120} unless the prompt implies another tempo.`,
         'Return 4 to 8 substantial runnable lines, at least 120 characters total.',
-        'Include bpm(), stack(...).out(), one s("bd ...") drum pattern, one note("...") melodic pattern, and effects like .gain(), .room(), .delay(), or .cutoff().',
+        'Include bpm(), a bare stack(...) with no .out() (it silences the pattern), one s("bd ...") drum pattern, one note("...") melodic pattern, and effects like .gain(), .room(), .delay(), or .cutoff().',
         'No markdown fences, prose, HTML, or hidden reasoning in the final answer.',
       ].join('\n'),
       [
@@ -136,7 +129,7 @@ export class StrudelGenerator extends TierBasedGenerator {
         '  s("bd ... hh ...").gain(...),',
         '  note("<c3 e3 g3 ...>").s("triangle").cutoff(...).delay(...),',
         '  s("cp ...").room(...)',
-        ').slow(...).out()',
+        ').slow(...)',
         'The final code must be at least 120 characters and must not include comments, markdown, prose, or HTML.',
       ].join('\n'),
     ];
@@ -159,13 +152,12 @@ export class StrudelGenerator extends TierBasedGenerator {
   }
 
   private recoverStrudelFromModelText(text: string): string | null {
-    const fenced = text.match(/```(?:javascript|js|strudel)?\s*\n([\s\S]*?)```/i)?.[1];
+    const fenced = pickCodeBlock(splitThinking(text).answer, ['strudel', 'javascript', 'js'])?.body;
     if (fenced && this.validateOutput(this.sanitizeCode(fenced)).valid) {
       return fenced;
     }
 
-    const lines = text
-      .replace(/<\/?think[^>]*>/gi, '')
+    const lines = withoutThinkTags(text)
       .split('\n')
       .map(line => line.trim().replace(/^\s*(?:Line\s*)?\d+\s*:\s*/i, ''))
       .filter(line => line.length > 0)

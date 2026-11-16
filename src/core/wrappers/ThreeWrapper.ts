@@ -5,6 +5,7 @@
 
 import { SECURITY_HEADERS } from './SecurityHeaders.js';
 import { VENDOR_ASSETS } from '../../utils/vendorAssets.js';
+import { scriptSafe } from '../../utils/scriptEmbed.js';
 
 const THREE_CDN = VENDOR_ASSETS.threeModule;
 
@@ -67,7 +68,7 @@ export class ThreeWrapper {
     }
     </script>
     <script type="module">
-${moduleCode}
+${scriptSafe(moduleCode)}
     </script>
 </body>
 </html>`;

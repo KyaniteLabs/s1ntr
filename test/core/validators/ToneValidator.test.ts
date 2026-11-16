@@ -60,7 +60,7 @@ Tone.Transport.start();
       expect(result.errors).toHaveLength(0);
     });
 
-    it('should validate Tone.js code with import statement', () => {
+    it('rejects an import statement: the shell runs the piece in a classic script', () => {
       const code = `
 import * as Tone from 'tone';
 
@@ -69,8 +69,25 @@ synth.triggerAttackRelease("C4", "4n");
       `;
 
       const result = ToneValidator.validate(code);
-      expect(result.valid).toBe(true);
-      // Valid Tone.js with import - may have no errors or just structure warnings
+      expect(result.valid).toBe(false);
+      expect(result.errors.join(' ')).toMatch(/invalid JavaScript syntax/);
+    });
+
+    it('rejects a top-level return (a truncated-repair tail, ds1017/v16-rain-drone)', () => {
+      const code = `if (!started) return;
+const synth = new Tone.Synth().toDestination();
+stopBtn.disabled = true;`;
+
+      const result = ToneValidator.validate(code);
+      expect(result.valid).toBe(false);
+      expect(result.errors.join(' ')).toMatch(/return/i);
+    });
+
+    it('accepts return inside a function', () => {
+      const code = `function tick() { if (!started) return; synth.triggerAttackRelease('C4', '8n'); }
+const synth = new Tone.Synth().toDestination();`;
+
+      expect(ToneValidator.validate(code).errors.join(' ')).not.toMatch(/invalid JavaScript syntax/);
     });
 
     it('should reject code without Tone reference', () => {

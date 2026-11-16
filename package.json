@@ -1,7 +1,7 @@
 {
   "name": "s1ntr",
-  "version": "2.4.0",
-  "description": "Sinter \u2014 a creative-coding studio that generates across many visual/audio domains and fires them into one layered work, then keeps the kiln burning: every artifact, failure, preference, dream, and repair is fused back into the system's next firing (to sinter: fuse many particles into a single solid form with heat and pressure, the way a kiln fuses clay)",
+  "version": "2.5.0",
+  "description": "S1NTR \u2014 a creative-coding studio that codes art across many visual and audio mediums and fuses them into one layered work, then keeps the kiln burning: every artifact, failure, preference and repair is fused back into its next firing (to sinter: fuse many particles into one solid form with heat and pressure, the way a kiln fuses clay)",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -10,11 +10,11 @@
   "packageManager": "pnpm@10.34.4",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/KyaniteLabs/liminal.git"
+    "url": "git+https://github.com/KyaniteLabs/s1ntr.git"
   },
   "homepage": "https://docs.s1ntr.com/",
   "bugs": {
-    "url": "https://github.com/KyaniteLabs/liminal/issues"
+    "url": "https://github.com/KyaniteLabs/s1ntr/issues"
   },
   "files": [
     "dist",
@@ -33,7 +33,7 @@
     "domain:ratchet": "node scripts/domains/gauntlet.mjs --all --ratchet",
     "domain:ratchet:ci": "node scripts/domains/ratchet-ci-proof.mjs",
     "postinstall": "node scripts/packaging/postinstall.mjs",
-    "prepack": "npm run build",
+    "prepack": "npm run build && node scripts/packaging/write-production-authority-stamp.mjs",
     "build": "tsc --incremental false",
     "test": "vitest run",
     "test:integration": "vitest run test/integration --coverage=false",
@@ -107,6 +107,7 @@
     "proof:launch-risk": "tsx scripts/proof/launch-risk-proof.ts",
     "proof:studio-smoke": "tsx scripts/proof/studio-smoke.ts",
     "test:ci:fast": "LIMINAL_CI_FAST=1 vitest run --coverage=false --pool=forks --maxWorkers=4",
+    "test:ci:fast:coverage": "LIMINAL_CI_FAST=1 vitest run --coverage --coverage.reportOnFailure --pool=forks --maxWorkers=4",
     "test:ci:slow": "LIMINAL_CI_SLOW=1 vitest run --pool=forks",
     "check:orphans": "bash scripts/check-orphans.sh",
     "check:script-targets": "node scripts/ci/check-package-script-targets.mjs",

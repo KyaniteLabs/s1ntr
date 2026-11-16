@@ -14,6 +14,7 @@ import type { NoveltyArchive } from '../evolution/NoveltyArchive.js';
 import type { AestheticModel } from '../evolution/AestheticModel.js';
 import { CreativeBoard } from '../collab/CreativeBoard.js';
 import type { BoardDeliberation } from '../collab/CreativeBoard.js';
+import { splitThinking } from '../llm/ModelOutput.js';
 
 export interface AssessOptions {
   /** When provided, overall score is the average of scores for these dimensions. Known dimensions: "technical", "aesthetic", "novelty", "emergence", "interestingness". Aesthetic combines visual (creative) and sound. */
@@ -800,7 +801,7 @@ export class CreativeEvaluator {
    * inside a full HTML page or a p5.js sketch).
    */
   static detectsSVGUsage(code: string): boolean {
-    const codeOnly = code.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+    const codeOnly = splitThinking(code).answer.trim();
     const startsWithSVG = /^<svg\b/i.test(codeOnly) || /^<\?xml[^>]*\?>\s*<svg\b/i.test(codeOnly);
     const hasSVGTag = /<svg\b/i.test(codeOnly) && /<\/svg>/i.test(codeOnly);
     const isFullHTMLDoc = /<!DOCTYPE\s+html/i.test(codeOnly) || /<html\b/i.test(codeOnly);
@@ -817,7 +818,7 @@ export class CreativeEvaluator {
    * <script>.
    */
   static detectsKineticUsage(code: string): boolean {
-    const codeOnly = code.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+    const codeOnly = splitThinking(code).answer.trim();
     const isHTMLDoc = /<!DOCTYPE\s+html/i.test(codeOnly) || /<html\b/i.test(codeOnly);
     const hasKeyframes = /@keyframes\b/i.test(codeOnly);
     const hasAnimation = /\banimation\s*:/i.test(codeOnly) || /\banimation-name\s*:/i.test(codeOnly);
@@ -948,7 +949,7 @@ export class CreativeEvaluator {
     let technicalScore = 0;
     let creativeScore = 0;
 
-    const codeOnly = output.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+    const codeOnly = splitThinking(output).answer.trim();
     const isRevideo = /@revideo\/(core|2d)|\bmakeScene2D?\b|\bcreateSignal\b|\byield\*/.test(codeOnly);
 
     // Technical checks
@@ -1001,8 +1002,7 @@ export class CreativeEvaluator {
     let technicalScore = 0;
     let creativeScore = 0;
 
-    // Remove <think> tags for evaluation
-    const codeOnly = output.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+    const codeOnly = splitThinking(output).answer.trim();
 
     // Technical checks
     if (/\bosc\s*\(/.test(codeOnly)) technicalScore += 0.15;
@@ -1047,8 +1047,7 @@ export class CreativeEvaluator {
     let technicalScore = 0;
     let creativeScore = 0;
 
-    // Remove <think> tags for evaluation
-    const codeOnly = output.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+    const codeOnly = splitThinking(output).answer.trim();
     const soundCallCount = (codeOnly.match(/\bs\s*\(\s*["'][^"']+["']\s*\)/g) || []).length;
 
     // Technical checks
@@ -1106,7 +1105,7 @@ export class CreativeEvaluator {
     let technicalScore = 0;
     let creativeScore = 0;
 
-    const codeOnly = output.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+    const codeOnly = splitThinking(output).answer.trim();
 
     // Technical checks
     if (/\bTone\./.test(codeOnly) || /from\s+['"]tone['"]/.test(codeOnly)) technicalScore += 0.25;
@@ -1168,8 +1167,7 @@ export class CreativeEvaluator {
     let technicalScore = 0;
     let creativeScore = 0;
 
-    // Remove <think> tags for evaluation
-    const codeOnly = output.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+    const codeOnly = splitThinking(output).answer.trim();
 
     // Technical checks for HTML structure
     if (/<!DOCTYPE\s+html/i.test(codeOnly)) technicalScore += 0.1;
@@ -1247,8 +1245,7 @@ export class CreativeEvaluator {
     let technicalScore = 0;
     let creativeScore = 0;
 
-    // Remove <think> tags for evaluation
-    const codeOnly = output.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+    const codeOnly = splitThinking(output).answer.trim();
     const lines = codeOnly.split('\n').map((line) => line.replace(/\s+$/g, '')).filter((line) => line.trim().length > 0);
     const asciiCharMatches = codeOnly.match(/[\u2580-\u259F█▓▒░@#%*+=\-\\/|_.()<>^]/g) || [];
     const densityMatches = codeOnly.match(/[█▓▒░@#%*+=-]/g) || [];
@@ -1321,7 +1318,7 @@ export class CreativeEvaluator {
     let technicalScore = 0;
     let creativeScore = 0;
 
-    const codeOnly = output.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+    const codeOnly = splitThinking(output).answer.trim();
 
     // Technical: valid SVG structure
     if (/<svg\b/i.test(codeOnly) && /<\/svg>/i.test(codeOnly)) technicalScore += 0.3;
@@ -1380,7 +1377,7 @@ export class CreativeEvaluator {
     let technicalScore = 0;
     let creativeScore = 0;
 
-    const codeOnly = output.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+    const codeOnly = splitThinking(output).answer.trim();
 
     // Technical: valid self-contained animated HTML document
     if (/<!DOCTYPE\s+html/i.test(codeOnly) || /<html\b/i.test(codeOnly)) technicalScore += 0.15;

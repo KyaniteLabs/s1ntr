@@ -13,6 +13,7 @@
  * - ASCIIValidator: src/core/validators/ASCIIValidator.ts
  */
 
+import { repairRejected } from './recovery/DeterministicRepair.js';
 import path from 'path';
 import { P5Validator } from './validators/P5Validator.js';
 import { GLSLValidator } from './validators/GLSLValidator.js';
@@ -538,21 +539,39 @@ export class CodeValidator {
     // candidate's U+25C9/U+25AE glyphs). Sanitized text flows out as cleanedCode.
     const finalCode = detectedDomain === 'ascii' ? ASCIIValidator.sanitize(cleaned) : cleaned;
 
-    const structure = validateStructure(finalCode, detectedDomain);
-    const allErrors = [
-      ...structure.errors,
-      ...validateSelfContained(finalCode, detectedDomain),
-      ...validateSize(finalCode, detectedDomain),
-    ];
+    const check = (candidate: string) => {
+      const structure = validateStructure(candidate, detectedDomain);
+      return {
+        errors: [
+          ...structure.errors,
+          ...validateSelfContained(candidate, detectedDomain),
+          ...validateSize(candidate, detectedDomain),
+        ],
+        // S4 completion (2026-09-01): the strudel theory assessment was produced
+        // by StrudelValidator and dropped on the floor — a producer with zero
+        // consumers. Carry it on the validation result so the spine can persist
+        // it into provenance.
+        theoryAssessment: structure.theoryAssessment,
+      };
+    };
+    const withTheory = (t: readonly string[] | undefined) => (t && t.length > 0 ? { theoryAssessment: t } : {});
 
-    // S4 completion (2026-09-01): the strudel theory assessment was produced
-    // by StrudelValidator and dropped on the floor — a producer with zero
-    // consumers. Carry it on the validation result so the spine can persist
-    // it into provenance.
-    const theoryAssessment = structure.theoryAssessment;
+    const first = check(finalCode);
+    if (first.errors.length > 0) {
+      // Rejected over a known mechanical slip? Repair deterministically and keep the
+      // result only if it now passes every check; otherwise the original verdict stands.
+      const repair = repairRejected(finalCode, detectedDomain);
+      if (repair) {
+        const second = check(repair.code);
+        if (second.errors.length === 0) {
+          return { valid: true, cleanedCode: repair.code, errors: [], repairs: repair.repairs,
+            ...withTheory(second.theoryAssessment) };
+        }
+      }
+    }
 
-    return { valid: allErrors.length === 0, cleanedCode: finalCode, errors: allErrors,
-      ...(theoryAssessment && theoryAssessment.length > 0 ? { theoryAssessment } : {}) };
+    return { valid: first.errors.length === 0, cleanedCode: finalCode, errors: first.errors,
+      ...withTheory(first.theoryAssessment) };
   }
 
   static detectDomain(code: string): string {

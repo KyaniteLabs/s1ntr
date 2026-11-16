@@ -8,7 +8,9 @@ import { pathToFileURL } from 'url';
 import { VideoRenderer, VideoRenderOptions, VideoRenderResult } from './VideoRenderer.js';
 import { VideoExporter } from '../export/VideoExporter.js';
 import { Logger } from '../utils/Logger.js';
-import { getChromeArgs, sandboxOptOutArgs } from '../security/SandboxConfig.js';
+import { resolveChromiumExecutablePath } from '../utils/browserAssetFallbacks.js';
+import { missingChromiumError } from '../utils/browserPreflight.js';
+import { getChromeArgs, sandboxOptOutArgs, SOFTWARE_WEBGL_ARGS } from '../security/SandboxConfig.js';
 
 const DEFAULT_FPS = 30;
 const DEFAULT_WIDTH = 1920;
@@ -19,6 +21,68 @@ const DEFAULT_HEIGHT = 1080;
 const MAX_CAPTURE_FRAMES = 3600;
 // Time budget for the headless render+capture so a hung browser cannot block CI.
 const CAPTURE_TIMEOUT_MS = 180_000;
+
+/**
+ * The harness page loads from this private origin, served from the work dir
+ * by request interception. With web security on, Chrome refuses an ES module
+ * on a file:// page (origin null), so file:// never started the harness.
+ */
+export const HARNESS_ORIGIN = 'http://sinter-revideo.invalid';
+const HARNESS_TYPES: Record<string, string> = {
+  '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css',
+  '.json': 'application/json', '.wasm': 'application/wasm', '.png': 'image/png', '.jpg': 'image/jpeg',
+  '.svg': 'image/svg+xml', '.woff2': 'font/woff2', '.mp3': 'audio/mpeg', '.wav': 'audio/wav',
+};
+
+/** The work-dir file a harness URL names, or null when it points outside the work dir. */
+export function harnessFilePath(workDir: string, url: string): string | null {
+  let pathname: string;
+  try { pathname = decodeURIComponent(new URL(url).pathname); } catch { return null; }
+  const file = path.resolve(workDir, '.' + pathname);
+  return isInside(workDir, file) ? file : null;
+}
+
+function isInside(dir: string, file: string): boolean {
+  const rel = path.relative(dir, file);
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+/** What the contained harness page enforced during a Revideo render. */
+export interface RevideoContainment {
+  networkIsolated: boolean;
+  permissionsDenied: boolean;
+  blockedRequests: number;
+  cleanupSucceeded: boolean;
+}
+
+export interface RevideoStillsResult {
+  early: Buffer;
+  late: Buffer;
+  width: number;
+  height: number;
+  durationSeconds: number;
+  containment: RevideoContainment;
+}
+
+/**
+ * Installed before any harness script runs. Request interception already
+ * stops HTTP(S); WebSocket, WebRTC and EventSource are not intercepted, so
+ * they are removed outright, as are storage and device permissions.
+ */
+const REVIDEO_PAGE_GUARDS = `(() => {
+  const deny = () => Promise.reject(new Error('LIMINAL_PERMISSION_DENIED'));
+  const blocked = class { constructor() { throw new Error('LIMINAL_NETWORK_DENIED'); } };
+  for (const name of ['WebSocket', 'RTCPeerConnection', 'webkitRTCPeerConnection', 'EventSource', 'WebTransport']) {
+    try { Object.defineProperty(globalThis, name, { value: blocked, configurable: false }); } catch {}
+  }
+  for (const name of ['localStorage', 'sessionStorage', 'indexedDB', 'caches']) {
+    try { Object.defineProperty(globalThis, name, { get() { throw new Error('LIMINAL_STORAGE_DENIED'); }, configurable: false }); } catch {}
+  }
+  try { if (navigator.sendBeacon) Object.defineProperty(navigator, 'sendBeacon', { value: () => false }); } catch {}
+  try { if (navigator.mediaDevices) Object.defineProperty(navigator.mediaDevices, 'getUserMedia', { value: deny }); } catch {}
+  try { if (navigator.clipboard) Object.defineProperties(navigator.clipboard, { read: { value: deny }, readText: { value: deny }, write: { value: deny }, writeText: { value: deny } }); } catch {}
+  try { if (navigator.geolocation) Object.defineProperties(navigator.geolocation, { getCurrentPosition: { value: () => {} }, watchPosition: { value: () => 0 } }); } catch {}
+})();`;
 
 export interface CompositionConfig {
   id: string;
@@ -400,22 +464,122 @@ export class RevideoRenderer implements VideoRenderer {
     framesDir: string,
     opts: { fps: number; width: number; height: number },
   ): Promise<number> {
+    return this.withHarnessPage(workDir, opts, async ({ seek, total }) => {
+      const totalFrames = Math.min(Math.max(total, 1), MAX_CAPTURE_FRAMES);
+      let captured = 0;
+      for (let frame = 0; frame < totalFrames; frame++) {
+        const framePath = path.join(framesDir, `frame_${String(frame).padStart(5, '0')}.png`);
+        await fs.writeFile(framePath, await seek(frame));
+        captured++;
+      }
+      return captured;
+    }).then(r => r.value);
+  }
+
+  /**
+   * Render the real scene (Player + Stage, not an HTML approximation) and
+   * capture two stills for admission: an early frame at min(0.5 s, 1/4 of the
+   * scene) and a late frame at 80 %. Only those two frames are seeked, so a
+   * long scene costs two renders, not thousands. The page is contained: only
+   * the harness's own files (served at HARNESS_ORIGIN), data: and blob: load; realtime
+   * transports, storage and device permissions are denied (#1628).
+   */
+  async renderStills(code: string, opts: { fps?: number; width?: number; height?: number } = {}): Promise<RevideoStillsResult> {
+    const fps = opts.fps ?? DEFAULT_FPS;
+    const width = opts.width ?? DEFAULT_WIDTH;
+    const height = opts.height ?? DEFAULT_HEIGHT;
+    const workDir = await fs.mkdtemp(path.join(this.tempDir, 'revideo-stills-'));
+    let result: RevideoStillsResult;
+    let cleanupSucceeded = false;
+    try {
+      const harnessJs = await this.bundleHarness(this.normalizeSceneCode(code), workDir, { fps, width, height });
+      await fs.writeFile(path.join(workDir, 'harness.js'), harnessJs);
+      await fs.writeFile(path.join(workDir, 'index.html'), this.buildHarnessHtml());
+      const run = await this.withHarnessPage(workDir, { fps, width, height }, async ({ seek, total }) => {
+        const frames = Math.min(Math.max(total, 1), MAX_CAPTURE_FRAMES);
+        const early = Math.min(Math.round(0.5 * fps), Math.floor(frames / 4));
+        const late = Math.min(frames - 1, Math.floor(frames * 0.8));
+        return { early: await seek(early), late: await seek(late), frames };
+      });
+      result = {
+        early: run.value.early, late: run.value.late, width, height,
+        durationSeconds: run.value.frames / fps,
+        containment: run.containment,
+      };
+    } finally {
+      cleanupSucceeded = await fs.rm(workDir, { recursive: true, force: true }).then(() => true, () => false);
+    }
+    result.containment.cleanupSucceeded = cleanupSucceeded;
+    return result;
+  }
+
+  /**
+   * Launch Chrome, fence the page, load the harness and hand the caller a
+   * seek-and-screenshot function. Shared by video capture and stills.
+   */
+  private async withHarnessPage<T>(
+    workDir: string,
+    opts: { fps: number; width: number; height: number },
+    use: (h: { seek: (frame: number) => Promise<Buffer>; total: number }) => Promise<T>,
+  ): Promise<{ value: T; containment: RevideoContainment }> {
     const puppeteer = await import('puppeteer');
     const disableSandbox = process.env.LIMINAL_DISABLE_SANDBOX === 'true';
+    const executablePath = resolveChromiumExecutablePath();
+    if (!executablePath) throw missingChromiumError();
     const browser = await puppeteer.default.launch({
       headless: true,
+      executablePath,
       args: getChromeArgs({ forceDisableSandbox: disableSandbox }),
+      // A scene that never settles must fail, not hang: every CDP call
+      // (seek, screenshot) gets a hard ceiling.
+      protocolTimeout: CAPTURE_TIMEOUT_MS,
     });
+    const containment: RevideoContainment = {
+      networkIsolated: false, permissionsDenied: false, blockedRequests: 0, cleanupSucceeded: false,
+    };
 
     try {
       const page = await browser.newPage();
+      await page.setRequestInterception(true);
+      page.on('request', (request: { url(): string; abort(): Promise<void>; continue(): Promise<void>;
+        respond(r: { status: number; contentType?: string; body?: Buffer | string }): Promise<void>;
+        isInterceptResolutionHandled?(): boolean }) => {
+        if (request.isInterceptResolutionHandled?.()) return;
+        const url = request.url();
+        const file = url.startsWith(`${HARNESS_ORIGIN}/`) ? harnessFilePath(workDir, url) : null;
+        if (file) {
+          // realpath both ends, so a symlink in the work dir cannot reach outside it.
+          void Promise.all([fs.realpath(workDir), fs.realpath(file)]).then(
+            async ([root, real]) => {
+              if (!isInside(root, real)) {
+                containment.blockedRequests++;
+                return request.abort();
+              }
+              const body = await fs.readFile(real).catch(() => null);
+              if (!body) return request.respond({ status: 404, body: '' });
+              return request.respond({
+                status: 200, body,
+                contentType: HARNESS_TYPES[path.extname(real).toLowerCase()] ?? 'application/octet-stream',
+              });
+            },
+            () => request.respond({ status: 404, body: '' }),
+          ).catch((err) => Logger.debug('RevideoRenderer', `Harness request not answered: ${String(err)}`));
+        } else if (url.startsWith('data:') || url.startsWith('blob:')) {
+          void request.continue();
+        } else {
+          containment.blockedRequests++;
+          void request.abort();
+        }
+      });
+      await page.evaluateOnNewDocument(REVIDEO_PAGE_GUARDS);
+      containment.networkIsolated = true;
+      containment.permissionsDenied = true;
       await page.setViewport({ width: opts.width, height: opts.height });
       page.on('pageerror', (err: unknown) =>
         Logger.warn('RevideoRenderer', `Harness page error: ${err instanceof Error ? err.message : String(err)}`),
       );
 
-      const indexUrl = pathToFileURL(path.join(workDir, 'index.html')).href;
-      await page.goto(indexUrl, { waitUntil: 'load', timeout: 30_000 });
+      await page.goto(`${HARNESS_ORIGIN}/index.html`, { waitUntil: 'load', timeout: 30_000 });
 
       await page.waitForFunction(
         'window.__sinter && (window.__sinter.ready || window.__sinter.error)',
@@ -437,14 +601,12 @@ export class RevideoRenderer implements VideoRenderer {
         throw new Error(`Revideo harness failed to initialize: ${state.error ?? 'unknown error'}`);
       }
 
-      const totalFrames = Math.min(Math.max(state.total, 1), MAX_CAPTURE_FRAMES);
       const canvas = await page.$('#sinter-canvas');
       if (!canvas) {
         throw new Error('Revideo harness did not create the render canvas.');
       }
 
-      let captured = 0;
-      for (let frame = 0; frame < totalFrames; frame++) {
+      const seek = async (frame: number): Promise<Buffer> => {
         await page.evaluate(
           (f) =>
             (window as unknown as {
@@ -452,12 +614,10 @@ export class RevideoRenderer implements VideoRenderer {
             }).__sinter.seekAndRender(f),
           frame,
         );
-        const framePath = path.join(framesDir, `frame_${String(frame).padStart(5, '0')}.png`);
-        await canvas.screenshot({ path: framePath as `${string}.png`, type: 'png' });
-        captured++;
-      }
-
-      return captured;
+        return Buffer.from(await canvas.screenshot({ type: 'png' }));
+      };
+      const value = await use({ seek, total: state.total });
+      return { value, containment };
     } finally {
       await browser.close();
     }
@@ -530,7 +690,7 @@ export class RevideoRenderer implements VideoRenderer {
                 logProgress,
                 progressCallback,
                 puppeteer: {
-                  args: sandboxOptOutArgs(),
+                  args: [...sandboxOptOutArgs(), ...SOFTWARE_WEBGL_ARGS],
                   executablePath: systemChrome,
                 },
                 projectSettings: {

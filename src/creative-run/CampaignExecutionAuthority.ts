@@ -796,7 +796,7 @@ export class CampaignFundingReservationAuthority {
         const allocation = stored.reservation.subject.allocations
           .find(item => item.allocationId === allocationId);
         const verification = verifyExecutorAttestation(
-          this.registry, attestation, attestation.subject.issuedAt,
+          this.registry, attestation, attestation.subject.issuedAt, { historical: true },
         );
         if (!receipt || !allocation || !verification.ok) {
           throw new Error(`CAMPAIGN_FUNDING_LEDGER_ATTESTATION_INVALID:${

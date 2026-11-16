@@ -1,4 +1,5 @@
 import { P5_CDN, P5_SOUND_CDN } from '../constants/index.js';
+import { scriptSafe } from './scriptEmbed.js';
 
 interface GenerateHTMLOptions {
   code: string;
@@ -21,7 +22,7 @@ export function generateHTML(options: GenerateHTMLOptions): string {
     fullscreen = false,
   } = options;
 
-  const escaped = code.replace(/<\/script>/gi, '<\\/script>');
+  const escaped = scriptSafe(code);
   const p5SoundScript = includeP5Sound
     ? `\n    <script src="${P5_SOUND_CDN}"></script>`
     : '';

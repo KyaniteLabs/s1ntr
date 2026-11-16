@@ -8,6 +8,7 @@
  */
 
 import type { NormalizedThinking } from './ProviderTypes.js';
+import { splitThinking } from '../llm/ModelOutput.js';
 
 /**
  * Extract normalized thinking from an Anthropic-style response.
@@ -114,20 +115,8 @@ export function extractOllamaThinking(response: unknown): NormalizedThinking {
  * Returns cleaned content and extracted thinking text.
  */
 export function stripThinkTags(content: string): { content: string; thinking: string } {
-  const thinkPattern = /<think\b[^>]*>([\s\S]*?)<\/think>/gi;
-  let thinking = '';
-  let cleanContent = content;
-
-  const matches = content.matchAll(thinkPattern);
-  for (const match of matches) {
-    thinking += match[1] + '\n';
-  }
-  cleanContent = content.replace(thinkPattern, '').trim();
-
-  return {
-    content: cleanContent,
-    thinking: thinking.trim(),
-  };
+  const reply = splitThinking(content);
+  return { content: reply.answer.trim(), thinking: reply.thinking };
 }
 
 /**

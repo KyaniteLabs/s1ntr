@@ -2,7 +2,7 @@
  * M11: Accessibility Guardrails
  * 
  * Validates creative output for accessibility:
- * - Photosensitivity: No flashing > 3Hz (seizure risk)
+ * - Photosensitivity: no more than 3 flashes in any second (WCAG 2.3.1)
  * - Color blindness: Avoid problematic color combinations
  * - Contrast: Sufficient for low vision
  * - Motion: Respects prefers-reduced-motion
@@ -13,16 +13,22 @@ import puppeteer from 'puppeteer';
 import { getChromeArgs } from '../security/SandboxConfig.js';
 import { generateHTML } from '../utils/generateHTML.js';
 import { formatError } from '../utils/errors.js';
+import { judgePhotosensitivity, startLuminanceCapture, type PhotosensitivityVerdict } from './FlashMeasure.js';
+import { inlineVendorAssets } from '../utils/vendorAssets.js';
+import { resolveChromiumExecutablePath } from '../utils/browserAssetFallbacks.js';
+import { missingChromiumError } from '../utils/browserPreflight.js';
 
 export interface AccessibilityResult {
   accessible: boolean;
   checks: {
-    photosensitivity: boolean;  // No flashing > 3Hz
+    photosensitivity: boolean;  // No more than 3 flashes in any second (WCAG 2.3.1)
     colorBlindnessSafe: boolean;  // Not relying solely on red/green
     sufficientContrast: boolean;  // WCAG AA minimum
     motionSafe: boolean;  // Respects reduced motion
     audioSafe: boolean;  // No sudden loud sounds
   };
+  /** The flash verdict from the frames the screen showed; `measurement` is null when nothing was measured. */
+  photosensitivity: PhotosensitivityVerdict;
   issues: string[];
   warnings: string[];  // Non-blocking suggestions
 }
@@ -31,6 +37,21 @@ export interface AccessibilityOptions {
   checkDurationMs?: number;  // How long to analyze (default: 2000ms)
   disableSandbox?: boolean;
 }
+
+/** The size the flash check renders at, the same as the renderer's default. */
+const VIEWPORT = { width: 800, height: 600 };
+
+/** Model-written pages get no realtime network, no popups and no service workers. */
+const HTML_PAGE_GUARDS = `(() => {
+  const blocked = class { constructor() { throw new Error('LIMINAL_NETWORK_DENIED'); } };
+  for (const name of ['WebSocket', 'RTCPeerConnection', 'webkitRTCPeerConnection', 'EventSource', 'WebTransport']) {
+    try { Object.defineProperty(globalThis, name, { value: blocked, configurable: false }); } catch {}
+  }
+  try { Object.defineProperty(window, 'open', { value: () => null, configurable: false }); } catch {}
+  try { if (navigator.sendBeacon) Object.defineProperty(navigator, 'sendBeacon', { value: () => false }); } catch {}
+  try { if (navigator.serviceWorker) Object.defineProperty(navigator.serviceWorker, 'register',
+    { value: () => Promise.reject(new Error('LIMINAL_NETWORK_DENIED')) }); } catch {}
+})();`;
 
 const DEFAULT_OPTIONS: Required<AccessibilityOptions> = {
   checkDurationMs: 2000,
@@ -45,11 +66,18 @@ export class AccessibilityGuardrails {
   }
 
   /**
-   * Run full accessibility check
+   * Run full accessibility check. `p5` code is wrapped in a p5 page; `html`
+   * is a complete page and runs as written, with no network.
    */
-  async check(code: string, _domain: string): Promise<AccessibilityResult> {
+  async check(code: string, domain: string): Promise<AccessibilityResult> {
+    if (domain !== 'p5' && domain !== 'html') {
+      throw new Error(`AccessibilityGuardrails checks p5 sketches and html pages only, not ${domain}`);
+    }
+    const executablePath = resolveChromiumExecutablePath();
+    if (!executablePath) throw missingChromiumError();
     const browser = await puppeteer.launch({
       headless: true,
+      executablePath,
       args: getChromeArgs({ forceDisableSandbox: this.options.disableSandbox }),
     });
 
@@ -58,69 +86,52 @@ export class AccessibilityGuardrails {
 
     try {
       const page = await browser.newPage();
+      await page.setViewport(VIEWPORT);
 
-      // Inject accessibility tracker
-      await page.evaluateOnNewDocument(() => {
-        window.__accessibilityMetrics = {
-          luminanceSamples: [] as number[],
-          flashCount: 0,
-          lastLuminance: 0,
-          hasAudio: false,
-          audioPeakLevel: 0,
-        };
-
-        // Track luminance changes for photosensitivity
-        const canvas = document.querySelector('canvas');
-        if (canvas) {
-          const ctx = canvas.getContext('2d');
-          setInterval(() => {
-            if (!ctx) return;
-            // Sample center pixel luminance
-            const imageData = ctx.getImageData(canvas.width/2, canvas.height/2, 1, 1);
-            const [r, g, b] = imageData.data;
-            // Relative luminance formula
-            const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-            
-            const metrics = window.__accessibilityMetrics!;
-            const change = Math.abs(luminance - metrics.lastLuminance);
-            if (change > 0.5) { // Significant change
-              metrics.flashCount++;
-            }
-            metrics.lastLuminance = luminance;
-            metrics.luminanceSamples.push(luminance);
-          }, 100); // Sample at 10Hz
-        }
-      });
-
-      // Generate and load HTML
-      const html = generateHTML({
+      // Inline the vendored libraries: a setContent page is about:blank,
+      // where /vendor URLs never load.
+      const html = await inlineVendorAssets(domain === 'html' ? code : generateHTML({
         code,
         title: 'Accessibility Check',
         bodyStyle: 'margin: 0; padding: 0; overflow: hidden;',
         fullscreen: true,
-      });
+      }));
+      if (domain === 'html') {
+        // Model output is untrusted: only in-browser schemes may load.
+        // Interception sees HTTP only: realtime transports, popups and
+        // service workers are removed before any page script runs.
+        await page.evaluateOnNewDocument(HTML_PAGE_GUARDS);
+        page.on('popup', (popup) => { void popup?.close().catch(() => undefined); });
+        await page.setRequestInterception(true);
+        page.on('request', (request) => {
+          const settle = /^(data|blob|about):/.test(request.url()) ? request.continue() : request.abort();
+          void settle.catch(() => undefined);
+        });
+      }
 
-      await page.setContent(html, { waitUntil: 'networkidle0' });
-      await page.waitForSelector('canvas', { timeout: 10000 });
-
-      // Let it run
-      await new Promise(r => setTimeout(r, this.options.checkDurationMs));
-
-      // Get metrics
-      const metrics = await page.evaluate(() => {
-        return window.__accessibilityMetrics as AccessibilityMetrics | null;
-      });
+      // Recording starts before the page loads, so a flash in the first
+      // frames counts, and runs for checkDurationMs once the canvas exists.
+      const recording = await startLuminanceCapture(page);
+      try {
+        // The libraries are inlined, so there is no network to wait for. A
+        // networkidle wait never ends while a slow draw loop holds the page.
+        await page.setContent(html, { waitUntil: 'load' });
+        if (domain === 'p5') await page.waitForSelector('canvas', { timeout: 10000 });
+        await new Promise(r => setTimeout(r, this.options.checkDurationMs));
+      } catch (error) {
+        await recording.stop();
+        throw error;
+      }
+      const capture = await recording.stop();
 
       // Analyze code for static checks
       const codeAnalysis = this.analyzeCode(code);
 
-      // Check photosensitivity (flashing > 3Hz is dangerous)
-      const checkDurationSeconds = this.options.checkDurationMs / 1000;
-      const flashRate = (metrics?.flashCount || 0) / checkDurationSeconds;
-      const photosensitivityPass = flashRate <= 3; // Max 3 flashes per second
-
-      if (!photosensitivityPass) {
-        issues.push(`Photosensitivity risk: ${flashRate.toFixed(1)} flashes/sec (max safe: 3)`);
+      // Check photosensitivity (more than 3 flashes in any second is dangerous)
+      const photosensitivity = judgePhotosensitivity(capture);
+      const photosensitivityPass = photosensitivity.pass;
+      if (photosensitivity.issue) {
+        issues.push(photosensitivity.issue);
       }
 
       // Check color blindness safety
@@ -165,6 +176,7 @@ export class AccessibilityGuardrails {
           motionSafe: motionPass,
           audioSafe: audioPass,
         },
+        photosensitivity,
         issues,
         warnings,
       };
@@ -181,6 +193,7 @@ export class AccessibilityGuardrails {
           motionSafe: false,
           audioSafe: false,
         },
+        photosensitivity: { pass: false, issue: `Photosensitivity not measured: ${issues[0]}`, measurement: null },
         issues,
         warnings,
       };
@@ -217,36 +230,5 @@ export class AccessibilityGuardrails {
         'rgba(0,0,0,0.1)',
       ],
     };
-  }
-
-  /**
-   * Quick static check (no browser needed)
-   */
-  static quickCheck(code: string): { issues: string[]; warnings: string[] } {
-    const issues: string[] = [];
-    const warnings: string[] = [];
-    const codeLower = code.toLowerCase();
-
-    // Check for obvious photosensitivity risks in code
-    const flashingPatterns = [
-      /framecount.*%\s*\d+\s*[=<>]/,  // Rapid modulo-based changes
-      /random\(\).*255/,  // Random flashing colors
-      /background\(\s*random/i,  // Random background changes
-    ];
-
-    for (const pattern of flashingPatterns) {
-      if (pattern.test(code)) {
-        warnings.push('Code contains patterns that may cause rapid flashing');
-        break;
-      }
-    }
-
-    // Check for missing accessibility features
-    if (/\banimation\b|\bmoving\b|\brotating\b/.test(codeLower) && 
-        !code.includes('prefers-reduced-motion')) {
-      warnings.push('Animation without prefers-reduced-motion check');
-    }
-
-    return { issues, warnings };
   }
 }

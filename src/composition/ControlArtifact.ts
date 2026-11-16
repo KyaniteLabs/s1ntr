@@ -3,10 +3,7 @@ import {
   type ControlRecipe,
 } from './ControlRecipe.js';
 import { VENDOR_ASSETS } from '../utils/vendorAssets.js';
-
-function scriptSafe(value: string): string {
-  return value.replace(/<\/script/gi, '<\\/script');
-}
+import { scriptSafe } from '../utils/scriptEmbed.js';
 
 function dependencyScripts(recipe: ControlRecipe): string {
   const domains = new Set(recipe.layers.map(layer => layer.domain));

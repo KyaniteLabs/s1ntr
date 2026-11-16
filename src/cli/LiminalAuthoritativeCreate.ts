@@ -330,7 +330,8 @@ export async function reevaluateAuthoritativeC0(
     journal,
     authority: await bootstrapProductionReceiptAuthority(
       path.join(os.homedir(), '.sinter', 'authority', 'liminal-command-receipt.key')),
-    verifyActionAuthority: input => input.digest === reevaluationAuthorityDigest
+    verifyActionAuthority: input => input.action === 'reevaluate'
+      && input.digest === reevaluationAuthorityDigest
       && input.parent.signature === sourceResult.receipt.signature
       && input.evidenceDigest === stored.result.evidence.evidenceDigest
       && input.maxTransportAttempts === reevaluationAuthority.maxTransportAttempts,

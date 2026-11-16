@@ -289,6 +289,7 @@ describe('ThreeValidator', () => {
       'scene.background = new THREE.Color(0x3a4a66);',
       'const mat = new THREE.MeshStandardMaterial({ color: 0xe8a040 });',
       'scene.add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), mat));',
+      'const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 100);',
       'const renderer = new THREE.WebGLRenderer();',
       extra,
       'renderer.render(scene, camera);',

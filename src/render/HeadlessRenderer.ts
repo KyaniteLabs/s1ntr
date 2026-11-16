@@ -10,6 +10,7 @@
 // `sinter` package — never eagerly loads playwright. The `chromium` runtime
 // value is loaded lazily, on the render path, via `await import('playwright')`.
 import { createHash } from 'node:crypto';
+import os from 'node:os';
 import type { Browser, Page, BrowserContext, ConsoleMessage } from 'playwright';
 import { HTMLWrapper } from '../utils/htmlWrapper.js';
 import { hasVendorImportMap, inlineVendorAssets, isVendorAssetPath, readVendorAsset } from '../utils/vendorAssets.js';
@@ -19,11 +20,13 @@ import { RenderEvidence } from '../core/types/GenerationEvaluation.js';
 import { getPinnedBrowserAssetForUrl,
   resolveChromiumExecutablePath } from '../utils/browserAssetFallbacks.js';
 import { missingChromiumError } from '../utils/browserPreflight.js';
-import { getChromeArgs, isNetworkIsolatedRenderEnabled } from '../security/SandboxConfig.js';
+import { getChromeArgs, isNetworkIsolatedRenderEnabled, launchPlaywrightChromium } from '../security/SandboxConfig.js';
 import { runInSandbox } from '../sandbox/index.js';
 import type { DomainString } from '../types/domains.js';
 import { summarizeAudioCapture } from './AudioEvidence.js';
+import { STRUDEL_TEMPO_SCRIPT } from './strudelTempo.js';
 import { renderBlender } from './BlenderRenderer.js';
+import { RevideoRenderer } from './RevideoRenderer.js';
 
 export type RenderDomain = Extract<DomainString, 'p5' | 'three' | 'glsl' | 'hydra' | 'strudel' | 'tone' | 'svg' | 'html' | 'dataviz' | 'meta' | 'ascii' | 'kinetic' | 'textgen' | 'hyperframes' | 'revideo' | 'blender' | 'unknown'>;
 
@@ -40,6 +43,21 @@ export interface RenderOptions {
   stabilizationTime?: number;
   /** Delay after the early frame so slow motion is visible to evaluators. */
   lateCaptureDelay?: number;
+  /**
+   * Milliseconds of sound (tone/strudel) the judge hears, counted from the
+   * first non-silent sample. 0 keeps the old behaviour: the window equals
+   * stabilizationTime, which is only half a second by default (#1641).
+   */
+  audioCaptureMs?: number;
+  /**
+   * #1637: piece time (ms) at which the late frame is taken. When set, the page
+   * runs on Playwright's virtual clock and is fast-forwarded to this horizon
+   * after the early frame, so work that unfolds over a minute is judged on its
+   * arc instead of its first seconds. 0 keeps the real-time late frame.
+   */
+  arcHorizonMs?: number;
+  /** Wall-clock ceiling for the fast-forward; the late frame is taken wherever it stops. */
+  arcWallBudgetMs?: number;
   /** Domain hint for specialized rendering */
   domain?: RenderDomain;
   /** Keep the Playwright page open for advanced callers */
@@ -99,6 +117,8 @@ export interface AudioCaptureResult {
 export interface RenderResult {
   /** False when the scene itself was not rendered. */
   rendered?: boolean;
+  /** #1637: virtual-clock arc capture; the late frame shows the piece at `reachedMs`. */
+  arc?: { horizonMs: number; reachedMs: number; wallMs: number };
   /** The Playwright page instance (for advanced use) */
   page?: Page;
   /** Screenshot result */
@@ -113,8 +133,10 @@ export interface RenderResult {
   error?: string;
   /** Console logs from the page */
   logs: string[];
-  /** Page errors */
+  /** Console errors and uncaught page errors, in arrival order */
   errors: string[];
+  /** Uncaught page errors only. Any one of them fails the render (#1690). */
+  pageErrors: string[];
   containment?: NonNullable<RenderEvidence['containment']>;
   rendererEnvironmentDigest?: string;
   playback?: NonNullable<RenderEvidence['playback']>;
@@ -131,6 +153,9 @@ const DEFAULT_OPTIONS: Required<RenderOptions> = {
   waitForStabilization: true,
   stabilizationTime: 500,
   lateCaptureDelay: 3000,
+  audioCaptureMs: 0,
+  arcHorizonMs: 0,
+  arcWallBudgetMs: 12_000,
   domain: 'unknown',
   keepPageOpen: false,
   omitBackground: false,
@@ -221,7 +246,7 @@ export function isAllowedRenderRequestUrl(rawUrl: string,
 }
 
 /** Private origin for pages that load pinned ES modules (.invalid never resolves). */
-const RENDER_ORIGIN = 'http://sinter-render.invalid';
+export const RENDER_ORIGIN = 'http://sinter-render.invalid';
 
 /**
  * Browser-side audio-domain page init (tone/strudel). Executed by PREPENDING
@@ -237,17 +262,6 @@ function audioCapturePageInit(maxSamples: number): void {
   (window as unknown as { __audioCaptureWarnings: string[] }).__audioCaptureWarnings = audioCaptureWarnings;
   const audioCaptureCounters = { ctor: 0, setup: 0, taps: 0, proc: 0, connects: 0, factories: 0 };
   (window as unknown as { __audioCaptureCounters: typeof audioCaptureCounters }).__audioCaptureCounters = audioCaptureCounters;
-  const tempoSetter = (value: unknown): unknown => {
-    const cps = (globalThis as Record<string, unknown>).setcps;
-    const v = Number(value);
-    if (typeof cps === 'function' && Number.isFinite(v) && v > 0) {
-      try { return (cps as (x: number) => unknown)(v / 60); } catch { /* best effort */ }
-    }
-    return undefined;
-  };
-  const g = globalThis as Record<string, unknown>;
-  if (typeof g.bpm !== 'function') g.bpm = tempoSetter;
-  if (typeof g.setbpm !== 'function') g.setbpm = tempoSetter;
 
   const OriginalAudioContext = window.AudioContext
     || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
@@ -400,6 +414,95 @@ function audioCapturePageInit(maxSamples: number): void {
 }
 
 /**
+ * In-page probe: true when any pixel of the page's canvas is not black.
+ *
+ * It reads the whole frame. A sketch can be black at the center (a ring, a
+ * shape scrolled aside, thin lines) and still be drawing.
+ *
+ * page.evaluate serializes this function, so it must not reference anything
+ * outside its own body. WebGL may clear its drawing buffer after
+ * presentation, so the read happens inside an animation frame.
+ */
+export function probeFrameLit(timeoutMs: number): Promise<boolean> {
+  // No named inner functions: tsx/esbuild keepNames would wrap them in a
+  // __name() helper that does not exist in the page.
+  return new Promise<boolean>((resolve) => {
+    let frame = 0;
+    const timer = setTimeout(() => { cancelAnimationFrame(frame); resolve(false); }, timeoutMs);
+    frame = requestAnimationFrame(() => {
+      clearTimeout(timer);
+      try {
+        const canvas = document.querySelector('canvas');
+        if (!canvas || canvas.width === 0 || canvas.height === 0) { resolve(false); return; }
+        let px: ArrayLike<number> | null = null;
+        // Hydra creates its WebGL context before this runs. Asking for webgl
+        // first never turns a hydra canvas into a 2D one.
+        const gl = (canvas.getContext('webgl') || canvas.getContext('webgl2')) as WebGLRenderingContext | null;
+        if (gl) {
+          const buf = new Uint8Array(canvas.width * canvas.height * 4);
+          gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+          px = buf;
+        } else {
+          const ctx = canvas.getContext('2d');
+          if (ctx) px = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+        }
+        let lit = false;
+        if (px) {
+          for (let i = 0; i < px.length; i += 4) {
+            if (px[i] > 0 || px[i + 1] > 0 || px[i + 2] > 0) { lit = true; break; }
+          }
+        }
+        resolve(lit);
+      } catch {
+        resolve(false);
+      }
+    });
+  });
+}
+
+/**
+ * The Start button of each audio preview shell (GenericWrapper). Tone has two
+ * shells: plain JS draws #start, full HTML draws #sinter-tone-start, which in
+ * turn presses the artwork's own button or calls its play().
+ */
+/** A CSP block of a stylesheet or font: cosmetic, unlike a blocked script or image. */
+const CSP_COSMETIC_BLOCK = /^(?:Loading|Refused to load) the (?:stylesheet|font) '[^']*' (?:because it )?violates the following Content Security Policy directive/;
+
+const PLAY_BUTTON: Partial<Record<RenderDomain, string>> = {
+  tone: '#start, #sinter-tone-start',
+  strudel: '#sinter-strudel-play',
+};
+
+/** Where a press left an audio shell. */
+type PlaybackState = 'playing' | 'booting' | 'idle' | 'failed' | 'waiting';
+
+/**
+ * Reads what the page is doing, not what was pressed. Runs in the page. A Tone
+ * page plays once an AudioContext runs; Chrome resumes one only inside a
+ * trusted gesture. The capture hook sees every context the page makes, so a
+ * page that imports Tone as a module, off window, still counts. The Strudel shell says "Playing." once the pattern
+ * evaluates, and "Still booting" for a press it ignored. If boot ends after
+ * that, the status returns to "Ready.": idle, the press never took.
+ */
+function readPlaybackState(domain: string): PlaybackState {
+  if (domain === 'strudel') {
+    const status = document.getElementById('sinter-strudel-status')?.textContent ?? '';
+    if (/^Playing/.test(status)) return 'playing';
+    if (/error/i.test(status)) return 'failed';
+    if (/booting/i.test(status)) return 'booting';
+    if (/^Ready/.test(status)) return 'idle';
+    return 'waiting';
+  }
+  const page = window as unknown as {
+    Tone?: { context?: { state?: string } };
+    __audioCaptureDestinations?: Array<{ context: { state: string } }>;
+  };
+  const running = page.Tone?.context?.state === 'running'
+    || (page.__audioCaptureDestinations ?? []).some((node) => node.context.state === 'running');
+  return running ? 'playing' : 'waiting';
+}
+
+/**
  * Headless renderer for creative coding outputs
  */
 export class HeadlessRenderer {
@@ -464,11 +567,10 @@ export class HeadlessRenderer {
           // resolveChromiumExecutablePath already attempted one-shot install.
           throw missingChromiumError();
         }
-        // Respect SandboxConfig: launch sandboxed by default; only pass
-        // --no-sandbox when LIMINAL_DISABLE_SANDBOX=true (containerized/CI).
+        // Launch sandboxed unless LIMINAL_DISABLE_SANDBOX=true (containerized/CI).
         const disableSandbox = process.env.LIMINAL_DISABLE_SANDBOX === 'true';
         const { chromium } = await import('playwright');
-        this.browser = await chromium.launch({
+        this.browser = await launchPlaywrightChromium(chromium, {
           headless: true,
           executablePath,
           args: getChromeArgs({ forceDisableSandbox: disableSandbox }),
@@ -543,27 +645,74 @@ export class HeadlessRenderer {
     return 'unknown';
   }
 
+  /**
+   * Render a Revideo scene in its contained harness and hand the judges two
+   * real stills (early + 80 %). Containment comes from the harness page:
+   * request interception admits only its own file:// URLs, and realtime
+   * transports, storage and device permissions are removed (#1628).
+   */
+  private static async renderRevideoScene(code: string, maximumOutputBytes: number): Promise<RenderResult> {
+    if (Buffer.byteLength(code) > maximumOutputBytes) {
+      const error = 'RENDER_OUTPUT_BYTES_EXCEEDED';
+      return { rendered: false, success: false, error, logs: [], errors: [error], pageErrors: [] };
+    }
+    try {
+      const stills = await new RevideoRenderer().renderStills(code, { fps: 30, width: 960, height: 540 });
+      const shot = (buffer: Buffer): ScreenshotResult => ({ buffer, width: stills.width, height: stills.height, success: true });
+      const c = stills.containment;
+      const containment: NonNullable<RenderEvidence['containment']> = {
+        networkIsolated: c.networkIsolated, permissionsDenied: c.permissionsDenied,
+        cleanupSucceeded: c.cleanupSucceeded, blockedRequests: c.blockedRequests,
+        routeInstalled: c.networkIsolated, timeoutEnforced: true,
+        outputLimitEnforced: true, outputBytes: Buffer.byteLength(code), assetDigests: [],
+      };
+      return { rendered: true, success: true, screenshot: shot(stills.early), lateScreenshot: shot(stills.late),
+        logs: [`revideo scene: ${stills.durationSeconds.toFixed(2)} s`], errors: [], pageErrors: [], containment };
+    } catch (err) {
+      // `rendered` stays unset: a scene that fails to bundle, initialise or
+      // seek is a candidate failure (repairable), not a refused wrapper.
+      // Browser launch failures still classify as infra by their message.
+      const error = `Revideo render failed: ${err instanceof Error ? err.message : String(err)}`;
+      return { success: false, error, logs: [], errors: [error], pageErrors: [] };
+    }
+  }
+
   /** Run a bpy script headless and adapt the PNG to the screenshot shape the judges consume. */
   private static async renderBlenderScript(code: string): Promise<RenderResult> {
     const result = await renderBlender(code);
     if (!result.success || !result.png) {
       const error = result.error ?? 'Blender render failed';
-      return { success: false, error, logs: result.logs, errors: [error] };
+      return { success: false, error, logs: result.logs, errors: [error], pageErrors: [] };
     }
     const shot: ScreenshotResult = {
       buffer: result.png, width: result.width ?? 0, height: result.height ?? 0, success: true,
     };
-    return { rendered: true, success: true, screenshot: shot, lateScreenshot: shot, logs: result.logs, errors: [] };
+    // Only bwrap (--unshare-all, fresh net namespace, read-only system binds, a
+    // throwaway out dir and a hard timeout) counts as contained. The unsandboxed
+    // escape hatch reports itself as not isolated, so admission rejects it (#1628).
+    const isolated = result.sandbox === 'bwrap';
+    const containment: NonNullable<RenderEvidence['containment']> = {
+      networkIsolated: isolated, permissionsDenied: isolated, cleanupSucceeded: true,
+      blockedRequests: 0, routeInstalled: false, timeoutEnforced: true,
+      outputLimitEnforced: true, outputBytes: Buffer.byteLength(code), assetDigests: [],
+    };
+    return { rendered: true, success: true, screenshot: shot, lateScreenshot: shot, logs: result.logs, errors: [], pageErrors: [], containment };
   }
 
   /**
    * Render code and capture output
    */
   async render(code: string, options: RenderOptions = {}): Promise<RenderResult> {
+    // A real Revideo scene renders through its own Player + Stage harness (#1628).
+    // The HTML timeline-preview wrapper is an approximation and never counts, and
+    // code that only looks like Revideo is not auto-routed into the bundler.
+    if (options.domain === 'revideo' && !/data-revideo-timeline-preview/.test(code)) {
+      return HeadlessRenderer.renderRevideoScene(code, options.maximumOutputBytes ?? DEFAULT_OPTIONS.maximumOutputBytes);
+    }
     if (options.domain === 'revideo' || /data-revideo-timeline-preview/.test(code)
       || ((!options.domain || options.domain === 'unknown') && HeadlessRenderer.detectDomain(code) === 'revideo')) {
       const error = 'Revideo scene not rendered: wrapper is an approximation';
-      return { rendered: false, success: false, error, logs: [], errors: [error] };
+      return { rendered: false, success: false, error, logs: [], errors: [error], pageErrors: [] };
     }
     // Detect domain BEFORE applying options so we know whether to use hydra viewport
     const detectedDomain = options.domain === 'unknown' || !options.domain
@@ -576,7 +725,7 @@ export class HeadlessRenderer {
     if (detectedDomain === 'blender') {
       if (options.domain === 'blender') return HeadlessRenderer.renderBlenderScript(code);
       const error = 'bpy script detected; Blender renders only run for an explicit blender domain';
-      return { rendered: false, success: false, error, logs: [], errors: [error] };
+      return { rendered: false, success: false, error, logs: [], errors: [error], pageErrors: [] };
     }
 
     const isHydra = detectedDomain === 'hydra';
@@ -589,6 +738,9 @@ export class HeadlessRenderer {
 
     const logs: string[] = [];
     const errors: string[] = [];
+    const pageErrors: string[] = [];
+    const threw = () => (pageErrors.length > 0 ? `The page threw: ${pageErrors[0]}` : undefined);
+    const naming = (message: string) => (pageErrors.length > 0 ? `${message}. ${threw()}` : message);
     const assetDigests = new Set<string>();
     let pagesBefore = 0;
     const containment: NonNullable<RenderEvidence['containment']> = {
@@ -618,7 +770,16 @@ export class HeadlessRenderer {
 
       pagesBefore = typeof this.context.pages === 'function' ? this.context.pages().length : 0;
       page = await this.context.newPage();
-      const guardsInstalled = await this.installContainmentGuards(page, opts);
+      const readBusyMs = await HeadlessRenderer.startBusyMeter(page);
+      // The clock goes in before the guards so the timer census wraps the fake
+      // timers; the guards seal setTimeout, which would block a later install.
+      const arcClock = await this.installArcClock(page, opts);
+      const timerLimit = arcClock
+        ? opts.maximumTimers * Math.max(1, Math.ceil(opts.arcHorizonMs
+          / Math.max(1, opts.stabilizationTime + opts.lateCaptureDelay)))
+        : opts.maximumTimers;
+      const guardsInstalled = await this.installContainmentGuards(page,
+        { ...opts, maximumTimers: timerLimit });
       containment.routeInstalled = await this.installLocalAssetFallbacks(page, opts.networkPolicy,
         () => { containment.blockedRequests++; }, digest => assetDigests.add(digest));
       containment.networkIsolated = opts.networkPolicy === 'isolated'
@@ -630,6 +791,12 @@ export class HeadlessRenderer {
 
       // Capture console logs
       page.on('console', (msg: ConsoleMessage) => {
+        // Our sandbox CSP blocks web fonts; the piece still draws with a
+        // fallback face, so that block is a warning, not the piece failing.
+        if (msg.type() === 'error' && CSP_COSMETIC_BLOCK.test(msg.text())) {
+          logs.push(`[warn] blocked by sandbox CSP: ${msg.text()}`);
+          return;
+        }
         const log = `[${msg.type()}] ${msg.text()}`;
         logs.push(log);
         if (msg.type() === 'error') {
@@ -640,6 +807,7 @@ export class HeadlessRenderer {
       // Capture page errors
       page.on('pageerror', (error: Error) => {
         errors.push(error.message);
+        pageErrors.push(error.message);
       });
 
       const domain = opts.domain;
@@ -668,7 +836,7 @@ export class HeadlessRenderer {
       if (domain === 'tone' || domain === 'strudel') {
         // Instrumentation must exist in the page before Tone/strudel load:
         // prepend it into the head so it runs first.
-        renderSource = HeadlessRenderer.audioCaptureScript(opts.stabilizationTime) + renderSource;
+        renderSource = HeadlessRenderer.audioCaptureScript(HeadlessRenderer.audioWindowMs(opts)) + renderSource;
       }
 
       // setContent runs at about:blank where /vendor/ URLs never resolve —
@@ -697,9 +865,10 @@ export class HeadlessRenderer {
           errors.push(error);
           return {
             success: false,
-            error,
+            error: naming(error),
             logs,
             errors,
+            pageErrors,
             containment,
           };
         }
@@ -715,9 +884,10 @@ export class HeadlessRenderer {
             errors.push(error);
             return {
               success: false,
-              error,
+              error: naming(error),
               logs,
               errors,
+              pageErrors,
               containment,
             };
           }
@@ -746,18 +916,21 @@ export class HeadlessRenderer {
         errors.push(screenshot.error);
       }
 
-      if (opts.observeInteraction) interaction = await this.observeInteraction(page);
-
       // Preserve the distinct steady-state frame without a separate fixed delay.
       let lateScreenshot: ScreenshotResult | undefined;
+      let arc: RenderResult['arc'];
       if (screenshot.success && opts.waitForStabilization) {
-        await page.waitForTimeout(opts.lateCaptureDelay);
+        if (arcClock) arc = await this.fastForwardArc(page, opts, startedAt);
+        else await page.waitForTimeout(opts.lateCaptureDelay);
         lateScreenshot = await this.captureScreenshot(page, opts);
         if (!lateScreenshot.success) {
           logs.push(`[warn] late frame capture failed: ${lateScreenshot.error ?? 'unknown error'}`);
           lateScreenshot = undefined;
         }
       }
+
+      // After the late frame, so pointer events cannot change it.
+      if (opts.observeInteraction) interaction = await this.observeInteraction(page);
 
       // Capture audio if applicable
       const audio = domain === 'tone' || domain === 'strudel'
@@ -801,6 +974,16 @@ export class HeadlessRenderer {
         throw new Error('RENDER_HEAP_LIMIT_EXCEEDED');
       }
       if (postRunCensus.durationMs > opts.maximumDurationMs) {
+        // Wall time counts host load too (#1752). An overloaded host, or a
+        // page whose own main-thread work stayed under half the cap, means the
+        // machine was slow, not the piece: report it as infrastructure so it is
+        // rerun, not scored. Busy time alone cannot clear an animating piece,
+        // because starvation stretches its tasks too.
+        const busyMs = await readBusyMs();
+        const loadPerCore = this.hostLoadPerCore();
+        if (loadPerCore > 1 || (busyMs !== null && busyMs < opts.maximumDurationMs / 2)) {
+          throw new Error(`RENDER_HOST_CONTENTION: wall ${postRunCensus.durationMs} ms, page busy ${busyMs ?? 'unknown'} ms, load/core ${loadPerCore.toFixed(2)}`);
+        }
         throw new Error('RENDER_DURATION_LIMIT_EXCEEDED');
       }
       if (postRunCensus.eventsDispatched > opts.maximumEvents) {
@@ -809,7 +992,7 @@ export class HeadlessRenderer {
       if (postRunCensus.eventListeners > opts.maximumEventListeners) {
         throw new Error('RENDER_EVENT_LISTENER_LIMIT_EXCEEDED');
       }
-      if (postRunCensus.timers > opts.maximumTimers) {
+      if (postRunCensus.timers > timerLimit) {
         throw new Error('RENDER_TIMER_LIMIT_EXCEEDED');
       }
       if (postRunCensus.audioContexts > opts.maximumAudioContexts) {
@@ -820,11 +1003,15 @@ export class HeadlessRenderer {
         page: opts.keepPageOpen ? page : undefined,
         screenshot,
         lateScreenshot,
+        ...(arc ? { arc } : {}),
         audio,
-        success: screenshot.success,
-        error: screenshot.success ? undefined : screenshot.error || 'Screenshot failed',
+        // p5 makes its canvas before setup runs, so a sketch that throws still
+        // yields a screenshot. A frame of a crashed piece is not a render.
+        success: screenshot.success && pageErrors.length === 0,
+        error: screenshot.success ? threw() : naming(screenshot.error || 'Screenshot failed'),
         logs,
         errors,
+        pageErrors,
         containment,
         rendererEnvironmentDigest: this.rendererEnvironmentDigest,
         playback,
@@ -847,9 +1034,10 @@ export class HeadlessRenderer {
       });
       return {
         success: false,
-        error: message,
+        error: naming(message),
         logs,
         errors,
+        pageErrors,
         containment,
         rendererEnvironmentDigest: this.rendererEnvironmentDigest,
       };
@@ -931,6 +1119,44 @@ export class HeadlessRenderer {
     return true;
   }
 
+  /** Wall time kept back from maximumDurationMs for the late capture and census. */
+  private static readonly ARC_DURATION_RESERVE_MS = 10_000;
+  /** The probe needs about a second at full speed; throttled timers can stretch it, so allow ten. */
+  private static readonly PROBE_DEADLINE_MS = 10_000;
+
+  /** Domains whose late frame comes from piece time, not wall time (#1637). */
+  private static readonly ARC_EXEMPT = new Set<string>(
+    ['tone', 'strudel', 'svg', 'ascii', 'textgen', 'blender', 'revideo', 'unknown']);
+
+  /** Put the page on Playwright's virtual clock when an arc horizon is asked for.
+   * Time still flows in real time until the fast-forward. */
+  private async installArcClock(page: Page, opts: Required<RenderOptions>): Promise<boolean> {
+    if (!(opts.arcHorizonMs > 0) || HeadlessRenderer.ARC_EXEMPT.has(opts.domain)) return false;
+    const clock = (page as Partial<Page>).clock;
+    if (!clock || typeof clock.install !== 'function') return false;
+    await clock.install();
+    return true;
+  }
+
+  /** Advance piece time to the horizon in one-second steps, stopping at the
+   * wall budget so a heavy scene can't hold the render past its limits. */
+  private async fastForwardArc(page: Page, opts: Required<RenderOptions>, renderStartedAt: number)
+    : Promise<NonNullable<RenderResult['arc']>> {
+    const started = Date.now();
+    // Frame-driven pieces must render every frame, so piece time only runs
+    // ~1.5-2x wall time under swiftshader. Stop well inside the duration cap.
+    const budgetMs = Math.min(opts.arcWallBudgetMs,
+      opts.maximumDurationMs - (started - renderStartedAt) - HeadlessRenderer.ARC_DURATION_RESERVE_MS);
+    const elapsedBeforeArc = opts.stabilizationTime;
+    let reachedMs = elapsedBeforeArc;
+    while (reachedMs < opts.arcHorizonMs && Date.now() - started < budgetMs) {
+      const step = Math.min(1_000, opts.arcHorizonMs - reachedMs);
+      await page.clock.runFor(step);
+      reachedMs += step;
+    }
+    return { horizonMs: opts.arcHorizonMs, reachedMs, wallMs: Date.now() - started };
+  }
+
   private async installContainmentGuards(page: Page, limits: {
     maximumEventListeners: number; maximumEvents: number; maximumTimers: number;
     maximumAudioContexts: number; maximumHeapBytes: number;
@@ -1005,6 +1231,34 @@ export class HeadlessRenderer {
     return true;
   }
 
+  /** One-minute load average per core; 0 where the OS does not report it. */
+  private hostLoadPerCore(): number {
+    const cores = os.cpus().length;
+    return cores > 0 ? os.loadavg()[0] / cores : 0;
+  }
+
+  /**
+   * Starts Chromium's per-page performance counters and returns a reader for
+   * the page's main-thread busy time in ms, or null when CDP is unavailable.
+   */
+  private static async startBusyMeter(page: Page): Promise<() => Promise<number | null>> {
+    try {
+      const session = await page.context().newCDPSession(page);
+      await session.send('Performance.enable');
+      return async () => {
+        try {
+          const { metrics } = await session.send('Performance.getMetrics');
+          const task = metrics.find((metric) => metric.name === 'TaskDuration');
+          return typeof task?.value === 'number' ? Math.round(task.value * 1000) : null;
+        } catch {
+          return null;
+        }
+      };
+    } catch {
+      return () => Promise.resolve(null);
+    }
+  }
+
   private async collectPostRunCensus(page: Page, startedAt: number,
     pagesBefore: number): Promise<RenderPostRunCensus> {
     const observed = typeof page.evaluate === 'function' ? await page.evaluate(() => {
@@ -1049,6 +1303,7 @@ export class HeadlessRenderer {
           timingMs: Date.now() - startTime,
           infraUnavailable: false,
           candidateFailure: true,
+          ...(sandboxResult.error ? { failure: sandboxResult.error } : {}),
         };
       }
     }
@@ -1056,11 +1311,15 @@ export class HeadlessRenderer {
     const result = await this.render(code, options);
     const timingMs = Date.now() - startTime;
 
-    const errorMessage = result.error || '';
-    const lowerError = errorMessage.toLowerCase();
-
-    // Infrastructure failures: browser cannot start, missing binary, system-level errors
-    const infraUnavailable = !result.success && (
+    // Infrastructure failures: browser cannot start, missing binary, system-level errors.
+    // Only the renderer's own reason counts: text the piece threw is removed, so
+    // a sketch's "browser is not defined" is not read as a missing browser. A
+    // captured frame proves the browser ran.
+    const lowerError = result.pageErrors
+      .reduce((message, thrown) => message.split(thrown).join(''), result.error || '')
+      .toLowerCase();
+    const hostContention = !result.success && lowerError.includes('render_host_contention');
+    const infraUnavailable = hostContention || (!result.success && !result.screenshot?.success && (
       lowerError.includes('failed to initialize headless browser') ||
       lowerError.includes('browser context not initialized') ||
       lowerError.includes('executable') ||
@@ -1070,7 +1329,7 @@ export class HeadlessRenderer {
       lowerError.includes('browser') ||
       lowerError.includes('spawn') ||
       lowerError.includes('econnrefused')
-    );
+    ));
 
     // Candidate failures: JS errors, timeouts, canvas issues caused by bad code
     const candidateFailure = !result.success && !infraUnavailable && result.rendered !== false;
@@ -1080,6 +1339,7 @@ export class HeadlessRenderer {
       timingMs,
       infraUnavailable,
       candidateFailure,
+      ...(candidateFailure && result.error ? { failure: result.error } : {}),
       screenshotRef: result.screenshot?.success ? 'screenshot' : undefined,
       screenshot: result.screenshot?.success
         ? {
@@ -1108,25 +1368,26 @@ export class HeadlessRenderer {
     };
   }
 
-  private async observeInteraction(page: Page): Promise<NonNullable<RenderEvidence['interaction']>> {
-    return page.evaluate(async () => {
-      const target = document.querySelector<HTMLElement>(
-        'button:not([disabled]), [role="button"], input[type="range"]');
-      if (!target) return { actions: 0, stateChanged: false };
-      const snapshot = () => `${document.documentElement.innerHTML}|${Array.from(
-        document.querySelectorAll('canvas')).map(canvas => {
-          try { return canvas.toDataURL(); } catch { return ''; }
-        }).join('|')}`;
-      const before = snapshot();
-      if (target instanceof HTMLInputElement && target.type === 'range') {
-        const maximum = Number(target.max || 100);
-        target.value = String(Math.min(maximum, Number(target.value || 0) + 1));
-        target.dispatchEvent(new Event('input', { bubbles: true }));
-        target.dispatchEvent(new Event('change', { bubbles: true }));
-      } else target.click();
-      await new Promise(resolve => setTimeout(resolve, 100));
-      return { actions: 1, stateChanged: snapshot() !== before };
-    });
+  /** Runs the probe with a deadline: a page that swallows the probe's timers reports 'error', never hangs the render. */
+  private async observeInteraction(page: Pick<Page, 'evaluate'>, deadlineMs = HeadlessRenderer.PROBE_DEADLINE_MS)
+    : Promise<NonNullable<RenderEvidence['interaction']>> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<void>(resolve => { timer = setTimeout(resolve, deadlineMs); });
+    const probe = page.evaluate(
+      `(() => { const __name = (value) => value; return (${probeInteraction.toString()})(); })()`) as Promise<
+        NonNullable<RenderEvidence['interaction']>>;
+    try {
+      const seen = await Promise.race([probe.then(value => ({ value })), expired.then(() => undefined)]);
+      if (seen) return seen.value;
+      // A page too busy to answer the probe may not answer this either; give it one more second at most.
+      const settled = page.evaluate(
+        `(() => { const __name = (value) => value; (${settleInteractionProbe.toString()})(); })()`)
+        .catch(() => undefined);
+      await Promise.race([settled, new Promise<void>(resolve => { timer = setTimeout(resolve, 1_000); })]);
+      return { actions: 0, stateChanged: null, target: 'error' };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /**
@@ -1162,82 +1423,23 @@ export class HeadlessRenderer {
    */
   private async waitForFirstFrame(page: Page, timeout: number): Promise<boolean> {
     const deadline = Date.now() + timeout;
-
-    // For hydra: listen for the custom first-frame event first (most efficient).
-    // The wrapper dispatches 'hydra:firstFrame' when pixels appear.
-    let eventFired = false;
-    const eventHandler = () => { eventFired = true; };
-    await page.exposeFunction('__onHydraFirstFrame', eventHandler);
-    await page.evaluate(() => {
-      const handler = (window as unknown as Record<string, () => void>).__onHydraFirstFrame;
-      window.addEventListener('hydra:firstFrame', handler);
-    });
-
+    let probeErrorLogged = false;
     while (Date.now() < deadline) {
-      // Check if the custom event fired
-      if (eventFired) {
-        Logger.debug('HeadlessRenderer', 'First frame detected via event');
-        return true;
-      }
-
       try {
-        // Sample the center pixel of the canvas. Any non-black value indicates
-        // the renderer is producing frames.
-        const hasContent = await page.evaluate((probeTimeoutMs) => new Promise<boolean>(resolve => {
-          const sampleFrame = () => {
-            const canvas = document.querySelector('canvas');
-            if (!canvas) return false;
-
-            // Try WebGL context first (hydra, three, shader)
-            const glCtx = canvas.getContext('webgl') || canvas.getContext('webgl2');
-            if (glCtx) {
-              // Read a center pixel
-              const x = Math.floor(canvas.width / 2);
-              const y = Math.floor(canvas.height / 2);
-              const pixels = new Uint8Array(4);
-              // WebGL renders upside-down; flip Y to match visual top
-              glCtx.readPixels(x, canvas.height - 1 - y, 1, 1, glCtx.RGBA, glCtx.UNSIGNED_BYTE, pixels);
-              // Any non-zero channel means something was rendered
-              return pixels[0] > 0 || pixels[1] > 0 || pixels[2] > 0;
-            }
-
-            // Fall back to 2D canvas
-            const ctx2d = canvas.getContext('2d');
-            if (ctx2d) {
-              const x = Math.floor(canvas.width / 2);
-              const y = Math.floor(canvas.height / 2);
-              const pixel = ctx2d.getImageData(x, y, 1, 1).data;
-              return pixel[0] > 0 || pixel[1] > 0 || pixel[2] > 0;
-            }
-
-            return false;
-          };
-          // WebGL may clear its drawing buffer after presentation. Read in the
-          // animation frame, when Hydra has drawn, rather than between frames.
-          let frame = 0;
-          const timer = setTimeout(() => {
-            cancelAnimationFrame(frame);
-            resolve(false);
-          }, probeTimeoutMs);
-          frame = requestAnimationFrame(() => {
-            clearTimeout(timer);
-            try { resolve(sampleFrame()); } catch { resolve(false); }
-          });
-        }), Math.min(100, Math.max(1, deadline - Date.now())));
-
-        if (hasContent) {
+        const probeMs = Math.min(100, Math.max(1, deadline - Date.now()));
+        if (await page.evaluate(probeFrameLit, probeMs)) {
           Logger.debug('HeadlessRenderer', 'First frame detected');
           return true;
         }
-
-        // Give the render loop time to produce a frame
-        await page.waitForTimeout(100);
-      } catch {
-        // Non-fatal: canvas may not be ready yet, keep polling
-        await page.waitForTimeout(100);
+      } catch (error) {
+        // The canvas or its context may not exist yet; keep polling.
+        if (!probeErrorLogged) {
+          probeErrorLogged = true;
+          Logger.debug('HeadlessRenderer', 'First-frame probe failed, still polling:', error);
+        }
       }
+      await page.waitForTimeout(100);
     }
-
     Logger.debug('HeadlessRenderer', 'No frame content detected within timeout');
     return false;
   }
@@ -1310,14 +1512,44 @@ export class HeadlessRenderer {
    * renders — capture arrays stayed undefined and every tone/strudel render
    * heard silence regardless of the piece.
    */
-  private static audioCaptureScript(stabilizationTime: number): string {
+  private static audioCaptureScript(windowMs: number): string {
     // IIFE of the compiled module-level init (types erased by tsc).
-    const maxSamples = Math.max(1, Math.floor(44_100 * stabilizationTime / 1_000));
-    return '<script>(' + audioCapturePageInit.toString() + `)(${maxSamples});</script>`;
+    const maxSamples = Math.max(1, Math.floor(44_100 * windowMs / 1_000));
+    return STRUDEL_TEMPO_SCRIPT + '<script>(' + audioCapturePageInit.toString() + `)(${maxSamples});</script>`;
   }
   /**
-   * Trigger audio playback for Tone.js or Strudel content.
-   * This clicks the play button or calls play functions to ensure audio is actually playing.
+   * Polls the page for up to 3 s until it plays, fails, or says it is still
+   * booting. "Ready." can last while a pattern evaluates, so idle is only
+   * final at the end.
+   */
+  private async awaitPlayback(page: Page, domain: RenderDomain): Promise<PlaybackState> {
+    let state: PlaybackState = 'waiting';
+    for (let poll = 0; poll < 12; poll += 1) {
+      state = await page.evaluate(readPlaybackState, domain).catch((): PlaybackState => 'waiting');
+      if (state !== 'waiting' && state !== 'idle') return state;
+      await page.waitForTimeout(250);
+    }
+    return state;
+  }
+
+  /**
+   * A trusted press of a shell control. An artwork layer over the button
+   * (a full-page canvas, a fixed panel) makes the mouse click wait out its
+   * timeout (#1757); a focused button activated by Enter is still a trusted
+   * gesture, whatever lies on top of it.
+   */
+  private static async pressControl(page: Page, selector: string): Promise<void> {
+    try {
+      await page.click(selector, { delay: 40, timeout: 2_000 });
+    } catch {
+      await page.focus(selector);
+      await page.keyboard.press('Enter');
+    }
+  }
+
+  /**
+   * Presses the audio shell's Start button and reports whether the page then
+   * plays; falls back to calling play() when there is no button.
    */
   private async triggerAudioPlayback(page: Page, domain: RenderDomain): Promise<{
     controlsAccessible: boolean; started: boolean; warning?: string }> {
@@ -1325,21 +1557,29 @@ export class HeadlessRenderer {
       // Wait a short time for the page to initialize
       await page.waitForTimeout(500);
 
-      const controlsAccessible = await page.evaluate(() => Boolean(
-        document.getElementById('playBtn') || document.querySelector('button')))
-        .catch(() => false);
+      // Any button on the page used to count, so every page passed. Only the
+      // shell's own play button, visible, is a control a listener can use.
+      let controlsAccessible = false;
       let started = false;
       // Trusted-gesture first: Chromium's autoplay policy only unlocks the
       // AudioContext inside a REAL user activation. Synthetic element.click()
       // from evaluate() is not trusted, so Tone.start()/ctx.resume() inside
       // the shell's handler stayed suspended and capture heard silence.
       // Playwright's click() dispatches a trusted event.
-      if (domain === 'tone' || domain === 'strudel') {
-        const selector = domain === 'tone' ? '#start' : '#sinter-strudel-play';
+      const selector = PLAY_BUTTON[domain];
+      if (selector) {
         try {
-          await page.waitForSelector(selector, { timeout: 4000 });
-          await page.click(selector, { delay: 40 });
-          started = true;
+          await page.waitForSelector(selector, { state: 'visible', timeout: 4000 });
+          controlsAccessible = true;
+          // A press counts once the page plays. The Strudel shell ignores a
+          // press until its sample banks load; press again while it boots.
+          for (let press = 0; press < 4; press += 1) {
+            if (press > 0) await page.waitForTimeout(1200);
+            await HeadlessRenderer.pressControl(page, selector);
+            const state = await this.awaitPlayback(page, domain);
+            started = state === 'playing';
+            if (state !== 'booting' && state !== 'idle') break;
+          }
         } catch {
           started = false;
         }
@@ -1358,6 +1598,8 @@ export class HeadlessRenderer {
           } catch { /* fall through */ }
           return false;
         }).catch(() => false);
+        // Calling play() is not playing: an untrusted call leaves audio suspended.
+        if (started) started = await this.awaitPlayback(page, domain) === 'playing';
       }
 
       // Wait for audio to actually start
@@ -1375,10 +1617,37 @@ export class HeadlessRenderer {
    * Capture audio output from the page
    * Uses Web Audio API to capture real audio data
    */
+  /** How much sound the judge hears: audioCaptureMs, else the settle time. */
+  private static audioWindowMs(opts: Pick<RenderOptions, 'audioCaptureMs' | 'stabilizationTime'>): number {
+    const settle = opts.stabilizationTime ?? DEFAULT_OPTIONS.stabilizationTime;
+    return opts.audioCaptureMs && opts.audioCaptureMs > 0 ? opts.audioCaptureMs : settle;
+  }
+
+  /**
+   * Wait until the page has captured `windowMs` of sound, or `windowMs` has
+   * passed. The capture opens at the first sound, so a piece that is still
+   * arriving gets its full window and a silent one costs at most windowMs.
+   */
+  private async waitForAudioWindow(page: Page, windowMs: number): Promise<void> {
+    const deadline = Date.now() + windowMs;
+    for (;;) {
+      const capturedMs = await page.evaluate(() => {
+        const w = window as unknown as { __audioCaptureData?: number[]; __audioCaptureRate?: number };
+        const rate = w.__audioCaptureRate && w.__audioCaptureRate > 0 ? w.__audioCaptureRate : 44100;
+        return w.__audioCaptureData ? (w.__audioCaptureData.length / rate) * 1000 : 0;
+      });
+      const left = deadline - Date.now();
+      if (capturedMs >= windowMs || left <= 0) return;
+      await page.waitForTimeout(Math.min(250, left));
+    }
+  }
+
   private async captureAudio(page: Page, opts: Required<RenderOptions>): Promise<AudioCaptureResult> {
     try {
       // Wait for audio to be captured during the stabilization period
       await page.waitForTimeout(opts.stabilizationTime);
+      const windowMs = HeadlessRenderer.audioWindowMs(opts);
+      if (windowMs > opts.stabilizationTime) await this.waitForAudioWindow(page, windowMs);
 
       // Retrieve the captured audio data
       const audioData = await page.evaluate((duration: number) => {
@@ -1419,7 +1688,7 @@ export class HeadlessRenderer {
           hasAudio: true,
           warnings: captureWarnings,
         };
-      }, opts.stabilizationTime);
+      }, windowMs);
 
       return {
         samples: new Float32Array(audioData.samples),
@@ -1469,3 +1738,128 @@ export class HeadlessRenderer {
 export { audioCapturePageInit };
 
 export default HeadlessRenderer;
+
+/**
+ * Runs inside the page (Playwright serialises it, so it is self-contained): acts like a user and reports whether
+ * the document or any canvas changed. Attempts run in order: the first interactive control, then, unless an
+ * earlier attempt was credited, a pointer sequence at the centre of the largest visible canvas. Each attempt has its
+ * own idle window, so a change the page makes on its own is never credited to the action.
+ *
+ * Controls get a dispatched click (SVG elements have no `.click()`). The canvas sequence goes to whatever element
+ * is at the canvas centre, as a real pointer would, so overlays receive it. Snapshots are read inside an animation
+ * frame because a WebGL canvas can read blank outside one. A crash reports target 'error', never 'none' (#1629, #1702).
+ */
+export type InteractionTarget = 'control' | 'canvas-pointer' | 'none' | 'error';
+/**
+ * What the probe did. `stateChanged` is true when any attempt was credited, null when an attempt could not be
+ * attributed because the page also changed over an equal window with no action, false otherwise.
+ */
+export interface InteractionObservation { actions: number; stateChanged: boolean | null; target: InteractionTarget }
+
+type ProbeLedger = { timers: number; settled: boolean };
+
+/** Runs in the page when the probe misses its deadline: stops it scheduling more timers and takes the
+ * ones it already counted back out of the census, so the post-run census sees only the piece's. */
+export function settleInteractionProbe(): void {
+  const root = globalThis as { __liminalContainmentCensus?: { timers: number }; __liminalProbe?: ProbeLedger };
+  const ledger = root.__liminalProbe;
+  if (!ledger || ledger.settled) return;
+  ledger.settled = true;
+  if (root.__liminalContainmentCensus) root.__liminalContainmentCensus.timers -= ledger.timers;
+}
+
+export async function probeInteraction(): Promise<InteractionObservation> {
+  const settleMs = 100;
+  // The containment census counts timers against the piece. The probe's own go in a ledger and are taken
+  // back out once, by `finally` or by the renderer's deadline (settleInteractionProbe), whichever is first.
+  const root = globalThis as { __liminalContainmentCensus?: { timers: number }; __liminalProbe?: ProbeLedger };
+  const census = root.__liminalContainmentCensus;
+  const ledger: ProbeLedger = { timers: 0, settled: false };
+  root.__liminalProbe = ledger;
+  try {
+    const read = () => `${document.documentElement.innerHTML}|${Array.from(
+      document.querySelectorAll('canvas')).map(canvas => {
+        try { return canvas.toDataURL(); } catch { return ''; }
+      }).join('|')}`;
+    const wait = (callback: () => void) => {
+      if (ledger.settled) throw new Error('PROBE_DEADLINE_PASSED');
+      const counted = census?.timers ?? 0;
+      const scheduled: unknown = setTimeout(callback, settleMs);
+      ledger.timers += (census?.timers ?? 0) - counted;
+      // The census returns 0 instead of scheduling once the piece is over its timer limit.
+      if (scheduled === 0) throw new Error('PROBE_TIMER_REFUSED');
+    };
+    const snapshot = () => new Promise<string>(resolve => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        try { resolve(read()); } catch { resolve(''); }
+      };
+      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(finish);
+      wait(finish);
+    });
+    const settle = () => new Promise<void>(resolve => wait(resolve));
+    const control = document.querySelector<Element>(
+      'button:not([disabled]), [role="button"], input[type="range"]');
+    let canvas: HTMLCanvasElement | undefined;
+    let canvasArea = 0;
+    for (const candidate of Array.from(document.querySelectorAll('canvas'))) {
+      const box = candidate.getBoundingClientRect();
+      if (box.width > 0 && box.height > 0 && box.width * box.height > canvasArea) {
+        canvas = candidate;
+        canvasArea = box.width * box.height;
+      }
+    }
+    if (!control && !canvas) return { actions: 0, stateChanged: false, target: 'none' };
+    const attempt = async (act: () => void): Promise<boolean | null> => {
+      const idle = await snapshot();
+      await settle();
+      const before = await snapshot();
+      act();
+      await settle();
+      const after = await snapshot();
+      return idle !== before ? null : after !== before;
+    };
+    const attempts: Array<{ target: InteractionTarget; result: boolean | null }> = [];
+    if (control) {
+      const result = await attempt(() => {
+        if (control instanceof HTMLInputElement && control.type === 'range') {
+          const maximum = Number(control.max || 100);
+          control.value = String(Math.min(maximum, Number(control.value || 0) + 1));
+          control.dispatchEvent(new Event('input', { bubbles: true }));
+          control.dispatchEvent(new Event('change', { bubbles: true }));
+        } else {
+          control.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        }
+      });
+      attempts.push({ target: 'control', result });
+    }
+    if (canvas && !attempts.some(made => made.result === true)) {
+      const box = canvas.getBoundingClientRect();
+      const x = box.left + box.width / 2;
+      const y = box.top + box.height / 2;
+      const result = await attempt(() => {
+        const hit = typeof document.elementFromPoint === 'function' ? document.elementFromPoint(x, y) : null;
+        const receiver: Element = hit ?? canvas;
+        const at = { clientX: x, clientY: y, bubbles: true, cancelable: true };
+        const Pointer = typeof PointerEvent === 'function' ? PointerEvent : MouseEvent;
+        for (const [Kind, type] of [[Pointer, 'pointermove'], [MouseEvent, 'mousemove'], [Pointer, 'pointerdown'],
+          [MouseEvent, 'mousedown'], [Pointer, 'pointerup'], [MouseEvent, 'mouseup'], [MouseEvent, 'click']] as const) {
+          receiver.dispatchEvent(new Kind(type, { ...at, pointerId: 1, isPrimary: true } as PointerEventInit));
+        }
+      });
+      attempts.push({ target: 'canvas-pointer', result });
+    }
+    const credited = attempts.find(made => made.result === true);
+    const stateChanged = credited ? true : attempts.some(made => made.result === null) ? null : false;
+    return { actions: attempts.length, stateChanged, target: (credited ?? attempts[attempts.length - 1]).target };
+  } catch {
+    return { actions: 0, stateChanged: null, target: 'error' };
+  } finally {
+    if (!ledger.settled) {
+      ledger.settled = true;
+      if (census) census.timers -= ledger.timers;
+    }
+  }
+}

@@ -266,7 +266,11 @@ describe('output file handling (real files)', () => {
 // Real isolation proof. Needs a Linux host with bwrap (no Blender needed): python3 stands in for blender
 // inside the exact argv shape renderBlender uses.
 const REAL = hostSandboxDeps();
-const canBwrap = process.platform === 'linux' && REAL.which('bwrap') !== null && REAL.which('python3') !== null;
+// Installed is not enough: hosts that restrict unprivileged user namespaces (Ubuntu 24.04 AppArmor
+// default) ship bwrap but cannot start a sandbox, so probe one real start, as the isolation tests need.
+const bwrapPath = process.platform === 'linux' ? REAL.which('bwrap') : null;
+const canBwrap = bwrapPath !== null && REAL.which('python3') !== null
+  && spawnSync(bwrapPath, ['--ro-bind', '/', '/', '--unshare-net', '--die-with-parent', 'true'], { stdio: 'ignore', timeout: 10_000 }).status === 0;
 
 const PROBE = `
 import json, os, socket, sys

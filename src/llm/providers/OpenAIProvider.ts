@@ -19,6 +19,7 @@ import { normalizeThinking } from '../ThinkingNormalizer.js';
 import { parseOpenAIStream } from '../StreamParser.js';
 import { createLLMHttpError, describeUnreachableEndpoint, isTransientNetworkError, LLMError } from '../errors.js';
 import { recordServerCost } from '../ProviderBudgetLedger.js';
+import { hasThinkTags, splitThinking } from '../../llm/ModelOutput.js';
 
 function buildOpenAIUserContent(req: ProviderRequest): unknown {
   if (!req.imageInputs || req.imageInputs.length === 0) return req.userPrompt;
@@ -39,19 +40,44 @@ function buildOpenAIUserContent(req: ProviderRequest): unknown {
   ];
 }
 
+/** Every LFM3 call thinks for at least this many tokens when its context has room. */
+export const LFM3_THINK_BUDGET = 8192;
+/** No LFM3 call thinks for less than this, however full its context is. */
+export const LFM3_THINK_MIN = 256;
+
+/** A token is at least ~3 characters of prompt; an image is budgeted at 1024. */
+function promptTokenCeiling(req: ProviderRequest, systemContent: string): number {
+  return Math.ceil((systemContent.length + req.userPrompt.length) / 3) + 1024 * (req.imageInputs?.length ?? 0) + 64;
+}
+
 /**
- * Local LFM3 (llama.cpp) renders its chat template with thinking on by default.
- * Unrequested reasoning spends the whole max_tokens budget and leaves no final
- * code, so local LFM3 calls ask for the final answer directly.
+ * Every LFM3 call thinks, with a large budget (Simon, 2026-11-16): a 1.7B
+ * model's answer comes from its reasoning, so it gets more room to think than
+ * a frontier seat, not less. llama.cpp closes the thought at
+ * `thinking_budget_tokens`; the caller's max tokens stay the answer's own
+ * budget on top. When the server reports its per-slot context, the prompt,
+ * thought and answer are fitted inside it, so the answer is never cut off by a
+ * full slot. The model is told both budgets.
  */
-function isLocalLFM3(baseUrl: string | undefined, model: string): boolean {
-  if (!/lfm3/i.test(model)) return false;
-  try {
-    const host = new URL(baseUrl ?? '').hostname;
-    return host === '127.0.0.1' || host === 'localhost' || host === '[::1]';
-  } catch {
-    return false;
+function lfm3Thinking(
+  req: ProviderRequest,
+  systemContent: string,
+  answerTokens: number | undefined,
+  slotTokens: number | undefined,
+) {
+  let think = Math.max(req.thinking?.budgetTokens ?? 0, LFM3_THINK_BUDGET);
+  let answer = answerTokens;
+  if (slotTokens !== undefined) {
+    const room = slotTokens - promptTokenCeiling(req, systemContent);
+    think = Math.max(Math.min(think, room - (answer ?? Math.floor(room / 2))), LFM3_THINK_MIN);
+    if (answer !== undefined) answer = Math.max(Math.min(answer, room - think), 1);
   }
+  const answerNote = answer === undefined ? '' : ` Your answer then has up to ${answer} tokens.`;
+  return {
+    fields: { chat_template_kwargs: { enable_thinking: true }, thinking_budget_tokens: think },
+    maxTokens: answer === undefined ? undefined : think + answer,
+    systemContent: `${systemContent}\n\nThink first, for up to ${think} tokens.${answerNote}`,
+  };
 }
 
 /**
@@ -60,11 +86,7 @@ function isLocalLFM3(baseUrl: string | undefined, model: string): boolean {
  * tag). An unclosed opening tag means the model never reached an answer.
  */
 function stripInlineThinking(content: string): string {
-  const close = /<\/think(?:ing)?>/gi;
-  let end = -1;
-  for (let m = close.exec(content); m; m = close.exec(content)) end = m.index + m[0].length;
-  if (end >= 0) return content.slice(end).trimStart();
-  return /^\s*<think(?:ing)?>/i.test(content) ? '' : content;
+  return hasThinkTags(content) ? splitThinking(content).answer.trimStart() : content;
 }
 
 /**
@@ -136,6 +158,30 @@ export class OpenAIProvider extends BaseProvider {
     return CapabilityRegistry.getCapabilities(this.config.model);
   }
 
+  /** A generative LFM3 model; the d1 decision models generate nothing. */
+  private get isLFM3(): boolean {
+    return /lfm3/i.test(this.config.model) && !CapabilityRegistry.isDecisionModel(this.config.model);
+  }
+
+  private slotTokens?: Promise<number | undefined>;
+
+  /** The per-slot context a llama.cpp server reports at /props, read once. */
+  private lfm3SlotTokens(): Promise<number | undefined> {
+    this.slotTokens ??= fetch(new URL('/props', this.config.baseUrl), { signal: AbortSignal.timeout(3000) })
+      .then(async (response) => (response.ok ? response.json() : undefined))
+      .then((props: { default_generation_settings?: { n_ctx?: unknown } } | undefined) => {
+        const nCtx = props?.default_generation_settings?.n_ctx;
+        return typeof nCtx === 'number' && nCtx > 0 ? nCtx : undefined;
+      })
+      .catch(() => undefined);
+    return this.slotTokens;
+  }
+
+  private async lfm3For(req: ProviderRequest, systemContent: string) {
+    if (!this.isLFM3) return null;
+    return lfm3Thinking(req, systemContent, req.maxTokens ?? this.config.maxTokens, await this.lfm3SlotTokens());
+  }
+
   protected async generateImpl(req: ProviderRequest): Promise<Result<ProviderResponse, LLMError>> {
     try {
       const url = `${this.config.baseUrl}/chat/completions`;
@@ -151,9 +197,11 @@ export class OpenAIProvider extends BaseProvider {
         headers['User-Agent'] = 'claude-code/1.0';
       }
 
-      const maxTokensValue = req.maxTokens ?? this.config.maxTokens;
       // Never send blank system content — OpenAI-compatible gateways (Kilo) 400.
-      const systemContent = (req.systemPrompt || '').trim() || 'You are a helpful assistant.';
+      const baseSystem = (req.systemPrompt || '').trim() || 'You are a helpful assistant.';
+      const lfm3 = await this.lfm3For(req, baseSystem);
+      const maxTokensValue = lfm3 ? lfm3.maxTokens : req.maxTokens ?? this.config.maxTokens;
+      const systemContent = lfm3?.systemContent ?? baseSystem;
       const body: Record<string, unknown> = {
         model: this.config.model,
         messages: [
@@ -175,7 +223,9 @@ export class OpenAIProvider extends BaseProvider {
       // Reasoning effort: send dual OpenAI-compatible shapes when thinking is
       // requested AND the model is thinking-capable. The capability gate keeps
       // strict endpoints (gpt-4o et al.) from 400ing on unknown params.
-      if (req.thinking?.enabled && this.capabilities.thinking) {
+      if (lfm3) {
+        Object.assign(body, lfm3.fields);
+      } else if (req.thinking?.enabled && this.capabilities.thinking) {
         const effort = req.thinking.effort || 'medium';
         body.reasoning_effort = effort;
         body.reasoning = { effort };
@@ -188,10 +238,6 @@ export class OpenAIProvider extends BaseProvider {
           body.thinking = { type: 'disabled' };
           body.temperature = 0.6;
         }
-      }
-
-      if (!req.thinking?.enabled && isLocalLFM3(this.config.baseUrl, this.config.model)) {
-        body.chat_template_kwargs = { enable_thinking: false };
       }
 
       // Native tool calling (OpenAI function calling format)
@@ -266,7 +312,7 @@ export class OpenAIProvider extends BaseProvider {
       }> | undefined;
       const choice = choices?.[0];
       const rawContent = normalizeMessageContent(choice?.message?.content);
-      const content = /lfm3/i.test(this.config.model) ? stripInlineThinking(rawContent) : rawContent;
+      const content = this.isLFM3 ? stripInlineThinking(rawContent) : rawContent;
 
       const usage = data.usage as {
         prompt_tokens?: number;
@@ -359,8 +405,10 @@ export class OpenAIProvider extends BaseProvider {
       headers['User-Agent'] = 'claude-code/1.0';
     }
 
-    const maxTokensValueStream = req.maxTokens ?? this.config.maxTokens;
-    const systemContentStream = (req.systemPrompt || '').trim() || 'You are a helpful assistant.';
+    const baseSystemStream = (req.systemPrompt || '').trim() || 'You are a helpful assistant.';
+    const lfm3 = await this.lfm3For(req, baseSystemStream);
+    const maxTokensValueStream = lfm3 ? lfm3.maxTokens : req.maxTokens ?? this.config.maxTokens;
+    const systemContentStream = lfm3?.systemContent ?? baseSystemStream;
     const body: Record<string, unknown> = {
       model: this.config.model,
       messages: [
@@ -374,7 +422,9 @@ export class OpenAIProvider extends BaseProvider {
       body[usesMaxCompletionTokens(this.config.model) ? 'max_completion_tokens' : 'max_tokens'] = maxTokensValueStream;
     }
 
-    if (req.thinking?.enabled && this.capabilities.thinking) {
+    if (lfm3) {
+      Object.assign(body, lfm3.fields);
+    } else if (req.thinking?.enabled && this.capabilities.thinking) {
       const effort = req.thinking.effort || 'medium';
       body.reasoning_effort = effort;
       body.reasoning = { effort };
@@ -384,10 +434,6 @@ export class OpenAIProvider extends BaseProvider {
         body.thinking = { type: 'disabled' };
         body.temperature = 0.6;
       }
-    }
-
-    if (!req.thinking?.enabled && isLocalLFM3(this.config.baseUrl, this.config.model)) {
-      body.chat_template_kwargs = { enable_thinking: false };
     }
 
     const signal = this.withTimeout(req.signal, this.config.timeout || TIMEOUT_DEFAULT_MS);
@@ -410,6 +456,6 @@ export class OpenAIProvider extends BaseProvider {
     }
 
     const events = parseOpenAIStream(response.body);
-    yield* /lfm3/i.test(this.config.model) ? finalLFM3Content(events) : events;
+    yield* this.isLFM3 ? finalLFM3Content(events) : events;
   }
 }

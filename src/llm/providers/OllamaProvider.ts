@@ -19,6 +19,7 @@ import { TIMEOUT_DEFAULT_MS, TIMEOUT_OLLAMA_MS } from '../../constants/limits.js
 import { normalizeThinking, stripThinkTags } from '../ThinkingNormalizer.js';
 import { parseOllamaStream, parseOpenAIStream } from '../StreamParser.js';
 import { createLLMHttpError, isTransientNetworkError, LLMError } from '../errors.js';
+import { hasThinkTags } from '../../llm/ModelOutput.js';
 
 function buildOpenAIUserContent(req: ProviderRequest): unknown {
   if (!req.imageInputs || req.imageInputs.length === 0) return req.userPrompt;
@@ -114,7 +115,7 @@ export class OllamaProvider extends BaseProvider {
       const nativeFinish = ollamaToolCalls.length > 0 ? 'tool_calls' as const : 'stop' as const;
 
       // Fallback: check for <think/> tags in response
-      if (thinking.source === 'none' && content.includes('<think')) {
+      if (thinking.source === 'none' && hasThinkTags(content)) {
         const stripped = stripThinkTags(content);
         content = stripped.content;
         if (stripped.thinking) {

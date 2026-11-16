@@ -55,7 +55,7 @@ describe('SourceRecovery (shared spine/rescue chain)', () => {
     expect(stripFence('```text\n' + text + '\n```', true)).toBe(text);
     expect(stripFence('\n```text\n' + text + '\n```\n', true)).toBe(text);
     expect(stripFence(text, true)).toBe(text);
-    expect(stripFence('```text\n' + text, true)).toBe('```text\n' + text);
+    expect(stripFence('```text\n' + text, true)).toBe(text);
   });
 
   it('stripProsePreamble slices prose before the first code marker', () => {

@@ -114,10 +114,10 @@ export class AnthropicProvider extends BaseProvider {
 
       // Extended thinking
       if (thinkingEnabled) {
-        body.thinking = {
-          type: 'enabled',
-          budget_tokens: req.thinking?.budgetTokens || 8000,
-        };
+        // #1652: max_tokens counts thinking + answer on this wire; keep the answer budget whole.
+        const budget = req.thinking?.budgetTokens || DEFAULT_THINKING_BUDGET;
+        body.max_tokens = anthropicWireMaxTokens(body.max_tokens as number, budget);
+        body.thinking = { type: 'enabled', budget_tokens: budget };
       }
 
       const signal = this.withTimeout(req.signal, this.config.timeout || TIMEOUT_DEFAULT_MS);
@@ -154,16 +154,23 @@ export class AnthropicProvider extends BaseProvider {
         name: b.name || '',
         arguments: typeof b.input === 'string' ? b.input : JSON.stringify(b.input || {}),
       }));
+      const stopReason = typeof data.stop_reason === 'string' ? data.stop_reason : 'none';
       const finishReason = toolCalls.length > 0 ? 'tool_calls' as const
-        : (data.stop_reason === 'end_turn' ? 'stop' as const : 'stop' as const);
+        : (stopReason === 'max_tokens' ? 'length' as const : 'stop' as const);
 
       const usage = data.usage as { input_tokens?: number; output_tokens?: number } | undefined;
+      const success = content.length > 0 || toolCalls.length > 0;
 
       return ok({
         content,
         thinking: thinking?.source !== 'none' ? thinking : undefined,
         model: data.model || this.config.model,
-        success: content.length > 0 || toolCalls.length > 0,
+        success,
+        // An empty reply must say why, or callers can only report "unsuccessful
+        // response" (#1597). A thinking model that hits max_tokens mid-thought
+        // returns no text block at all.
+        error: success ? undefined : emptyReplyReason(stopReason, usage?.output_tokens,
+          contentBlocks?.map(b => b.type) ?? []),
         usage: usage ? {
           inputTokens: usage.input_tokens || 0,
           outputTokens: usage.output_tokens || 0,
@@ -221,10 +228,10 @@ export class AnthropicProvider extends BaseProvider {
     }
 
     if (thinkingEnabled) {
-      body.thinking = {
-        type: 'enabled',
-        budget_tokens: req.thinking?.budgetTokens || 8000,
-      };
+      // #1652: max_tokens counts thinking + answer on this wire; keep the answer budget whole.
+      const budget = req.thinking?.budgetTokens || DEFAULT_THINKING_BUDGET;
+      body.max_tokens = anthropicWireMaxTokens(body.max_tokens as number, budget);
+      body.thinking = { type: 'enabled', budget_tokens: budget };
     }
 
     const signal = this.withTimeout(req.signal, this.config.timeout || TIMEOUT_DEFAULT_MS);
@@ -248,4 +255,28 @@ export class AnthropicProvider extends BaseProvider {
 
     yield* parseAnthropicStream(response.body);
   }
+}
+
+/** Extended-thinking budget when the request names none. */
+const DEFAULT_THINKING_BUDGET = 8000;
+
+/**
+ * #1652: on the Anthropic messages wire, max_tokens counts thinking AND text.
+ * Callers pass maxTokens as the answer budget, so a thinking budget at or above
+ * it left no room for text (GLM 5.3 on z.ai spent all 4096 tokens thinking).
+ * The wire cap is the answer budget plus the thinking budget.
+ */
+export function anthropicWireMaxTokens(answerTokens: number, thinkingBudget: number): number {
+  return answerTokens + thinkingBudget;
+}
+
+/** Explain an Anthropic-format reply that carried no text and no tool call. */
+export function emptyReplyReason(stopReason: string, outputTokens: number | undefined,
+  blockTypes: readonly string[]): string {
+  const blocks = blockTypes.length > 0 ? [...new Set(blockTypes)].join('+') : 'none';
+  const hint = stopReason === 'max_tokens'
+    ? '; the output budget ran out before any text, so raise maxTokens or lower the thinking budget'
+    : '';
+  return `Provider returned no text (stop_reason=${stopReason}, output_tokens=${outputTokens ?? 'unknown'}, `
+    + `content blocks=${blocks})${hint}`;
 }

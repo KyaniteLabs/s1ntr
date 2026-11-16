@@ -25,7 +25,9 @@ export const renderAudioWithBrowser: AudioRenderer = async (code, domain, durati
     await renderer.initialize();
     const stabilizationTime = Math.ceil(durationSec * 1000) + 1500;
     const result = await renderer.render(code, { domain: domain as 'tone' | 'strudel',
-      stabilizationTime, timeout: stabilizationTime + 30000 });
+      stabilizationTime, timeout: stabilizationTime + 30000,
+      // Capture and audio readback can take several times the requested duration.
+      maximumDurationMs: Math.max(60000, stabilizationTime * 4) });
     if (!result.audio?.success) {
       throw new Error(`REVERSE_RENDER_FAILED: ${domain}: ${result.audio?.error ?? result.error ?? 'no audio was captured'}`);
     }

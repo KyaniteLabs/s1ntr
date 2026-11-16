@@ -18,7 +18,7 @@ import type {
   ProviderCapabilities,
   StreamEvent,
 } from '../ProviderTypes.js';
-import { BaseProvider, usesMaxCompletionTokens } from './BaseProvider.js';
+import { BaseProvider, mapNativeFinishReason, usesMaxCompletionTokens } from './BaseProvider.js';
 import { CapabilityRegistry } from '../CapabilityRegistry.js';
 import { TIMEOUT_DEFAULT_MS } from '../../constants/limits.js';
 import { extractOpenRouterThinking } from '../ThinkingNormalizer.js';
@@ -213,7 +213,7 @@ export class KiloGatewayProvider extends BaseProvider {
 
       const rawToolCalls = message?.tool_calls || [];
       const toolCalls = rawToolCalls.map(tc => ({ id: tc.id, name: tc.function.name, arguments: tc.function.arguments }));
-      const finishReason = toolCalls.length > 0 ? 'tool_calls' as const : 'stop' as const;
+      const finishReason = mapNativeFinishReason(choices?.[0]?.finish_reason, toolCalls.length > 0);
 
       const usage = data.usage as { prompt_tokens?: number; completion_tokens?: number } | undefined;
 

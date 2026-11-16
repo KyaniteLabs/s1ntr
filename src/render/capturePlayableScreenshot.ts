@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { resolveChromiumExecutablePath } from '../utils/browserAssetFallbacks.js';
-import { sandboxOptOutArgs } from '../security/SandboxConfig.js';
+import { launchPlaywrightChromium, sandboxOptOutArgs } from '../security/SandboxConfig.js';
 import { isVendorAssetPath, readVendorAsset } from '../utils/vendorAssets.js';
 
 /** Capture an existing artifact with an owned browser and bounded render stages. */
@@ -12,7 +12,7 @@ export async function capturePlayableScreenshot(playable: string, screenshot: st
   let stage = 'launch';
   let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
   try {
-    browser = await chromium.launch({
+    browser = await launchPlaywrightChromium(chromium, {
       executablePath, headless: true, timeout: 20_000,
       args: [...sandboxOptOutArgs(), '--use-angle=swiftshader', '--enable-unsafe-swiftshader'],
     });

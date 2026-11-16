@@ -133,6 +133,8 @@ export function quotaSurfaceFor(providerSurface: ProviderSurface): QuotaSurface 
       return 'kilo-web-balance';
     case 'glm-coding-plan-seat':
       return 'glm-coding-plan-seat';
+    case 'minimax-token-plan-seat':
+      return 'minimax-token-plan-seat';
     case 'openai-direct':
     case 'anthropic-direct':
     case 'google-direct':

@@ -56,6 +56,7 @@ describe('HeadlessRenderer network-isolated executor gate (F2)', () => {
       screenshot: { buffer: Buffer.from('AAAA', 'base64'), width: 400, height: 400, success: true },
       logs: [],
       errors: [],
+      pageErrors: [],
     } as never);
   });
 

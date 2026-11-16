@@ -183,6 +183,19 @@ interface HarnessResult {
 // ---------------------------------------------------------------------------
 
 describe('checkGLSLCompile', () => {
+  it.each(['Vertex', 'Fragment', 'Link'])('strips control bytes from %s diagnostics before returning them', async stage => {
+    fakePage = makeFakePage({
+      error: `${stage}: ERROR:\u0000 0:12: 'missingVar'\u0007\u001b\u007f\n\tundeclared identifier\r\n// caf\u00e9`,
+    });
+    const { checkGLSLCompile } = await import('../../src/utils/glsl-compile-check.js');
+    const result = await checkGLSLCompile(undeclaredVariableShader);
+    expect(result).toEqual({
+      success: false,
+      status: 'compile-error',
+      error: `${stage}: ERROR: 0:12: 'missingVar'\n\tundeclared identifier\r\n// caf\u00e9`,
+    });
+  });
+
   it('accepts a valid GLSL shader', async () => {
     const { checkGLSLCompile } = await import('../../src/utils/glsl-compile-check.js');
     const result = await checkGLSLCompile(validShader);

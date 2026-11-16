@@ -18,6 +18,7 @@ import { PRIOR_ARTIFACT_EXCERPT_MAX_CHARS } from './constants.js';
 import { TUI_SYSTEM_PROMPT } from './requestClassification.js';
 import { promises as fs, realpathSync } from 'node:fs';
 import path from 'node:path';
+import { pickCodeBlock, splitThinking } from '../../llm/ModelOutput.js';
 
 /**
  * Stream a direct chat response from the LLM.
@@ -491,13 +492,13 @@ export function cancelStream(host: TuiBridgeService, sessionId: string): void {
 
 /** Extract code from markdown fences or detect raw code patterns */
 export function extractCodeContent(_host: TuiBridgeService, content: string): string | null {
-    // Try markdown fence extraction
-    const fenceMatch = content.match(/```[\w]*\n([\s\S]*?)```/);
-    if (fenceMatch) return fenceMatch[1].trim();
+    const { answer } = splitThinking(content);
+    const block = pickCodeBlock(answer);
+    if (block) return block.body.trim();
 
     // Detect raw code patterns (function declarations, const assignments)
-    if (/\bfunction\s+\w+/.test(content) || /\bconst\s+\w+\s*=\s*\(.*\)\s*=>/.test(content)) {
-      return content.trim();
+    if (/\bfunction\s+\w+/.test(answer) || /\bconst\s+\w+\s*=\s*\(.*\)\s*=>/.test(answer)) {
+      return answer.trim();
     }
 
     return null;

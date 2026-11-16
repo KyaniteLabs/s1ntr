@@ -183,9 +183,13 @@ export function resolveExecutorAlias(
   if (!token) {
     return { ok: false, canonicalProvider: 'unknown', canonicalModel: '', isLuna: false, ambiguity: [] };
   }
-  const providerHint = options?.providerHint === undefined
+  // A hint that names no family ('custom', 'cli', 'unknown') adds no
+  // information: the model id decides, and an unknown id still fails closed.
+  // Letting it win turned every custom seat's known model into 'unknown' (#1748).
+  const mappedHint = options?.providerHint === undefined
     ? undefined
     : mapProviderToken(normalizeAliasToken(options.providerHint));
+  const providerHint = mappedHint === 'unknown' ? undefined : mappedHint;
   if (LUNA_ALIAS_SET.has(token)) {
     const { provider } = detectProviderFamily(modelAlias);
     return {
@@ -202,6 +206,11 @@ export function resolveExecutorAlias(
       canonicalModel: CURRENT_LUNA_MODEL_ID, isLuna: true, ambiguity: [] };
   }
   const { provider, bareModel } = detectProviderFamily(modelAlias);
+  // A local server (LM Studio, Ollama) names its models freely, so the local
+  // provider the user chose vouches for the name. Hosted providers never do.
+  if (provider === 'unknown' && (providerHint === 'lmstudio' || providerHint === 'ollama')) {
+    return { ok: true, canonicalProvider: providerHint, canonicalModel: bareModel, isLuna: false, ambiguity: [] };
+  }
   if (provider === 'unknown') {
     return {
       ok: false,

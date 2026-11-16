@@ -6,6 +6,104 @@
  */
 
 import { parse } from '@babel/parser';
+import { findUndeclaredIdentifiers } from './undeclaredIdentifiers.js';
+import traverseModule from '@babel/traverse';
+import type { Node } from '@babel/types';
+import { THREE_CLASSES, THREE_EXPORTS } from './threeApi.generated.js';
+
+const traverse = ((traverseModule as unknown as { default?: typeof traverseModule }).default ?? traverseModule);
+const EXPORTS = new Set(THREE_EXPORTS);
+const OBJECT_MEMBERS = new Set(Object.getOwnPropertyNames(Object.prototype));
+const THREE_SOURCE = /^(?:three|https:\/\/(?:unpkg\.com|cdn\.jsdelivr\.net)\/(?:npm\/)?three@0\.160\.0\/build\/three\.module\.js)$/;
+
+function classMembers(name: string): Set<string> | null {
+  const out = new Set(OBJECT_MEMBERS);
+  type ThreeClass = (typeof THREE_CLASSES)[string] | undefined;
+  for (let cls: ThreeClass = THREE_CLASSES[name]; cls; cls = cls.parent ? THREE_CLASSES[cls.parent] : undefined) {
+    if (!cls.built) return null;
+    for (const m of cls.members) out.add(m);
+  }
+  return out;
+}
+
+/**
+ * Names the served three build (0.160 core, no addons) does not have:
+ * THREE.EffectComposer / THREE.DecalGeometry, a named import of one, or a
+ * method call on an instance of a core class that the class lacks
+ * (listener.getGainNode()). Each throws "is not a constructor / function" at
+ * render. Lists come from scripts/generate-three-api.mjs.
+ */
+export function findUnknownThreeApi(code: string): string[] {
+  let ast: Node;
+  try {
+    ast = parse(code, { sourceType: 'module', plugins: ['jsx'] });
+  } catch {
+    return [];
+  }
+  const namespaces = new Set<string>();
+  const classOf = new Map<string, string>();
+  let importsThree = false;
+  const errors = new Set<string>();
+  for (const stmt of (ast as unknown as { program: { body: Node[] } }).program.body) {
+    if (stmt.type !== 'ImportDeclaration' || !THREE_SOURCE.test(stmt.source.value)) continue;
+    importsThree = true;
+    for (const spec of stmt.specifiers) {
+      if (spec.type === 'ImportNamespaceSpecifier') namespaces.add(spec.local.name);
+      else if (spec.type === 'ImportSpecifier') {
+        const imported = spec.imported.type === 'Identifier' ? spec.imported.name : spec.imported.value;
+        if (!EXPORTS.has(imported)) errors.add(`three 0.160 core does not export '${imported}' (addons are not served); it is undefined at render`);
+        else classOf.set(spec.local.name, imported);
+      }
+    }
+  }
+  if (!importsThree) namespaces.add('THREE');
+
+  const threeName = (node: Node): string | null => {
+    if (node.type === 'Identifier' && classOf.has(node.name)) return classOf.get(node.name)!;
+    if (node.type === 'MemberExpression' && !node.computed && node.object.type === 'Identifier'
+      && namespaces.has(node.object.name) && node.property.type === 'Identifier') return node.property.name;
+    return null;
+  };
+
+  const instances = new Map<unknown, string>();
+  const tainted = new Set<unknown>();
+  traverse(ast, {
+    MemberExpression(path) {
+      const { node } = path;
+      if (node.computed || node.object.type !== 'Identifier' || !namespaces.has(node.object.name)) return;
+      const binding = path.scope.getBinding(node.object.name);
+      if (importsThree ? binding?.kind !== 'module' : binding) return;
+      if (node.property.type === 'Identifier' && !EXPORTS.has(node.property.name)) {
+        errors.add(`THREE.${node.property.name} is not in three 0.160 core (addons such as EffectComposer are not served); it is undefined at render`);
+      }
+    },
+    VariableDeclarator(path) {
+      const { id, init } = path.node;
+      if (id.type !== 'Identifier' || init?.type !== 'NewExpression') return;
+      const cls = threeName(init.callee);
+      const binding = path.scope.getBinding(id.name);
+      if (cls && EXPORTS.has(cls) && binding && binding.constantViolations.length === 0) instances.set(binding, cls);
+    },
+    AssignmentExpression(path) {
+      const left = path.node.left;
+      if (left.type === 'MemberExpression' && left.object.type === 'Identifier') tainted.add(path.scope.getBinding(left.object.name));
+    },
+  });
+  traverse(ast, {
+    CallExpression(path) {
+      const callee = path.node.callee;
+      if (callee.type !== 'MemberExpression' || callee.computed || callee.object.type !== 'Identifier' || callee.property.type !== 'Identifier') return;
+      const binding = path.scope.getBinding(callee.object.name);
+      const cls = instances.get(binding);
+      if (!cls || tainted.has(binding)) return;
+      const members = classMembers(cls);
+      if (members && !members.has(callee.property.name)) {
+        errors.add(`THREE.${cls} has no method '${callee.property.name}()' in three 0.160; ${callee.object.name}.${callee.property.name}() throws at render`);
+      }
+    },
+  });
+  return [...errors];
+}
 
 export interface ThreeValidationResult {
   valid: boolean;
@@ -35,6 +133,7 @@ export class ThreeValidator {
 
     // Semantic checks
     errors.push(...this.validateSemantics(trimmed));
+    errors.push(...findUnknownThreeApi(trimmed));
 
     return {
       valid: errors.length === 0,
@@ -59,8 +158,11 @@ export class ThreeValidator {
       errors.push('Three.js code must not declare multiple THREE imports');
     }
 
-    if (!/^<!DOCTYPE|^<html/i.test(code.trim()) && /\b(?:const|let|var)\s+canvas\b/.test(code)) {
-      errors.push('Three.js raw scene must use wrapper-provided canvas instead of redeclaring canvas');
+    if (!/^<!DOCTYPE|^<html/i.test(code.trim())) {
+      // ThreeWrapper runs raw code as a module and binds only THREE (#1756).
+      for (const name of findUndeclaredIdentifiers(code, { module: true, provided: ['THREE'] })) {
+        errors.push(`Three.js code uses '${name}' but never declares it; the page provides only THREE, so this throws ReferenceError at render`);
+      }
     }
 
     if (/scene\.add\s*\(\s*renderer\.domElement\s*\)/.test(code)) {

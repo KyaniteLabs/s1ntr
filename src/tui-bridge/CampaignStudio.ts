@@ -29,7 +29,8 @@ export async function runGovernedCampaignStudioJourney(
     readonly input: Parameters<CampaignService['assertGovernedInput']>[2];
     readonly ownerReviewBriefIds: readonly string[];
     readonly ownerReviews: (admission: CampaignRunAdmission,
-      manifests: readonly CampaignActualCandidateManifest[]) => readonly OwnerReviewLifecycleInput[];
+      manifests: readonly CampaignActualCandidateManifest[]) =>
+      Promise<readonly OwnerReviewLifecycleInput[]> | readonly OwnerReviewLifecycleInput[];
     /** Host-authenticated terminal actions, resolved after owner review publication. */
     readonly ownerDecisionClosures?: (input: {
       readonly admission: CampaignRunAdmission;
@@ -52,7 +53,7 @@ export async function runGovernedCampaignStudioJourney(
   const result = await service.runGovernedCampaign(admission, manifest, governed.input,
     { ...request, entryPoint: 'studio-layers', requestKey: admission.creativeRun.requestKey },
     async (actual) => {
-      const inputs = governed.ownerReviews(admission, actual);
+      const inputs = await governed.ownerReviews(admission, actual);
       service.assertOwnerReviewCoverage(manifest, inputs);
       const completed: OwnerReviewLifecycleResult[] = [];
       for (const input of inputs) completed.push(await service.runOwnerReview('studio', admission, input));

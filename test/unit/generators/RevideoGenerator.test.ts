@@ -35,4 +35,26 @@ describe('RevideoGenerator', () => {
     expect(code).toContain('@revideo/2d');
     expect(complete).toHaveBeenCalledTimes(2);
   });
+
+  it('reads the scene out of a fenced direct reply with prose around it', async () => {
+    vi.spyOn(LLMClient, 'isConfigured').mockReturnValue(true);
+    const llm = new LLMClient({ baseUrl: 'http://localhost:1234/v1', model: 'revideo-test-model' });
+    vi.spyOn(llm, 'generateWithToolLoop').mockResolvedValueOnce({ content: '', iterations: 1, toolCallsMade: 0, success: true });
+    const scene = [
+      'import { makeScene2D, Circle } from "@revideo/2d";',
+      'import { createRef } from "@revideo/core";',
+      'export default makeScene2D("Pulse", function* (view) {',
+      '  const dot = createRef<Circle>();',
+      '  view.add(<Circle ref={dot} size={120} fill={"#9cf"} />);',
+      '  yield* dot().scale(2, 1);',
+      '});',
+    ].join('\n');
+    vi.spyOn(llm, 'complete')
+      .mockResolvedValueOnce({ text: '', success: true })
+      .mockResolvedValueOnce({ text: `Here is the scene:\n\n\`\`\`tsx\n${scene}\n\`\`\`\n\nIt pulses a dot.`, success: true });
+
+    const code = await new RevideoGenerator(llm).generate('pulsing dot');
+
+    expect(code).toBe(scene);
+  });
 });

@@ -344,6 +344,36 @@ describe('AnthropicProvider', () => {
     mockFetch.mockReset();
   });
 
+  it('an empty reply that ran out of tokens says why (#1597)', async () => {
+    mockFetchResponse({
+      content: [{ type: 'thinking', thinking: 'still planning the shader...' }],
+      model: 'glm-5.3',
+      stop_reason: 'max_tokens',
+      usage: { input_tokens: 900, output_tokens: 32000 },
+    });
+
+    const result = await provider.generate(makeRequest());
+    expect(result.value.success).toBe(false);
+    expect(result.value.finishReason).toBe('length');
+    expect(result.value.error).toContain('stop_reason=max_tokens');
+    expect(result.value.error).toContain('output_tokens=32000');
+    expect(result.value.error).toContain('content blocks=thinking');
+    expect(result.value.error).toContain('raise maxTokens');
+  });
+
+  it('a reply with text carries no error', async () => {
+    mockFetchResponse({
+      content: [{ type: 'text', text: 'ok' }],
+      model: 'claude-sonnet-4-20250514',
+      stop_reason: 'end_turn',
+    });
+
+    const result = await provider.generate(makeRequest());
+    expect(result.value.success).toBe(true);
+    expect(result.value.error).toBeUndefined();
+    expect(result.value.finishReason).toBe('stop');
+  });
+
   it('sends request to /v1/messages endpoint', async () => {
     mockFetchResponse({
       content: [{ type: 'text', text: 'Hello from Claude' }],
@@ -802,6 +832,20 @@ describe('GoogleProvider', () => {
     expect(result.value.content).toBe('Here is the code.');
     expect(result.value.thinking?.text).toBe('Let me think...');
     expect(result.value.thinking?.budgetUsed).toBe(8);
+    expect(result.value.usage).toEqual({ inputTokens: 10, outputTokens: 28, thinkingTokens: 8 });
+  });
+
+  it('reports no usage when Gemini omits the prompt count, instead of a made-up 0', async () => {
+    mockFetchResponse({
+      candidates: [{ content: { parts: [{ text: 'ok' }] } }],
+      modelVersion: 'gemini-2.5-pro',
+      usageMetadata: { candidatesTokenCount: 5 },
+    });
+
+    const result = await provider.generate(makeRequest());
+
+    expect(result.isOk()).toBe(true);
+    expect(result.value.usage).toBeUndefined();
   });
 
   it('defaults to generativelanguage.googleapis.com when baseUrl is generic', async () => {

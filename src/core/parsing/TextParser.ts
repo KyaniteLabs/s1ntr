@@ -7,6 +7,7 @@
  */
 
 import type { LIRTextToken } from '../lir/types.js';
+import { fencedBlocks } from '../../llm/ModelOutput.js';
 
 /**
  * TextParser parses plain text content into LIRTextToken
@@ -88,17 +89,7 @@ export class TextParser {
    * Matches ```language ... ``` patterns
    */
   private extractCodeBlocks(content: string): Array<{ language: string; code: string }> {
-    const codeBlocks: Array<{ language: string; code: string }> = [];
-    const codeBlockRegex = /```(\w*)\n([\s\S]*?)```/g;
-
-    let match: RegExpExecArray | null;
-    while ((match = codeBlockRegex.exec(content)) !== null) {
-      const language = match[1] || 'unknown';
-      const code = match[2].trim();
-      codeBlocks.push({ language, code });
-    }
-
-    return codeBlocks;
+    return fencedBlocks(content).map((block) => ({ language: block.lang || 'unknown', code: block.body.trim() }));
   }
 
   /**

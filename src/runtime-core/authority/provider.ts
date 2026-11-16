@@ -306,6 +306,13 @@ export const providerAuthorityRows: readonly ProductionAuthorityPath[] = [
     'liminal-effect-broker',
     'authoritative',
   ),
+  // Hill-climb run (#1423): exploratory by contract. It climbs one sketch and writes a step log; it never admits an artifact. Provider calls run inside the governed research-provider effect.
+  authorityRow(
+    'src/cli/HillClimbLive.ts:provider',
+    'provider',
+    'operator-exploration-boundary',
+    'exploration-only',
+  ),
   // Operator swarm surface: exploratory by contract (a label calibrates voter weights; it never admits an artifact). Not on the governed create path.
   authorityRow(
     'src/cli/SwarmCli.ts:provider',

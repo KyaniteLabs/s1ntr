@@ -15,6 +15,7 @@ import { getWebGLBlendFunc } from '../utils/blendModes.js';
 import { VENDOR_ASSETS } from '../../utils/vendorAssets.js';
 import { Logger } from '../../utils/Logger.js';
 import { compileGeneratedCode } from '../../guardrails/GeneratedCodeGuard.js';
+import { scriptSafe } from '../../utils/scriptEmbed.js';
 
 /** Hydra synth instance type */
 interface HydraSynth {
@@ -355,7 +356,7 @@ export class HydraAdapter implements LayerAdapter {
     makeGlobal: true
   });
   
-${layer.code.split('\n').map(line => '  ' + line).join('\n')}
+${scriptSafe(layer.code).split('\n').map(line => '  ' + line).join('\n')}
 })();
 </script>`;
   }

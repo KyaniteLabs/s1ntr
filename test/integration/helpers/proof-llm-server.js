@@ -139,8 +139,18 @@ function evaluatorJson(requestIndex) {
   });
 }
 
-function contentForPrompt(prompt, requestIndex) {
-  if (/expert creative artifact evaluator|Return ONLY a JSON object|Criteria:/i.test(prompt)) {
+// Route on the system prompt: generation prompts embed a random compost seed,
+// and a seed whose text says "Acceptance Criteria:" must not get judge JSON.
+function routingTextFromBody(body) {
+  if (Array.isArray(body?.messages)) {
+    const system = body.messages.filter((message) => message?.role === 'system');
+    if (system.length > 0) return promptFromBody({ messages: system });
+  }
+  return promptFromBody(body);
+}
+
+function contentForPrompt(routingText, prompt, requestIndex) {
+  if (/expert creative artifact evaluator|Return ONLY a JSON object|Criteria:/i.test(routingText)) {
     return evaluatorJson(requestIndex);
   }
   return p5SketchForPrompt(prompt, requestIndex);
@@ -169,7 +179,7 @@ export function startIntegrationProofLLMServer() {
           return;
         }
         const prompt = promptFromBody(body);
-        const content = contentForPrompt(prompt, requests.length);
+        const content = contentForPrompt(routingTextFromBody(body), prompt, requests.length);
         writeJson(res, 200, {
           id: `chatcmpl-sinter-integration-${requests.length}`,
           object: 'chat.completion',

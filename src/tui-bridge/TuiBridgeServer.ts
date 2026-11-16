@@ -46,6 +46,7 @@ import { isVendorAssetPath, readVendorAsset } from '../utils/vendorAssets.js';
 import { eventBus } from '../core/EventBus.js';
 import { ProjectStore } from '../compost/ProjectStore.js';
 import type { BusEvent } from '../core/EventBus.js';
+import { allowedHostsFor, rejectForeignRequest } from '../security/LocalRequestGuard.js';
 
 const ALLOWED_ORIGINS: readonly string[] = [
   'http://localhost:3000',
@@ -110,6 +111,8 @@ export class TuiBridgeServer {
   private readonly server: Server;
   private loopbackSecondary?: Server;
   private readonly port: number;
+  /** Host names this bridge answers to (DNS-rebinding guard); null when bound to every interface. */
+  private readonly allowedHosts: ReadonlySet<string> | null;
   private readonly host: string;
   private readonly controls: TuiControlEndpoints;
   private readonly micPreview: TuiMicPreviewEndpoints;
@@ -123,6 +126,7 @@ export class TuiBridgeServer {
     this.bridge = bridge;
     this.port = options.port ?? 3000;
     this.host = options.host ?? 'localhost';
+    this.allowedHosts = allowedHostsFor(this.host);
     this.controls = new TuiControlEndpoints(this.bridge, () => this.llm);
     this.micPreview = new TuiMicPreviewEndpoints(this.bridge, () => this.address);
     this.preview = new PreviewEndpoints();
@@ -222,6 +226,8 @@ export class TuiBridgeServer {
   }
 
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (rejectForeignRequest(req, res, this.allowedHosts)) return;
+
     // CORS headers - restrict to localhost origins only
     const origin = req.headers.origin;
     if (origin && ALLOWED_ORIGINS.includes(origin)) {
@@ -1139,6 +1145,7 @@ export class PreviewEndpoints {
     // Root: serve the current sketch as a wrapped HTML page.
     if (req.method === 'GET' && pathname === '/') {
       const html = HTMLWrapper.wrap(this.currentSketch || '');
+      this.sandboxGeneratedPage(res);
       res.writeHead(200, { 'Content-Type': 'text/html' });
       res.end(html);
       return true;
@@ -1152,6 +1159,7 @@ export class PreviewEndpoints {
       const code = Number.isInteger(version) && version > 0
         ? (this.versionedSketches.get(version) ?? '')
         : this.currentSketch;
+      this.sandboxGeneratedPage(res);
       res.writeHead(200, { 'Content-Type': 'text/html' });
       res.end(HTMLWrapper.wrap(code || ''));
       return true;
@@ -1437,6 +1445,15 @@ export class PreviewEndpoints {
     return pathname === '/api/preview/versions'
       || pathname === '/api/sandbox/run'
       || pathname === '/api/export';
+  }
+
+  /**
+   * Generated code runs in an opaque origin, as Studio's stage does: it keeps
+   * its scripts but cannot read cookies or call this server's API as the user.
+   */
+  private sandboxGeneratedPage(res: ServerResponse): void {
+    const csp = String(res.getHeader('Content-Security-Policy') ?? '');
+    res.setHeader('Content-Security-Policy', csp ? `${csp}; sandbox allow-scripts` : 'sandbox allow-scripts');
   }
 
   private applySecurityHeaders(res: ServerResponse): void {

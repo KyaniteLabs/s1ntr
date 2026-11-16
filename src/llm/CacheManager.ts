@@ -75,8 +75,12 @@ export class CacheManager {
 
     const key = hashKey(system, user, scope);
 
-    // Evict oldest if at capacity
-    if (this.cache.size >= this.options.maxEntries) {
+    // Overwriting an existing key never evicts an unrelated entry (#1423 bug 34);
+    // delete first so the rewrite moves to the newest slot.
+    if (this.cache.has(key)) {
+      this.cache.delete(key);
+    } else if (this.cache.size >= this.options.maxEntries) {
+      // Evict oldest if at capacity
       const oldest = this.cache.keys().next().value;
       if (oldest !== undefined) {
         this.cache.delete(oldest);

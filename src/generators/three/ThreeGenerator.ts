@@ -5,6 +5,8 @@
 import { TierBasedGenerator, type TierBasedGeneratorOptions } from '../TierBasedGenerator.js';
 import { THREE_CDN } from '../../constants/index.js';
 import { ThreeValidator } from '../../core/validators/ThreeValidator.js';
+import { fencedBlocks, pickCodeBlock, splitThinking } from '../../llm/ModelOutput.js';
+import { scriptSafe } from '../../utils/scriptEmbed.js';
 
 export class ThreeGenerator extends TierBasedGenerator {
   constructor(llmOrConfig?: ConstructorParameters<typeof TierBasedGenerator>[1]) {
@@ -179,17 +181,17 @@ canvas{display:block}
 </script>
 <script type="module">
 import*as THREE from'three';
-${code}
+${scriptSafe(code)}
 </script>
 </body>
 </html>`;
   }
 
   private sanitizeThreeCode(code: string): string {
-    const fencedScript = code.match(/```(?:javascript|js)?\s*\n?([\s\S]*?)```/i);
-    if (fencedScript?.[1] && /\bTHREE\b/.test(fencedScript[1])) {
-      code = fencedScript[1];
-    }
+    const { answer } = splitThinking(code);
+    const block = fencedBlocks(answer).find((candidate) => /\bTHREE\b/.test(candidate.body))
+      ?? pickCodeBlock(answer, ['html', 'javascript', 'js']);
+    code = block ? block.body : answer;
 
     const htmlScript = code.match(/<script[^>]*type=["']module["'][^>]*>([\s\S]*?)<\/script>/i)
       || code.match(/<script[^>]*>([\s\S]*?)<\/script>/i);
@@ -199,8 +201,6 @@ ${code}
         .trim();
     } else {
       code = code
-        .replace(/^```(?:html|javascript|js)?\s*\n?/i, '')
-        .replace(/\n?```\s*$/i, '')
         .replace(/^\s*import\s+.*?\bTHREE\b.*?from\s+['"][^'"]+['"];?\s*$/gm, '')
         .trim();
     }

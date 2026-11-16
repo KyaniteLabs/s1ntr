@@ -6,6 +6,7 @@
 
 import { TierBasedGenerator, type TierBasedGeneratorOptions } from '../TierBasedGenerator.js';
 import { RevideoValidator } from '../../core/validators/RevideoValidator.js';
+import { answerCode } from '../../llm/ModelOutput.js';
 import { revideoConfidence } from './revideoConfidence.js';
 
 export type RevideoGeneratorOptions = TierBasedGeneratorOptions;
@@ -73,7 +74,8 @@ export class RevideoGenerator extends TierBasedGenerator {
       signal: options?.signal,
     });
     if (!result.success || !result.text) return null;
-    return this.validateOutput(result.text).valid ? result.text.trim() : null;
+    const code = answerCode(result.text, ['tsx', 'typescript', 'ts', 'jsx']).trim();
+    return this.validateOutput(code).valid ? code : null;
   }
 
   wrapForGallery(code: string): string {

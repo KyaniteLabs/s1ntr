@@ -53,3 +53,22 @@ function draw() { background(0); circle(200, 200, 50); }`;
     expect(stripReasoningText('', 'ascii')).toBe('');
   });
 });
+
+describe('stripReasoningText: fenced code', () => {
+  it('keeps every fenced block, not only the longest', () => {
+    const reply = [
+      'Here is a helper and the sketch.',
+      '```js',
+      'function wave(t) { return Math.sin(t); }',
+      '```',
+      '```js',
+      'function setup() { createCanvas(400, 400); }',
+      'function draw() { background(wave(frameCount) * 255); }',
+      '```',
+    ].join('\n');
+    const kept = stripReasoningText(reply);
+    expect(kept).toContain('function wave(t)');
+    expect(kept).toContain('function draw()');
+    expect(kept).not.toContain('Here is a helper');
+  });
+});

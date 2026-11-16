@@ -112,14 +112,13 @@ describe('ToneGenerator', () => {
   it('sanitizeCode strips think tags', async () => {
     mockComplete.mockResolvedValue({ text: '', success: true });
     mockToolLoop.mockResolvedValueOnce({
-      content: '<think reasoning here</think\nnew Tone.Synth()',
+      content: '<think>reasoning here</think>\nnew Tone.Synth()',
       iterations: 1, toolCallsMade: 0, success: true,
     });
     const gen = new ToneGenerator();
     const result = await gen.generate('make a synth');
-    // The sanitizer strips content between think tags but the regex needs </think format
-    // With malformed think tags, the content passes through
     expect(result).toContain('Tone');
+    expect(result).not.toContain('reasoning');
   });
 
   it('validateOutput rejects truncated Tone.js HTML before export wrapping', () => {

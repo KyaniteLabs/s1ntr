@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readFile } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -40,10 +40,12 @@ import { LiminalProductCommandPort, FileLiminalProductCommandStore,
   type LiminalOwnerReviewAuthority } from './LiminalProductCommandPort.js';
 import { bootstrapProductionLiminalOwnerReviewAuthority }
   from './LiminalOwnerReviewAuthority.js';
+import { FileGenerationCheckpointStore } from './GenerationCheckpoints.js';
 import { createLiminalProductionEffects,
   isLiminalProductionDomain, type LiminalProductionDomain,
   type LiminalRendererPort } from './LiminalProductionEffects.js';
 import { readCurrentGitCommit, readGitRef } from './ProofReceiptValidator.js';
+import { readProductionAuthorityStamp } from './ProductionPackageStamp.js';
 import { DreamProductCommandPort, FileDreamProductProjectionStore,
   type DreamExperimentTemplate } from './DreamProductCommandPort.js';
 import { DreamActivationCommandPort, DreamTransferCommandPort, FileDreamProjectionStore,
@@ -186,10 +188,11 @@ export interface ProductionSourceRefs {
   readonly sourceHeadSha: string;
   readonly canonicalMainSha: string;
   readonly sourceKind: 'explicit' | 'git-origin-main' | 'forgejo-actions-pull-request'
-    | 'forgejo-actions-main-push';
-  readonly sourceHeadSource: 'caller' | 'git-head' | 'forgejo-actions-github-sha';
+    | 'forgejo-actions-main-push' | 'package-stamp';
+  readonly sourceHeadSource: 'caller' | 'git-head' | 'forgejo-actions-github-sha'
+    | 'package-stamp';
   readonly canonicalMainSource: 'caller' | 'git-origin-main'
-    | 'forgejo-event-pull-request-base' | 'forgejo-event-main-push';
+    | 'forgejo-event-pull-request-base' | 'forgejo-event-main-push' | 'package-stamp';
   readonly eventHeadSha?: string;
 }
 
@@ -268,7 +271,15 @@ export function resolveProductionSourceRefs(
     if (sourceHeadSha && canonicalMainSha) return { sourceHeadSha, canonicalMainSha,
       sourceKind: 'git-origin-main' as const, sourceHeadSource: 'git-head' as const,
       canonicalMainSource: 'git-origin-main' as const };
-    return forgejoActionsSourceRefs(sourceHeadSha);
+    const event = forgejoActionsSourceRefs(sourceHeadSha);
+    if (event) return event;
+    // A packed install has no checkout: use the refs recorded from the tree it was packed from.
+    if (sourceHeadSha || existsSync(path.join(repo, 'src'))) return null;
+    const stamp = readProductionAuthorityStamp(repo);
+    return stamp ? Object.freeze({ sourceHeadSha: stamp.sourceHeadSha,
+      canonicalMainSha: stamp.canonicalMainSha, sourceKind: 'package-stamp' as const,
+      sourceHeadSource: 'package-stamp' as const, canonicalMainSource: 'package-stamp' as const })
+      : null;
   })();
   if (!refs || !/^[a-f0-9]{40}$/.test(refs.sourceHeadSha ?? '')
     || !/^[a-f0-9]{40}$/.test(refs.canonicalMainSha ?? '')) {
@@ -378,6 +389,7 @@ const generator = options.generator ?? spineExplicitClient('generator');
     effects: createLiminalProductionEffects({ generator, evaluator, renderer,
       generatorIdentity: identities.generator, evaluatorIdentity: identities.evaluator,
       rendererIdentity: identities.renderer,
+      checkpoints: new FileGenerationCheckpointStore(path.join(root, 'generation-checkpoints')),
       ...(Number.isSafeInteger(artGenerationSeconds) && artGenerationSeconds > 0
         ? { generationWallMs: artGenerationSeconds * 1000 } : {}) }),
     artifacts: new FileLiminalArtifactStore(path.join(artifactRoot, 'artifacts')),

@@ -6,6 +6,9 @@
  */
 
 import { scanCode } from '../../core/recovery/SourceRecovery.js';
+import { parse } from '@babel/parser';
+import type { Node } from '@babel/types';
+import { STRUDEL_GLOBALS, STRUDEL_PATTERN_METHODS } from './strudelApi.generated.js';
 import { SCALE_INTERVALS, getScaleNotes } from '../../music/TheoryEngine.js';
 
 export interface StrudelValidationResult {
@@ -13,6 +16,94 @@ export interface StrudelValidationResult {
   errors: string[];
   /** S4: theory-informed assessments for judges (non-blocking). */
   theoryAssessment?: string[];
+}
+
+/**
+ * True when the code builds a Strudel pattern. Strudel reads backtick strings as
+ * mini-notation and n() is a pattern constructor, so s(`bd sd`) and n("0 2").scale(...)
+ * count; a file with no pattern constructor at all does not.
+ */
+export function hasStrudelPattern(code: string): boolean {
+  return /\$:\s*\S|\b(?:s|n|note|sound|stack|cat|fastcat|slowcat|seq|sequence|arrange|chord)\s*\(/.test(code);
+}
+
+const GLOBAL_NAMES = new Set(STRUDEL_GLOBALS);
+const PATTERN_METHODS = new Set(STRUDEL_PATTERN_METHODS);
+const METHOD_BY_LOWER = new Map(STRUDEL_PATTERN_METHODS.map((name) => [name.toLowerCase(), name]));
+// GenericWrapper strips one trailing .start() / .tempo() / .out() before it plays.
+const STRIPPED_TAIL = new Set(['start', 'tempo', 'out']);
+
+function children(node: Node): Node[] {
+  const out: Node[] = [];
+  for (const key of Object.keys(node) as (keyof typeof node)[]) {
+    if (key === 'loc' || key === 'start' || key === 'end' || key === 'leadingComments' || key === 'trailingComments' || key === 'innerComments') continue;
+    const child = node[key] as unknown;
+    if (Array.isArray(child)) out.push(...child.filter((c): c is Node => !!c && typeof c === 'object' && 'type' in c));
+    else if (child && typeof child === 'object' && 'type' in child) out.push(child as Node);
+  }
+  return out;
+}
+
+/**
+ * Method calls on a Strudel pattern that the bundle we play with does not
+ * have. Strudel names are case-sensitive and the REPL catches the TypeError
+ * itself, so `.delayTime(2)` (the real name is `delaytime`) evaluated to no
+ * pattern and the render recorded silence. The names come from the vendored
+ * @strudel/web build (scripts/generate-strudel-api.mjs).
+ */
+export function findUnknownPatternMethods(code: string): string[] {
+  let program: Node;
+  try {
+    program = parse(code, { sourceType: 'script', allowReturnOutsideFunction: true, allowAwaitOutsideFunction: true, errorRecovery: true }).program;
+  } catch {
+    return [];
+  }
+  const declared = new Set<string>();
+  const collect = (node: Node): void => {
+    if (node.type === 'VariableDeclarator' && node.id.type === 'Identifier') declared.add(node.id.name);
+    if ((node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression')) {
+      if (node.type !== 'ArrowFunctionExpression' && node.id) declared.add(node.id.name);
+      for (const param of node.params) if (param.type === 'Identifier') declared.add(param.name);
+    }
+    children(node).forEach(collect);
+  };
+  collect(program);
+  const isPatternRoot = (node: Node): boolean => {
+    if (node.type === 'TemplateLiteral') return true;
+    // Strudel reads double-quoted strings as mini-notation; single quotes stay strings.
+    if (node.type === 'StringLiteral') return (node.extra?.raw as string | undefined)?.startsWith('"') ?? false;
+    if (node.type === 'Identifier') return GLOBAL_NAMES.has(node.name) && !declared.has(node.name);
+    return node.type === 'CallExpression' && node.callee.type === 'Identifier'
+      && GLOBAL_NAMES.has(node.callee.name) && !declared.has(node.callee.name);
+  };
+  const methodCall = (node: Node): { object: Node; name: string } | undefined => {
+    if (node.type !== 'CallExpression' || node.callee.type !== 'MemberExpression' || node.callee.computed) return undefined;
+    return node.callee.property.type === 'Identifier' ? { object: node.callee.object, name: node.callee.property.name } : undefined;
+  };
+  const rootOf = (node: Node): Node => {
+    let current = node;
+    for (let call = methodCall(current); call; call = methodCall(current)) current = call.object;
+    return current;
+  };
+  const program_ = program as Node & { body: Node[] };
+  const last = program_.body[program_.body.length - 1];
+  const tail = last?.type === 'ExpressionStatement' ? last.expression : undefined;
+  const unknown = new Set<string>();
+  const visit = (node: Node): void => {
+    const call = methodCall(node);
+    if (call && !PATTERN_METHODS.has(call.name) && !(node === tail && STRIPPED_TAIL.has(call.name))
+      && call.name !== 'then' && call.name !== 'catch' && call.name !== 'finally' && isPatternRoot(rootOf(node))) {
+      unknown.add(call.name);
+    }
+    children(node).forEach(visit);
+  };
+  visit(program);
+  return [...unknown].map((name) => {
+    const match = METHOD_BY_LOWER.get(name.toLowerCase());
+    return match
+      ? `Strudel pattern has no method '.${name}()'; names are case-sensitive, use '.${match}()'`
+      : `Strudel pattern has no method '.${name}()'; it throws when the pattern is evaluated and the piece plays nothing`;
+  });
 }
 
 export class StrudelValidator {
@@ -36,6 +127,7 @@ export class StrudelValidator {
 
     // Semantic validation
     errors.push(...this.validateSemantics(trimmed));
+    errors.push(...findUnknownPatternMethods(trimmed));
 
     const theory = this.theoryAssessment(trimmed);
     return {
@@ -52,9 +144,7 @@ export class StrudelValidator {
     const errors: string[] = [];
 
     // Must have at least one pattern function
-    const hasPatternFunction = /\$:\s*s\(|\.stack\(|sound\(|note\(|\bs\(["']/.test(code);
-
-    if (!hasPatternFunction) {
+    if (!hasStrudelPattern(code)) {
       errors.push('Strudel code must contain pattern functions: s(), note(), stack(), or sound()');
     }
 

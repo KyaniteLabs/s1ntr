@@ -10,7 +10,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 function client(fetchImpl: typeof fetch, baseUrl = BASE): DecisionModelClient {
-  return new DecisionModelClient({ baseUrl, model: 'LiquidAI/d1-2B', fetchImpl, timeoutMs: 1_000 });
+  return new DecisionModelClient({ baseUrl, model: 'LiquidAI/d1-2B', fetchImpl, timeoutMs: 1_000, sleepImpl: async () => {} });
 }
 
 const request: DecisionRequest = {

@@ -5,6 +5,7 @@
 import { TierBasedGenerator, type TierBasedGeneratorOptions } from '../TierBasedGenerator.js';
 import { Logger } from '../../utils/Logger.js';
 import { GLSLValidator } from '../../core/validators/GLSLValidator.js';
+import { answerCode, pickCodeBlock, splitThinking } from '../../llm/ModelOutput.js';
 
 // Common shader helper functions that LLMs idiomatically CALL without defining
 // (e.g. rot/noise/fbm from shadertoy). The validator rejects these as undefined,
@@ -262,25 +263,18 @@ export class ShaderGenerator extends TierBasedGenerator {
   }
 
   private sanitizeShaderCode(code: string): string {
-    // Try fenced extraction first — handles both normal and backslash-escaped fences
-    const fencedShader = code.match(/\\?`{3}(?:glsl|frag|fragment|shader)?\s*\n?([\s\S]*?)\\?`{3}/i);
-    if (fencedShader?.[1]) {
-      let extracted = fencedShader[1].trim();
-      // Unescape any backslash-newline sequences left in the extracted GLSL
-      extracted = extracted.replace(/\\n/g, '\n');
-      return this.injectCommonHelpers(extracted);
+    // Some seats return the shader JSON-escaped (literal \n and \` around the
+    // fence). GLSL has no strings or backticks, so unescaping is safe.
+    const text = splitThinking(code.replace(/\\n/g, '\n').replace(/\\`/g, '`')).answer;
+    const block = pickCodeBlock(text, ['glsl', 'frag', 'fragment', 'shader']);
+    if (block?.body.trim() && !['html', 'htm', 'javascript', 'js'].includes(block.lang)) {
+      return this.injectCommonHelpers(block.body.trim());
     }
-    const htmlShader = code.match(/\b(?:const|let|var)\s+(?:fsSource|fragSrc|fs|fragmentShaderSource|fragmentSource|fragmentShader|shaderSource)\s*=\s*`([\s\S]*?)`/);
+    const htmlShader = text.match(/\b(?:const|let|var)\s+(?:fsSource|fragSrc|fs|fragmentShaderSource|fragmentSource|fragmentShader|shaderSource)\s*=\s*`([\s\S]*?)`/);
     if (htmlShader?.[1]) {
       return this.injectCommonHelpers(htmlShader[1].trim());
     }
-    // Fallback: strip fences and unescape
-    const cleaned = code
-      .replace(/^\\?`{3}(?:glsl|frag|fragment|shader)?\s*\n?/i, '')
-      .replace(/\\?`{3}\s*$/i, '')
-      .replace(/\\n/g, '\n')
-      .trim();
-    return this.injectCommonHelpers(cleaned);
+    return this.injectCommonHelpers(answerCode(text));
   }
 
   private injectCommonHelpers(code: string): string {

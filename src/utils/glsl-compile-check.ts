@@ -246,7 +246,10 @@ export async function checkGLSLCompile(fragmentShader: string): Promise<CompileC
       return { success: false, status: 'infra-unavailable', error: result.error ?? undefined };
     }
     if (result.error) {
-      return { success: false, status: 'compile-error', error: result.error };
+      // Driver logs can contain NUL/control bytes; keep diagnostic whitespace and Unicode.
+      // eslint-disable-next-line no-control-regex -- intentionally match non-printing diagnostic bytes
+      const error = result.error.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '');
+      return { success: false, status: 'compile-error', error };
     }
     return { success: true, status: 'pass' };
   } catch (err) {

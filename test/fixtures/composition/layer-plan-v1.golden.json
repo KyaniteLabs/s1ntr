@@ -6,7 +6,7 @@
   "canvas": { "width": 800, "height": 600, "backgroundColor": "#05070f" },
   "provenance": {
     "generatedAt": "2026-07-26T00:00:00.000Z",
-    "sinterVersion": "2.4.0",
+    "sinterVersion": "2.5.0",
     "sourceCommit": "fixture"
   },
   "layers": [

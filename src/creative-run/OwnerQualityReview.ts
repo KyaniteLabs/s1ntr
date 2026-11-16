@@ -549,6 +549,9 @@ function ownerHtml(briefId: string, candidates: readonly OwnerCandidatePacket[])
     const evidenceDetails = candidate.evidence.map((item) =>
       `<li>${escapeHtml(item.evidenceClass)}: <code>${item.digest}</code> (${escapeHtml(item.ref)})</li>`).join('');
     const allFailures = [...candidate.knownFailures, ...candidate.hardFloorFailures];
+    const limitations = candidate.inconclusiveReasons.length > 0
+      ? `<p>Inconclusive: this evidence cannot support a verdict.</p><ul class="limitations">${
+        candidate.inconclusiveReasons.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` : '';
     const failures = allFailures.length > 0
       ? `<ul class="failures">${allFailures.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`
       : '<p>Known failures: none</p>';
@@ -564,7 +567,7 @@ function ownerHtml(briefId: string, candidates: readonly OwnerCandidatePacket[])
       + (visual ? `<iframe title="${escapeHtml(candidate.blindId)}" src="${visual.payloadUri}"></iframe>` : '<p>Visual: missing</p>')
       + (audio ? `<audio controls src="${audio.payloadUri}"></audio>` : '<p>Audio: not present</p>')
       + temporalHtml + interactionHtml + runtimeHtml + a11yHtml
-      + `${failures}<details><summary>Exact evidence (${candidate.evidence.length})</summary><ul>${evidenceDetails}</ul></details>`
+      + `${limitations}${failures}<details><summary>Exact evidence (${candidate.evidence.length})</summary><ul>${evidenceDetails}</ul></details>`
       + '<p>Owner preference: pending</p><p>Release-worthiness: pending</p></article>';
   }).join('');
   return '<!doctype html><html><head><meta charset="utf-8">'
@@ -637,11 +640,12 @@ function mediaCaptureInput(
 
 export interface OwnerCaptureInputs {
   readonly source: { readonly ref: string; readonly mimeType: string; readonly payload: string | Uint8Array };
-  readonly timeSamples: readonly { readonly ref: string; readonly mimeType: string; readonly payload: string | Uint8Array }[];
-  readonly interactionTrace: { readonly ref: string; readonly mimeType: string; readonly payload: string | Uint8Array };
-  readonly runtimeState: { readonly ref: string; readonly mimeType: string; readonly payload: string | Uint8Array };
-  readonly clockEvents: { readonly ref: string; readonly mimeType: string; readonly payload: string | Uint8Array };
-  readonly accessibility: { readonly ref: string; readonly mimeType: string; readonly payload: string | Uint8Array };
+  /** A class left out was not captured from the candidate; the packet names it as such and stays inconclusive. */
+  readonly timeSamples?: readonly { readonly ref: string; readonly mimeType: string; readonly payload: string | Uint8Array }[];
+  readonly interactionTrace?: { readonly ref: string; readonly mimeType: string; readonly payload: string | Uint8Array };
+  readonly runtimeState?: { readonly ref: string; readonly mimeType: string; readonly payload: string | Uint8Array };
+  readonly clockEvents?: { readonly ref: string; readonly mimeType: string; readonly payload: string | Uint8Array };
+  readonly accessibility?: { readonly ref: string; readonly mimeType: string; readonly payload: string | Uint8Array };
   readonly knownFailures: readonly string[];
   readonly hardFloorFailures: readonly string[];
   /** Honest limitations on what the independent model reviewers could inspect. */
@@ -730,18 +734,21 @@ export async function createOwnerReviewPacket(
     const visualMedia = candidate.media.find((item) => item.modality === 'visual');
     if (!visualMedia) throw new Error(`OWNER_EVIDENCE_VISUAL_MISSING:${candidate.blindId}`);
     captures.push(await captureAuthority.seal(mediaCaptureInput('visual', visualMedia, slot, candidate.blindId)));
-    // Temporal captures
-    if (evidenceInput.timeSamples.length === 0)
-      throw new Error(`OWNER_EVIDENCE_TEMPORAL_MISSING:${candidate.blindId}`);
-    for (const sample of evidenceInput.timeSamples) {
-      captures.push(await captureAuthority.seal({
-        briefSlot: slot, blindId: candidate.blindId, evidenceClass: 'temporal',
-        artifactDigest, ref: sample.ref, mimeType: sample.mimeType, payload: sample.payload,
-      }));
-    }
-    // Audio capture from blind-review frozen evidence (when required)
     const prohibitedClaims: OwnerEvidenceClass[] = [];
     const inconclusiveReasons: string[] = [...(evidenceInput.reviewLimitations ?? [])];
+    // Temporal captures
+    if (evidenceInput.timeSamples?.length) {
+      for (const sample of evidenceInput.timeSamples) {
+        captures.push(await captureAuthority.seal({
+          briefSlot: slot, blindId: candidate.blindId, evidenceClass: 'temporal',
+          artifactDigest, ref: sample.ref, mimeType: sample.mimeType, payload: sample.payload,
+        }));
+      }
+    } else {
+      prohibitedClaims.push('temporal');
+      inconclusiveReasons.push('temporal-not-captured-from-candidate');
+    }
+    // Audio capture from blind-review frozen evidence (when required)
     if (schedule.audioRequirement === 'required') {
       const audioMedia = candidate.media.find((item) => item.modality === 'audio');
       if (!audioMedia) {
@@ -760,6 +767,11 @@ export async function createOwnerReviewPacket(
       ['clock', evidenceInput.clockEvents],
       ['accessibility', evidenceInput.accessibility],
     ] as const) {
+      if (!asset) {
+        prohibitedClaims.push(evidenceClass);
+        inconclusiveReasons.push(`${evidenceClass}-not-captured-from-candidate`);
+        continue;
+      }
       captures.push(await captureAuthority.seal({
         briefSlot: slot, blindId: candidate.blindId, evidenceClass,
         artifactDigest, ref: asset.ref, mimeType: asset.mimeType, payload: asset.payload,
@@ -771,7 +783,7 @@ export async function createOwnerReviewPacket(
       audioRequirement: schedule.audioRequirement,
       evidence: frozenCaptures, evidenceRootDigest: evidenceRoot(frozenCaptures),
       prohibitedClaims: freeze(prohibitedClaims),
-      inconclusiveReasons: freeze(inconclusiveReasons),
+      inconclusiveReasons: freeze([...new Set(inconclusiveReasons)]),
       knownFailures: freeze([...evidenceInput.knownFailures]),
       hardFloorFailures: freeze([...evidenceInput.hardFloorFailures]),
     }));
@@ -849,6 +861,7 @@ export function verifyOwnerReviewPacket(
     const present = new Set(candidate.evidence.map((item) => item.evidenceClass));
     for (const evidenceClass of EVIDENCE_CLASSES) {
       if (evidenceClass === 'audio' && candidate.audioRequirement !== 'required') continue;
+      if (evidenceClass !== 'audio' && candidate.prohibitedClaims.includes(evidenceClass)) continue;
       if (!present.has(evidenceClass)) invalidEvidence.push({
         blindId: candidate.blindId, evidenceClass, reason: 'required-evidence-missing',
       });

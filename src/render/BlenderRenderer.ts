@@ -30,7 +30,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { Logger } from '../utils/Logger.js';
-import { BWRAP_STATUS_FD, buildSandboxedCommand, hostSandboxDeps } from './BlenderSandbox.js';
+import { BWRAP_STATUS_FD, buildSandboxedCommand, hostSandboxDeps, type SandboxKind } from './BlenderSandbox.js';
 
 export const BLENDER_DEFAULT_BINARY = 'blender';
 export const BLENDER_BINARY_ENV = 'SINTER_BLENDER_BIN';
@@ -66,6 +66,8 @@ export interface BlenderRunResult {
   sandboxError?: string;
   /** Loud operator warning, e.g. the unsandboxed escape hatch was used. */
   warning?: string;
+  /** Which OS sandbox the script ran under; absent when it never ran. */
+  sandbox?: SandboxKind;
 }
 
 /** The subprocess boundary. Tests inject a fake; production uses spawnBlender. */
@@ -90,6 +92,8 @@ export interface BlenderRenderResult {
   error?: string;
   failureKind?: BlenderFailureKind;
   logs: string[];
+  /** Which OS sandbox the script ran under. Only 'bwrap' is network-isolated. */
+  sandbox?: SandboxKind;
 }
 
 const FORBIDDEN_SCRIPT_PATTERNS: ReadonlyArray<{ pattern: RegExp; label: string }> = [
@@ -235,7 +239,7 @@ export const spawnBlender: BlenderRunner = (spec) => new Promise((resolve) => {
       resolve({ ...result, sandboxError: `Blender sandbox unavailable: bwrap failed to start: ${result.stderr.trim().slice(0, 500)}. The script was not run.` });
       return;
     }
-    resolve({ ...result, ...(plan.warning ? { warning: plan.warning } : {}) });
+    resolve({ ...result, sandbox: plan.sandbox, ...(plan.warning ? { warning: plan.warning } : {}) });
   };
 
   const timer = setTimeout(() => {
@@ -378,6 +382,7 @@ export async function renderBlender(script: string, options: BlenderRenderOption
       width: size.width,
       height: size.height,
       logs,
+      ...(run.sandbox ? { sandbox: run.sandbox } : {}),
     };
   } finally {
     rmSync(inputDir, { recursive: true, force: true });

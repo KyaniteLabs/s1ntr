@@ -4,6 +4,10 @@ import { Logger } from '../../src/utils/Logger.js';
 import fs from 'fs/promises';
 
 // Mock puppeteer to avoid launching a real browser
+vi.mock('../../src/utils/browserAssetFallbacks.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/utils/browserAssetFallbacks.js')>()),
+  resolveChromiumExecutablePath: () => '/opt/chromium',
+}));
 vi.mock('puppeteer', () => ({
   default: {
     launch: vi.fn().mockResolvedValue({

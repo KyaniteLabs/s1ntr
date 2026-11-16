@@ -74,6 +74,15 @@ describe('renderBlender', () => {
     expect(seen.spec?.cwd).toBe(keep);
   });
 
+  it('reports which sandbox ran the script (#1628)', async () => {
+    const seen: { spec?: BlenderRunSpec } = {};
+    const result = await renderBlender(SCRIPT, {
+      runner: async (spec) => ({ ...(await rendering(seen)(spec)), sandbox: 'bwrap' as const }),
+    });
+    expect(result.success).toBe(true);
+    expect(result.sandbox).toBe('bwrap');
+  });
+
   it('strips the environment: no proxies, no tokens, HOME and TMPDIR pinned to the output dir', async () => {
     process.env.HTTPS_PROXY = 'http://proxy.invalid:3128';
     process.env.OPENAI_API_KEY = 'sk-should-not-leak';

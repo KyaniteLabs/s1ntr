@@ -6,16 +6,14 @@
  * the pipeline's own rules).
  */
 
-/** Strip a single wrapping markdown code fence. */
+import { hasThinkTags, pickCodeBlock, splitThinking } from '../../llm/ModelOutput.js';
+
+/** The deliverable inside a reply's code fence, or the reply itself when it
+ *  has none. preserveWhitespace keeps the body verbatim (ASCII art, poems). */
 export function stripFence(value: string, preserveWhitespace = false): string {
-  if (preserveWhitespace) {
-    const fenced = /^(?:[\t ]*\r?\n)*[\t ]*```[a-z0-9_-]*[\t ]*\r?\n([\s\S]*?)\r?\n[\t ]*```[\t ]*(?:\r?\n)?$/i.exec(value);
-    return fenced ? fenced[1] : value;
-  }
-  return value.trim()
-    .replace(/^```[a-z0-9_-]*\s*/i, '')
-    .replace(/\s*```$/i, '')
-    .trim();
+  const block = pickCodeBlock(value);
+  if (preserveWhitespace) return block ? block.body : value;
+  return (block ? block.body : value).trim();
 }
 
 /** Chat-tuned seats (glm-5.3 on the server) sometimes prepend a prose preamble
@@ -41,8 +39,9 @@ export function stripProsePreamble(source: string, domain: string): string | nul
 /** Unwrap only the explain-then-fix envelope requested by the repair prompt.
  * Keep the corrected body verbatim: labels inside code and artwork are data. */
 export function stripRepairEnvelope(source: string): string {
-  const envelope = /^(?:\s*<think>[\s\S]*?<\/think>\s*)?(?:[\t ]*\r?\n)*[\t ]*ROOT CAUSE:[\s\S]*?\r?\n[\t ]*CORRECTED CODE:[\t ]*(?:\r?\n)?/i.exec(source);
-  return envelope ? source.slice(envelope[0].length) : source;
+  const reply = hasThinkTags(source) ? splitThinking(source).answer : source;
+  const envelope = /^(?:[\t ]*\r?\n)*[\t ]*ROOT CAUSE:[\s\S]*?\r?\n[\t ]*CORRECTED CODE:[\t ]*(?:\r?\n)?/i.exec(reply);
+  return envelope ? reply.slice(envelope[0].length) : source;
 }
 
 /** Seats sometimes emit a full HTML document for a raw-code domain (p5 sketch

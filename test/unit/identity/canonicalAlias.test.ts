@@ -204,3 +204,23 @@ describe('kilo gateway vendor-prefix echo aliases (fleet seats 2026-08-29)', () 
     )).toBe(false);
   });
 });
+
+describe('provider hints that name no model family (#1748)', () => {
+  // A custom seat is an OpenAI-compatible endpoint S1NTR has no named entry
+  // for; RoleConfig hints it as 'unknown'. The model id must decide.
+  for (const hint of ['custom', 'cli', 'unknown']) {
+    it(`a '${hint}' hint keeps a known model's family`, () => {
+      expect(buildExecutorIdentity('tencent/hy4-flash:free', 'high', { providerHint: hint }))
+        .toMatchObject({ provider: 'openai' });
+    });
+
+    it(`a '${hint}' hint still fails closed on an unknown model`, () => {
+      expect(buildExecutorIdentity('totally-made-up-model-9', 'high', { providerHint: hint })).toBeNull();
+    });
+  }
+
+  it('a named hint still overrides detection', () => {
+    expect(buildExecutorIdentity('tencent/hy4-flash:free', 'high', { providerHint: 'kilo' }))
+      .toMatchObject({ provider: 'kilo' });
+  });
+});

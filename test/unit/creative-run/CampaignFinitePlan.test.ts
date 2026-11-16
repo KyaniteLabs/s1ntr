@@ -680,6 +680,20 @@ async function startOwnerReviewTransport(port = 0) {
     close: () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())) });
 }
 
+/** An admission holding one subscription-seat allocation per generation stage. */
+function generationOnlyAdmission(plan: ReturnType<typeof buildCampaignExecutionPlan>): CampaignRunAdmission {
+  const allocations = plan.stages.filter((stage) => stage.kind === 'generation').map((stage) => ({
+    allocationId: `allocation-${stage.id}`, stageId: stage.id, logicalAttemptId: `attempt-${stage.id}`,
+    transportOrdinal: 0, purpose: 'primary' as const, requestTemplateDigest: D('a'), routeDigest: D('b'), role: 'generator',
+    identity: { provider: 'openai', model: 'test-generator', effort: 'low' },
+    seat: { seatId: 'gen-seat', seatDigest: D('c'), surface: 'openai-direct' },
+    funding: { mode: 'subscription-seat', quotaSurface: 'subscription-seat', seatDigest: D('c'),
+      resourceBudgetDigest: D('d'), quotaCounters: {
+        calls: 0, inputTokens: 0, outputTokens: 0, activeSeconds: 0 } },
+  })) as CampaignFundingAllocation[];
+  return { plan, fundingReservation: { subject: { allocations } } } as CampaignRunAdmission;
+}
+
 function generatedP5Code(slotId: string): string {
   const shade = [...slotId].reduce((sum, char) => sum + char.charCodeAt(0), 0) % 200;
   return `function setup(){createCanvas(16,16);} function draw(){background(${shade});} // ${slotId}`;
@@ -2090,7 +2104,10 @@ describe('W8C-06 shared Studio/CLI owner-review lifecycle parity', () => {
 
   // Keep one 60s test budget: its child has a 45s deadline,
   // with the remainder for signed fixture setup, assertions and cleanup.
-  it('spawned shipped CLI completes a signed v3 batch through owner evidence checkpoint only', { timeout: 60_000 }, async () => {
+  const realBrowser = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH?.trim();
+  it.each([{ mode: 'no browser', browser: undefined },
+    ...(realBrowser ? [{ mode: 'real browser', browser: realBrowser }] : [])])(
+    'spawned shipped CLI completes a signed v3 batch through owner evidence checkpoint only ($mode)', async ({ browser }) => {
     const repoRoot = path.resolve(import.meta.dirname, '../../..');
     const campaignRunId = 'spawned-v3-batch';
     const requiredEvidenceClasses = ['source', 'visual', 'temporal', 'audio',
@@ -2344,8 +2361,9 @@ describe('W8C-06 shared Studio/CLI owner-review lifecycle parity', () => {
       const run = await execFileAsync(process.execPath, ['bin/sinter', 'compose', '--campaign-manifest', manifestPath,
         '--campaign-execution', executionPath, '--owner-review-package', packagePath,
         '--gallery', gallery, '--output', output], {
-        cwd: repoRoot, timeout: 45_000, maxBuffer: 2_000_000,
-        env: { ...process.env, NODE_ENV: 'production', HOME: dir, LIMINAL_ALLOW_LOCALHOST_LLM: 'true',
+        cwd: repoRoot, timeout: browser ? 150_000 : 45_000, maxBuffer: 2_000_000,
+        env: { ...process.env, NODE_ENV: 'production', HOME: dir, SINTER_PROJECT_ROOT: dir, PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: browser ?? path.join(dir, 'no-chromium'),
+          LIMINAL_ALLOW_LOCALHOST_LLM: 'true',
           SINTER_LLM_THINKING_EFFORT: 'medium',
           SINTER_LLM_BASE_URL: generator.baseUrl, SINTER_LLM_MODEL: 'gemini-3.6-flash-high',
           SINTER_LLM_API_KEY: generatorKey,
@@ -2359,7 +2377,11 @@ describe('W8C-06 shared Studio/CLI owner-review lifecycle parity', () => {
           SINTER_CAMPAIGN_SEAT_BASE_URL_SPECIALIST_REVIEW: specialist.baseUrl.replace('/v1', '/kimi/v1'),
           SINTER_CAMPAIGN_SEAT_KEY_HOLISTIC_REVIEW: holisticKey,
           SINTER_CAMPAIGN_SEAT_BASE_URL_HOLISTIC_REVIEW: holistic.baseUrl } });
-      expect(run.stderr).toBe('');
+      const browserDiagnostic = /^(\[browser-preflight\]|\[HeadlessRenderer\]|\s+at |\s+\[cause\]: Error: \[browser-preflight\]|\}$)/;
+      const sandboxOptOut = process.env.LIMINAL_DISABLE_SANDBOX === 'true' ? /^\[SandboxConfig\] Chrome sandbox is disabled\./ : null;
+      expect(run.stderr.split('\n')
+        .filter((line) => line.trim() && !browserDiagnostic.test(line) && !sandboxOptOut?.test(line))).toEqual([]);
+      expect(run.stderr.match(/\[HeadlessRenderer\] Failed to initialize browser/g)?.length ?? 0).toBe(browser ? 0 : 1);
       expect(run.stdout).toContain('Owner review: file:');
       const candidates = path.join(output, 'campaign-candidates');
       expect(['brief-a', 'brief-b', 'brief-c'].flatMap((brief) => [1, 2, 3].map((ordinal) =>
@@ -2377,17 +2399,24 @@ describe('W8C-06 shared Studio/CLI owner-review lifecycle parity', () => {
       expect(source.artifactDigest).toBe(firstActual.artifact.artifactDigest);
       expect(Buffer.from(source.payloadUri.split(',')[1]!, 'base64').toString())
         .toBe(campaignActualSource(firstActual.artifact.layers));
-      expect(new Set(firstPacket.evidence.map((item) => item.evidenceClass))).toEqual(new Set([
-        'source', 'visual', 'temporal', 'audio', 'interaction', 'runtime', 'clock', 'accessibility',
-      ]));
-      expect(firstPacket.evidence.filter((item) => item.evidenceClass === 'temporal').length)
-        .toBeGreaterThan(1);
+      const runtimeClasses = ['temporal', 'interaction', 'runtime', 'clock', 'accessibility'] as const;
+      const sealedClasses = [...new Set(firstPacket.evidence.map((item) => item.evidenceClass))];
+      expect(sealedClasses).toEqual(expect.arrayContaining(['source', 'visual', 'audio', ...(browser ? ['runtime'] : [])]));
+      expect(sealedClasses.length > 3).toBe(Boolean(browser));
       expect(firstPacket.evidence.find((item) => item.evidenceClass === 'audio')?.mimeType)
         .toBe('audio/wav');
       expect(firstPacket.evidence.every((item) => item.artifactDigest === firstActual.artifact.artifactDigest))
         .toBe(true);
-      expect(firstPacket.inconclusiveReasons).toEqual(['model-review-audio-payload-withheld']);
-      expect(firstPacket.prohibitedClaims).toEqual([]);
+      expect(firstPacket.inconclusiveReasons).toContain('model-review-audio-payload-withheld');
+      expect(firstPacket.inconclusiveReasons.join(' ')).not.toMatch(/planned-from-brief|static-text-scan/);
+      expect(firstPacket.inconclusiveReasons.includes('render-infrastructure-unavailable')).toBe(!browser);
+      for (const evidenceClass of runtimeClasses) {
+        const sealed = firstPacket.evidence.filter((item) => item.evidenceClass === evidenceClass);
+        for (const item of sealed) expect(item.ref).toMatch(/\.capture\./);
+        expect(firstPacket.prohibitedClaims.includes(evidenceClass)).toBe(sealed.length === 0);
+        expect(firstPacket.inconclusiveReasons.includes(`${evidenceClass}-not-captured-from-candidate`))
+          .toBe(sealed.length === 0);
+      }
       expect(specialist.requestCount()).toBe(9);
       expect(holistic.requestCount()).toBe(9);
       expect(specialist.audioPayloadRequestCount()).toBe(0);
@@ -2407,7 +2436,7 @@ describe('W8C-06 shared Studio/CLI owner-review lifecycle parity', () => {
       await Promise.all([generator.close(), specialist.close(), holistic.close()]);
       live.cleanup();
     }
-  });
+  }, realBrowser ? 180_000 : 60_000);
 
   it('production bootstrap installs the sole active host without the test seam', () => {
     expect(() => bootstrapProductionOwnerReviewHost()).not.toThrow();
@@ -2487,7 +2516,8 @@ describe('W8C-06 shared Studio/CLI owner-review lifecycle parity', () => {
       holistic: { provider: 'anthropic', model: 'claude-review' },
     }, production?: { readonly specialistKey: string; readonly holisticKey: string },
     behavior: { readonly surface?: 'cli' | 'studio'; readonly swapCandidateSet?: boolean;
-      readonly unawaitedLifecycle?: boolean; readonly unawaitedLifecycleRejects?: boolean } = {}) {
+      readonly unawaitedLifecycle?: boolean; readonly unawaitedLifecycleRejects?: boolean;
+      readonly asyncOwnerReviews?: boolean } = {}) {
     const candidateManifest = await buildCandidateManifest(intent, {});
     const candidates = candidateManifest.candidates;
     const briefId = 'brief-parity';
@@ -2716,10 +2746,16 @@ describe('W8C-06 shared Studio/CLI owner-review lifecycle parity', () => {
         if (!escaped) throw new Error('unawaited lifecycle was not started');
         reviewResult = await escaped;
       } else {
+        const journeyGoverned = behavior.asyncOwnerReviews ? { ...governed,
+          ownerReviews: async (activeAdmission: CampaignRunAdmission,
+            manifests: readonly CampaignActualCandidateManifest[]) => {
+            await new Promise((resolve) => setTimeout(resolve, 25));
+            return governed.ownerReviews(activeAdmission, manifests);
+          } } : governed;
         const journey = behavior.surface === 'studio'
-          ? await runGovernedCampaignStudioJourney(service, request, campaignManifest, plan, governed,
+          ? await runGovernedCampaignStudioJourney(service, request, campaignManifest, plan, journeyGoverned,
             () => undefined)
-          : await runCampaignCliJourney(service, request, campaignManifest, plan, governed,
+          : await runCampaignCliJourney(service, request, campaignManifest, plan, journeyGoverned,
             () => undefined);
         productAdmission = journey.admission;
         reviewResult = journey.ownerReviews[0];
@@ -2772,19 +2808,10 @@ describe('W8C-06 shared Studio/CLI owner-review lifecycle parity', () => {
       }
   });
 
-  it('keeps legacy owner evidence inconclusive when the sealed slot requires withheld audio', async () => {
+  it('keeps legacy owner evidence inconclusive for withheld audio and keeps limitations the capturer reported', async () => {
     const manifest = createCampaignManifest(manifestInput('campaign-parity-v1-audio'));
     const plan = buildCampaignExecutionPlan(manifest, buildGraphs(manifest), routeFreeze());
-    const allocations = plan.stages.filter((stage) => stage.kind === 'generation').map((stage) => ({
-      allocationId: `allocation-${stage.id}`, stageId: stage.id, logicalAttemptId: `attempt-${stage.id}`,
-      transportOrdinal: 0, purpose: 'primary' as const, requestTemplateDigest: D('a'), routeDigest: D('b'), role: 'generator',
-      identity: { provider: 'openai', model: 'test-generator', effort: 'low' },
-      seat: { seatId: 'gen-seat', seatDigest: D('c'), surface: 'openai-direct' },
-      funding: { mode: 'subscription-seat', quotaSurface: 'subscription-seat', seatDigest: D('c'),
-        resourceBudgetDigest: D('d'), quotaCounters: {
-          calls: 0, inputTokens: 0, outputTokens: 0, activeSeconds: 0 } },
-    })) as CampaignFundingAllocation[];
-    const admission = { plan, fundingReservation: { subject: { allocations } } } as CampaignRunAdmission;
+    const admission = generationOnlyAdmission(plan);
     const actuals = manifest.briefs.map((brief): CampaignActualCandidateManifest => ({
       schema: 'sinter.campaign-actual-candidate-manifest', schemaVersion: 1,
       campaignRunId: manifest.campaignRunId, manifestDigest: manifest.manifestDigest, briefId: brief.id,
@@ -2806,7 +2833,7 @@ describe('W8C-06 shared Studio/CLI owner-review lifecycle parity', () => {
       runtimeState: { ref: `${id}.runtime`, mimeType: 'application/json', payload: '{"ready":true}' },
       clockEvents: { ref: `${id}.clock`, mimeType: 'text/plain', payload: '0,1' },
       accessibility: { ref: `${id}.a11y`, mimeType: 'text/plain', payload: 'contrast:pass' },
-      knownFailures: [], hardFloorFailures: [],
+      knownFailures: [], hardFloorFailures: [], reviewLimitations: ['capture-stopped-after-two-seconds'],
     });
     const packagePath = path.join(dir, 'v1-owner-package.json');
     writeFileSync(packagePath, JSON.stringify({ schema: 'sinter.owner-review-package', schemaVersion: 1,
@@ -2823,8 +2850,71 @@ describe('W8C-06 shared Studio/CLI owner-review lifecycle parity', () => {
     const service = { admitOwnerReview: () => ({}) } as CampaignService;
     const inputs = loadProductionOwnerReviewPackage(packagePath).buildInputs(
       service, admission, manifest, actuals);
-    expect(inputs.flatMap((input) => input.evidence).every((item) =>
-      item.reviewLimitations?.includes('model-review-audio-payload-withheld'))).toBe(true);
+    for (const item of inputs.flatMap((input) => input.evidence)) {
+      expect(item.reviewLimitations).toEqual(
+        ['capture-stopped-after-two-seconds', 'model-review-audio-payload-withheld']);
+    }
+    const malformed = JSON.parse(readFileSync(packagePath, 'utf8')) as {
+      reviews: { evidence: { reviewLimitations: unknown }[] }[] };
+    for (const [limitations, error] of [
+      ['capture-stopped', 'OWNER_REVIEW_LIMITATIONS_INVALID'],
+      [['stopped\u001b[2J'], 'OWNER_REVIEW_LIMITATIONS_INVALID'],
+      [['x'.repeat(201)], 'OWNER_REVIEW_LIMITATIONS_INVALID'],
+      [Array.from({ length: 65 }, (_, index) => `limit-${index}`), 'OWNER_REVIEW_LIMITATIONS_INVALID'],
+    ] as const) {
+      malformed.reviews[0]!.evidence[0]!.reviewLimitations = limitations;
+      writeFileSync(packagePath, JSON.stringify(malformed));
+      expect(() => loadProductionOwnerReviewPackage(packagePath)).toThrow(error);
+    }
+    (malformed.reviews[0] as { evidence: unknown }).evidence = [null];
+    writeFileSync(packagePath, JSON.stringify(malformed));
+    expect(() => loadProductionOwnerReviewPackage(packagePath)).toThrow('OWNER_REVIEW_EVIDENCE_INVALID');
+  });
+
+  it('seals nothing for a candidate that was never rendered, and names each class it did not observe', async () => {
+    const manifest = createCampaignManifest(manifestInput('campaign-derived-evidence'));
+    const plan = buildCampaignExecutionPlan(manifest, buildGraphs(manifest), routeFreeze());
+    const admission = generationOnlyAdmission(plan);
+    const thesis = compileCreativeThesis('a slow tide of light');
+    const html = '<main><canvas></canvas></main>';
+    const actuals = manifest.briefs.map((brief): CampaignActualCandidateManifest => ({
+      schema: 'sinter.campaign-actual-candidate-manifest', schemaVersion: 1,
+      campaignRunId: manifest.campaignRunId, manifestDigest: manifest.manifestDigest, briefId: brief.id,
+      candidates: brief.candidateSlots.map((slot) => ({ id: slot.id, briefId: brief.id,
+        slotDigest: slot.ownerEvidence.slotDigest, graphDigest: D('e'), graphNodeIds: slot.graphNodeIds,
+        thesisDigest: campaignCreativeThesisDigest(thesis), diversity: {}, artifact: { html,
+          artifactDigest: campaignActualArtifactDigest(html),
+          sourceDigest: campaignActualSourceDigest([]), layers: [], successCount: 0, layerCount: 0 } })),
+    }));
+    const capture = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const envelope = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const capturePath = path.join(dir, 'derived-capture.pem');
+    const envelopePath = path.join(dir, 'derived-envelope.pem');
+    writeFileSync(capturePath, capture.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString());
+    writeFileSync(envelopePath, envelope.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString());
+    const packagePath = path.join(dir, 'derived-owner-package.json');
+    writeFileSync(packagePath, JSON.stringify({ schema: 'sinter.owner-review-package', schemaVersion: 2,
+      plan, reviews: manifest.briefs.map((brief) => ({ briefId: brief.id,
+        assignments: brief.candidateSlots.map((slot) => ({ candidateId: slot.id,
+          requiredModalities: ['visual', 'audio'], creativeThesis: thesis })),
+        rendererFilePath: path.join(dir, `${brief.id}-derived-owner-review.html`) })),
+      captureKey: { keyId: 'derived-capture', privateKeyPath: capturePath },
+      envelopeKey: { keyId: 'derived-envelope', privateKeyPath: envelopePath },
+      storeDirectory: path.join(dir, 'derived-packets') }));
+    const service = { admitOwnerReview: () => ({}) } as CampaignService;
+    const evidence = loadProductionOwnerReviewPackage(packagePath).buildInputs(
+      service, admission, manifest, actuals).flatMap((input) => input.evidence);
+    expect(evidence.length).toBeGreaterThan(0);
+    for (const item of evidence) {
+      expect(item.reviewLimitations).toEqual(expect.arrayContaining([
+        'model-review-audio-payload-withheld', 'render-infrastructure-unavailable', 'accessibility-not-measured',
+      ]));
+      expect(item.timeSamples).toBeUndefined();
+      expect(item.interactionTrace).toBeUndefined();
+      expect(item.runtimeState).toBeUndefined();
+      expect(item.clockEvents).toBeUndefined();
+      expect(item.accessibility).toBeUndefined();
+    }
   });
 
   it('rejects an unbound owner-review admission before any mismatched campaign can use it', async () => {
@@ -2879,6 +2969,14 @@ describe('W8C-06 shared Studio/CLI owner-review lifecycle parity', () => {
     await expect(buildParityFixture(dir, 'campaign-parity-candidate-swap',
       'Candidate bytes stay bound through owner review.', undefined, undefined,
       { swapCandidateSet: true })).rejects.toThrow('OWNER_REVIEW_CANDIDATE_SET_MISMATCH');
+  });
+
+  it.each(['cli', 'studio'] as const)('%s journey admits owner review after async evidence capture', async (surface) => {
+    const fixture = await buildParityFixture(dir, `campaign-parity-async-capture-${surface}`,
+      'Owner evidence is captured from the candidate before review admission.', undefined, undefined,
+      { surface, asyncOwnerReviews: true });
+    expect(fixture.reviewResult.surface).toBe(surface);
+    expect(fixture.reviewResult.packet.briefId).toBe(fixture.briefId);
   });
 
   it('finishes an unawaited real lifecycle before revoking its service lease', async () => {

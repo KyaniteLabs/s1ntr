@@ -8,6 +8,8 @@ import { TierBasedGenerator, type TierBasedGeneratorOptions } from '../TierBased
 import { P5Validator } from '../../core/validators/P5Validator.js';
 import { Logger } from '../../utils/Logger.js';
 import { VENDOR_ASSETS } from '../../utils/vendorAssets.js';
+import { answerCode, fencedBlocks, splitThinking } from '../../llm/ModelOutput.js';
+import { scriptSafe } from '../../utils/scriptEmbed.js';
 
 export type P5GeneratorV2Options = TierBasedGeneratorOptions;
 
@@ -124,16 +126,9 @@ export class P5GeneratorV2 extends TierBasedGenerator {
   }
 
   private sanitizeP5Code(code: string): string {
-    let clean = code;
-    const fencedSketch = clean.match(/```(?:javascript|js)?\s*\n?([\s\S]*?)```/i);
-    if (fencedSketch?.[1] && /function\s+setup\s*\(/.test(fencedSketch[1])) {
-      clean = fencedSketch[1];
-    } else {
-      const unclosedFenceSketch = clean.match(/```(?:javascript|js)?\s*\n?([\s\S]*)/i);
-      if (unclosedFenceSketch?.[1] && /function\s+setup\s*\(/.test(unclosedFenceSketch[1])) {
-        clean = unclosedFenceSketch[1];
-      }
-    }
+    const { answer } = splitThinking(code);
+    const sketch = fencedBlocks(answer).find((block) => /function\s+setup\s*\(/.test(block.body));
+    let clean = sketch ? sketch.body : answer;
 
     clean = clean.replace(/(=\s*)#([0-9a-fA-F]{3,8})\b/g, "$1'#$2'");
     const setupColorAssignments: string[] = [];
@@ -158,10 +153,7 @@ export class P5GeneratorV2 extends TierBasedGenerator {
    * Injects p5.js CDN and creates a self-contained sketch harness.
    */
   wrapForGallery(code: string): string {
-    const cleaned = code
-      .replace(/^```(?:html|javascript|js)?\n?/i, '')
-      .replace(/\n?```$/i, '')
-      .trim();
+    const cleaned = answerCode(code, ['html', 'javascript', 'js']).trim();
 
     if (/<!DOCTYPE\s+html/i.test(cleaned) || /<html\b/i.test(cleaned)) {
       return cleaned;
@@ -182,7 +174,7 @@ canvas{display:block}
 </head>
 <body>
 <script>
-${cleaned}
+${scriptSafe(cleaned)}
 </script>
 </body>
 </html>`;

@@ -11,6 +11,7 @@ import { ThreeValidator } from '../../../src/core/validators/ThreeValidator.js';
 import { P5Validator } from '../../../src/core/validators/P5Validator.js';
 import { StrudelValidator } from '../../../src/core/validators/StrudelValidator.js';
 import { GenericWrapper } from '../../../src/core/wrappers/GenericWrapper.js';
+import { StrudelAdapter } from '../../../src/composition/adapters/StrudelAdapter.js';
 
 describe('false-rejection regressions (audit 2026-08-29)', () => {
   describe('H6 ToneValidator', () => {
@@ -23,7 +24,7 @@ heard.forEach((note, i) => synth.triggerAttackRelease(note, "8n", Tone.now() + i
       `;
 
       const result = ToneValidator.validate(code);
-      expect(result.errors).not.toContain(expect.stringContaining('.filter'));
+      expect(result.errors).not.toEqual(expect.arrayContaining([expect.stringContaining('.filter')]));
       expect(result.valid).toBe(true);
     });
 
@@ -35,7 +36,7 @@ osc.start();
       `;
 
       const result = ToneValidator.validate(code);
-      expect(result.errors).not.toContain(expect.stringContaining('detune'));
+      expect(result.errors).not.toEqual(expect.arrayContaining([expect.stringContaining('detune')]));
       expect(result.valid).toBe(true);
     });
 
@@ -48,7 +49,7 @@ osc.start();
       `;
 
       const result = ToneValidator.validate(code);
-      expect(result.errors).not.toContain(expect.stringContaining('Invalid class'));
+      expect(result.errors).not.toEqual(expect.arrayContaining([expect.stringContaining('Invalid class')]));
       expect(result.valid).toBe(true);
     });
 
@@ -112,7 +113,7 @@ renderer.setAnimationLoop(animate);
       `;
 
       const result = ThreeValidator.validate(code);
-      expect(result.errors).not.toContain(expect.stringContaining('never started'));
+      expect(result.errors).not.toEqual(expect.arrayContaining([expect.stringContaining('never started')]));
       expect(result.valid).toBe(true);
     });
 
@@ -126,7 +127,7 @@ requestAnimationFrame(animate);
       `;
 
       const result = ThreeValidator.validate(code);
-      expect(result.errors).not.toContain(expect.stringContaining('never started'));
+      expect(result.errors).not.toEqual(expect.arrayContaining([expect.stringContaining('never started')]));
       expect(result.valid).toBe(true);
     });
 
@@ -143,7 +144,7 @@ renderer.setAnimationLoop(animate);
       `;
 
       const result = ThreeValidator.validate(code);
-      expect(result.errors).not.toContain(expect.stringContaining('should mutate scene state'));
+      expect(result.errors).not.toEqual(expect.arrayContaining([expect.stringContaining('should mutate scene state')]));
       expect(result.valid).toBe(true);
     });
 
@@ -213,7 +214,7 @@ $: s("bd sd hh")
       `;
 
       const result = StrudelValidator.validate(code);
-      expect(result.errors).not.toContain(expect.stringContaining('unmatched parentheses'));
+      expect(result.errors).not.toEqual(expect.arrayContaining([expect.stringContaining('unmatched parentheses')]));
       expect(result.valid).toBe(true);
     });
 
@@ -225,7 +226,7 @@ $: s("bd sd").gain("[0.5 1]")
       `;
 
       const result = StrudelValidator.validate(code);
-      expect(result.errors).not.toContain(expect.stringContaining('unmatched parentheses'));
+      expect(result.errors).not.toEqual(expect.arrayContaining([expect.stringContaining('unmatched parentheses')]));
       expect(result.valid).toBe(true);
     });
 
@@ -302,6 +303,35 @@ $: note("c3 e3 g3").s("piano")
       const artworkJson = wrapped.match(/var artwork = ("(?:[^"\\]|\\.)*")/)?.[1];
       expect(typeof artworkJson).toBe('string');
       expect(JSON.parse(artworkJson as string)).toBe(code);
+    });
+  });
+  // LFM3 hill-climb shard A (2026-11-15): 83 of 144 sound attempts died on "must contain pattern
+  // functions". Strudel parses backtick strings as mini-notation and n() is a pattern function,
+  // so these are valid pieces; and the composition adapter only caught CJK, not the em-dashes the
+  // transpiler rejects, so it passed pieces that then played silence.
+  describe('Strudel pattern-function and ASCII gates (shard A 2026-11-15)', () => {
+    const valid = {
+      backtick: 's(`bd ~ sd ~`).fast(2)',
+      n_scale: 'n("0 2 4 7").scale("C:minor")',
+      bare_stack: 'stack(s("bd*2"), note("c3 e3").s("sawtooth"))',
+    };
+    for (const [name, code] of Object.entries(valid)) {
+      it(`accepts ${name}`, () => {
+        expect(StrudelValidator.validate(code).errors).not.toEqual(expect.arrayContaining([expect.stringContaining('pattern functions')]));
+      });
+    }
+
+    it('still rejects code with no pattern function', () => {
+      expect(StrudelValidator.validate('const tempo = 120;').errors).toEqual(expect.arrayContaining([expect.stringContaining('pattern functions')]));
+    });
+
+    it('the composition adapter applies the same pattern and ASCII rules as the validator', () => {
+      const adapter = new StrudelAdapter();
+      const layer = (code: string) => ({ id: 'l', type: 'strudel', code } as never);
+      expect(adapter.validate(layer('s(`bd ~ sd ~`)')).valid).toBe(true);
+      const dash = adapter.validate(layer('// drums \u2014 kick\ns("bd sd")'));
+      expect(dash.valid).toBe(false);
+      expect(dash.errors).toEqual(expect.arrayContaining([expect.stringContaining('non-ASCII')]));
     });
   });
 });

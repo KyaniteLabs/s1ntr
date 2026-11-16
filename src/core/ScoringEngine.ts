@@ -764,7 +764,7 @@ function createTimeoutController(parent: AbortSignal | undefined, timeoutMs: num
     controller.abort(parent?.reason ?? new Error('Scoring aborted'));
   };
   const timer = setTimeout(() => {
-    controller.abort(new Error(`LLM score boost timed out after ${timeoutMs}ms`));
+    controller.abort(new Error(`LLM call timed out after ${timeoutMs}ms`));
   }, timeoutMs);
   const cleanup = () => {
     if (cleaned) return;
@@ -782,6 +782,27 @@ function createTimeoutController(parent: AbortSignal | undefined, timeoutMs: num
   return { signal: controller.signal, cleanup };
 }
 
+// A judge stall is rare (3 of 238 glm-5.3-flash calls on 2026-11-16; p90
+// 70 s), so one fresh attempt usually saves the score. Only a timeout retries.
+async function callWithOneTimeoutRetry<T>(call: (signal?: AbortSignal) => Promise<T>, timeoutMs: number): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    const controller = createTimeoutController(undefined, timeoutMs);
+    try {
+      const pending = call(controller.signal);
+      // The aborted call still rejects after the timeout wins; observe it so
+      // it cannot crash the process.
+      void pending.catch(() => undefined);
+      return await withScoringTimeout(pending, timeoutMs);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (attempt >= 2 || !/timed out after \d+ms/.test(message)) throw error;
+      Logger.warn('ScoringEngine', `Evaluator timed out after ${timeoutMs}ms; retrying once`);
+    } finally {
+      controller.cleanup();
+    }
+  }
+}
+
 async function withScoringTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return operation;
 
@@ -790,7 +811,7 @@ async function withScoringTimeout<T>(operation: Promise<T>, timeoutMs: number): 
     return await Promise.race([
       operation,
       new Promise<T>((_, reject) => {
-        timeout = setTimeout(() => reject(new Error(`LLM score boost timed out after ${timeoutMs}ms`)), timeoutMs);
+        timeout = setTimeout(() => reject(new Error(`LLM call timed out after ${timeoutMs}ms`)), timeoutMs);
       }),
     ]);
   } finally {
@@ -866,7 +887,9 @@ async function gateRenderedEvidence(evidence: RenderEvidence, domain?: string): 
       confidence: 1,
       failureClass: 'render',
       repairAdvice: {
-        issue: 'Rendered output failed to produce a valid artifact (blank screen, compile error, or timeout)',
+        issue: evidence.failure
+          ? `The artwork failed to render: ${evidence.failure.slice(0, 500)}`
+          : 'Rendered output failed to produce a valid artifact (blank screen, compile error, or timeout)',
         fix: 'Fix syntax errors, ensure all required imports/libraries are loaded, and verify the code runs without runtime exceptions.',
         constraint: 'Return a complete, runnable artifact.',
       },
@@ -904,6 +927,18 @@ async function gateRenderedEvidence(evidence: RenderEvidence, domain?: string): 
  *
  * Otherwise, uses an LLM-based evaluator when available, or a neutral fallback.
  */
+async function defaultEvaluatorClient(): Promise<LLMClient | undefined> {
+  try {
+    // Role configs load async into a static cache; without this the
+    // constructor falls back to defaults and tier/timeout resolution
+    // sees model 'auto' instead of the real evaluator.
+    await LLMClient.loadRoles();
+    return new LLMClient({ role: 'evaluator' });
+  } catch {
+    return undefined;
+  }
+}
+
 export async function scoreRenderedEvidence(
   evidence: RenderEvidence,
   code: string,
@@ -924,18 +959,7 @@ export async function scoreRenderedEvidence(
   if (gate.verdict) return gate.verdict;
   const renderMeasure = gate.renderMeasure;
 
-  let llm = llmClient;
-  if (!llm) {
-    try {
-      // Role configs load async into a static cache; without this the
-      // constructor falls back to defaults and tier/timeout resolution
-      // sees model 'auto' instead of the real evaluator.
-      await LLMClient.loadRoles();
-      llm = new LLMClient({ role: 'evaluator' });
-    } catch {
-      llm = undefined;
-    }
-  }
+  const llm = llmClient ?? await defaultEvaluatorClient();
 
   if (!llm) {
     return applyRenderMeasurePenalty({
@@ -1042,7 +1066,6 @@ issue and fix whenever score < 0.9: name the weakest craft dimension (compositio
 
   const localEvaluator = isSlowEvaluatorProvider(evalProvider);
   const scoreTimeoutMs = renderedEvidenceScoreTimeoutMs(localEvaluator, options.timeoutMs);
-  const timeoutController = createTimeoutController(undefined, scoreTimeoutMs);
   const scoreStartedAt = Date.now();
   try {
     const evaluatorImages = evidence.screenshot && !textOnlyJudge
@@ -1060,20 +1083,9 @@ issue and fix whenever score < 0.9: name the weakest craft dimension (compositio
           label: 'rendered-artifact-late',
         }] : [])])
       : [];
-    const llmCall = evaluatorImages.length > 0
-      ? llm.generateWithImages(
-          systemPrompt,
-          userPrompt,
-          evaluatorImages,
-          timeoutController.signal,
-          true,
-          { jsonMode: true },
-        )
-      : llm.generate(systemPrompt, userPrompt, timeoutController.signal, true, undefined, { jsonMode: true });
-    // Observe the late rejection if the timeout wins the race — the aborted
-    // call still rejects afterwards and would otherwise crash the process.
-    void llmCall.catch(() => undefined);
-    const response = await withScoringTimeout(llmCall, scoreTimeoutMs);
+    const response = await callWithOneTimeoutRetry((signal) => (evaluatorImages.length > 0
+      ? llm.generateWithImages(systemPrompt, userPrompt, evaluatorImages, signal, true, { jsonMode: true })
+      : llm.generate(systemPrompt, userPrompt, signal, true, undefined, { jsonMode: true })), scoreTimeoutMs);
     Logger.info(
       'ScoringEngine',
       `[stage-timing] rendered-evidence-score: ${Date.now() - scoreStartedAt}ms (screenshot: ${evidence.screenshot ? `${Math.round(evidence.screenshot.dataBase64.length / 1024)}KB` : 'none'})`,
@@ -1163,8 +1175,6 @@ issue and fix whenever score < 0.9: name the weakest craft dimension (compositio
         constraint: 'Evaluator LLM must complete successfully for rendered-evidence scoring',
       },
     }, renderMeasure);
-  } finally {
-    timeoutController.cleanup();
   }
 }
 

@@ -6,7 +6,8 @@ import type { BlindReviewJudgment, CandidateEvidenceAssignment } from '../creati
 import type { CreativeThesis } from '../creative-intelligence/CreativeIntelligence.js';
 import { validateCreativeThesis } from '../creative-intelligence/CreativeIntelligence.js';
 import { buildCrossModalArtifact } from '../creative-intelligence/CrossModalArtifact.js';
-import { AccessibilityGuardrails } from '../guardrails/AccessibilityGuardrails.js';
+import { captureOwnerEvidence, createProductionOwnerCaptureRenderer, ownerCaptureFromRender,
+  type OwnerCaptureRenderer, type OwnerCapturedEvidence, type OwnerCaptures } from './OwnerReviewCapture.js';
 import type { CampaignExecutionPlan, CampaignManifest } from '../creative-run/CampaignManifest.js';
 import type { CampaignRunAdmission } from '../creative-run/CreativeRunCoordinatorBase.js';
 import type { CampaignFundingAllocation } from '../creative-run/CampaignExecutionAuthority.js';
@@ -41,7 +42,7 @@ export type ProductionCandidateEvidenceAssignment =
 
 export type DerivedProductionCandidateEvidenceAssignment =
   Omit<ProductionCandidateEvidenceAssignment, 'crossModalArtifact'> & {
-    /** Frozen thesis used to derive candidate-bound temporal and audio evidence. */
+    /** Frozen thesis. Timing evidence is planned from it; the candidate is not run. */
     readonly creativeThesis: CreativeThesis;
     readonly crossModalArtifact?: never;
   };
@@ -74,9 +75,14 @@ export interface PreparedProductionOwnerReview {
   /** Uses the same host keys, packet store, and durable root as owner review. */
   createClosureEvidenceAuthority(): CampaignClosureEvidenceAuthority;
   assertManifestCoverage(manifest: CampaignManifest): void;
+  /** Renders every candidate's own HTML so `buildInputs` can seal what it did. */
+  captureEvidence(candidates: readonly CampaignActualCandidateManifest[],
+    renderer?: OwnerCaptureRenderer): Promise<OwnerCaptures>;
+  /** `captured` comes from `captureEvidence`; a candidate missing from it is sealed as not observed. */
   buildInputs(service: CampaignService, admission: CampaignRunAdmission,
     manifest: CampaignManifest,
-    candidates: readonly CampaignActualCandidateManifest[]): readonly OwnerReviewLifecycleInput[];
+    candidates: readonly CampaignActualCandidateManifest[],
+    captured?: OwnerCaptures): readonly OwnerReviewLifecycleInput[];
 }
 
 class FileOwnerReviewPacketStore implements OwnerReviewPacketStore {
@@ -183,30 +189,29 @@ function deriveCrossModalAssignment(
   });
 }
 
-function deriveCaptureInputs(
+// Limitations reach the packet digest, the contact sheet and the CLI: short printable names only.
+const MAX_LIMITATIONS = 64;
+const LIMITATION_PATTERN = /^[^\p{Cc}]{1,200}$/u;
+function validLimitations(value: unknown): boolean {
+  return Array.isArray(value) && value.length <= MAX_LIMITATIONS
+    && value.every((entry) => typeof entry === 'string' && LIMITATION_PATTERN.test(entry));
+}
+
+const NOT_OBSERVED = { infraUnavailable: true, candidateFailure: false, timingMs: 0 };
+
+function observedCaptureInputs(
   candidate: CampaignActualCandidateManifest['candidates'][number],
-  assignment: CandidateEvidenceAssignment,
+  captured: OwnerCapturedEvidence | undefined,
   sealedAudioRequired: boolean,
 ): ProductionOwnerCaptureInputs {
-  const crossModal = assignment.crossModalArtifact;
-  if (!crossModal) throw new Error('OWNER_REVIEW_DERIVED_CROSS_MODAL_MISSING');
+  const { inputs, limitations } = captured ?? ownerCaptureFromRender(candidate.id, NOT_OBSERVED, null);
   return Object.freeze({
-    timeSamples: crossModal.evidence.timingSamples.map((sample) => ({
-      ref: `${candidate.id}.time.${sample.tick}`, mimeType: 'application/json',
-      payload: JSON.stringify(sample),
-    })),
-    interactionTrace: { ref: `${candidate.id}.interaction`, mimeType: 'application/json',
-      payload: JSON.stringify(crossModal.evidence.observables) },
-    runtimeState: { ref: `${candidate.id}.runtime`, mimeType: 'application/json',
-      payload: JSON.stringify(crossModal.evidence.runtimeReceipt) },
-    clockEvents: { ref: `${candidate.id}.clock`, mimeType: 'application/json',
-      payload: JSON.stringify({ clock: crossModal.evidence.clock,
-        samples: crossModal.evidence.timingSamples }) },
-    accessibility: { ref: `${candidate.id}.accessibility`, mimeType: 'application/json',
-      payload: JSON.stringify(AccessibilityGuardrails.quickCheck(candidate.artifact.html)) },
-    knownFailures: [], hardFloorFailures: [],
-    reviewLimitations: sealedAudioRequired
-      ? ['model-review-audio-payload-withheld'] : [],
+    ...inputs,
+    knownFailures: inputs.knownFailures ?? [], hardFloorFailures: [],
+    reviewLimitations: [
+      ...(sealedAudioRequired ? ['model-review-audio-payload-withheld'] : []),
+      ...limitations,
+    ],
   });
 }
 
@@ -346,8 +351,13 @@ export function loadProductionOwnerReviewPackage(filePath: string): PreparedProd
         validateCreativeThesis((assignment as DerivedProductionCandidateEvidenceAssignment).creativeThesis);
       }
     }
-    if (review.evidence?.some((evidence: ProductionOwnerCaptureInputs) => evidence?.source !== undefined))
+    if (review.evidence?.some((evidence: unknown) => typeof evidence !== 'object' || evidence === null))
+      throw new Error('OWNER_REVIEW_EVIDENCE_INVALID');
+    if (review.evidence?.some((evidence: ProductionOwnerCaptureInputs) => evidence.source !== undefined))
       throw new Error('OWNER_REVIEW_GENERATED_SOURCE_CALLER_FORBIDDEN');
+    if (review.evidence?.some((evidence: ProductionOwnerCaptureInputs) =>
+      evidence.reviewLimitations !== undefined && !validLimitations(evidence.reviewLimitations)))
+      throw new Error('OWNER_REVIEW_LIMITATIONS_INVALID');
     const rendererFilePath = path.resolve(requiredText(review.rendererFilePath,
       'OWNER_REVIEW_RENDERER_FILE_REQUIRED'));
     mkdirSync(path.dirname(rendererFilePath), { recursive: true, mode: 0o700 });
@@ -388,9 +398,20 @@ export function loadProductionOwnerReviewPackage(filePath: string): PreparedProd
         }
       }
     },
+    async captureEvidence(candidates: readonly CampaignActualCandidateManifest[],
+      renderer?: OwnerCaptureRenderer): Promise<OwnerCaptures> {
+      const active = renderer ?? await createProductionOwnerCaptureRenderer();
+      const byBrief = new Map<string, ReadonlyMap<string, OwnerCapturedEvidence>>();
+      for (const brief of candidates) {
+        if (byBrief.has(brief.briefId)) throw new Error('OWNER_REVIEW_ACTUAL_CANDIDATE_BRIEF_DUPLICATE');
+        byBrief.set(brief.briefId, await captureOwnerEvidence(brief.candidates, active));
+      }
+      return byBrief;
+    },
     buildInputs(service: CampaignService, admission: CampaignRunAdmission,
       manifest: CampaignManifest,
-      candidates: readonly CampaignActualCandidateManifest[]): readonly OwnerReviewLifecycleInput[] {
+      candidates: readonly CampaignActualCandidateManifest[],
+      captured: OwnerCaptures = new Map()): readonly OwnerReviewLifecycleInput[] {
       if (parsed.plan.campaignRunId !== manifest.campaignRunId
         || parsed.plan.manifestDigest !== manifest.manifestDigest) {
         throw new Error('OWNER_REVIEW_PACKAGE_CAMPAIGN_BINDING_MISMATCH');
@@ -417,12 +438,12 @@ export function loadProductionOwnerReviewPackage(filePath: string): PreparedProd
         });
         const session = createBlindReviewSession(candidatesForBrief, assignments);
         const captureInputs = parsed.schemaVersion === 2
-          ? assignments.map((assignment: CandidateEvidenceAssignment, candidateIndex: number) => {
+          ? assignments.map((_assignment: CandidateEvidenceAssignment, candidateIndex: number) => {
               const candidate = candidatesForBrief.candidates[candidateIndex];
               if (!candidate) throw new Error('OWNER_REVIEW_GENERATED_SOURCE_CANDIDATE_MISSING');
               const slot = manifest.briefs[index]?.candidateSlots.find((item) => item.id === candidate.id);
               if (!slot) throw new Error('OWNER_REVIEW_GENERATED_SLOT_MISSING');
-              return deriveCaptureInputs(candidate, assignment,
+              return observedCaptureInputs(candidate, captured.get(candidatesForBrief.briefId)?.get(candidate.id),
                 slot.ownerEvidence.audioRequirement === 'required');
             })
           : review.evidence!.map((item: ProductionOwnerCaptureInputs, candidateIndex: number) => {
@@ -430,9 +451,13 @@ export function loadProductionOwnerReviewPackage(filePath: string): PreparedProd
               if (!candidate) throw new Error('OWNER_REVIEW_GENERATED_SOURCE_CANDIDATE_MISSING');
               const slot = manifest.briefs[index]?.candidateSlots.find((entry) => entry.id === candidate.id);
               if (!slot) throw new Error('OWNER_REVIEW_GENERATED_SLOT_MISSING');
-              return Object.freeze({ ...item, reviewLimitations:
-                slot.ownerEvidence.audioRequirement === 'required'
-                  ? Object.freeze(['model-review-audio-payload-withheld']) : Object.freeze([]) });
+              // Keep the capturer's own limitations: dropping them would let a
+              // partial capture conclude.
+              return Object.freeze({ ...item, reviewLimitations: Object.freeze([...new Set([
+                ...(item.reviewLimitations ?? []),
+                ...(slot.ownerEvidence.audioRequirement === 'required'
+                  ? ['model-review-audio-payload-withheld'] : []),
+              ])]) });
             });
         const evidence = captureInputs.map((item: ProductionOwnerCaptureInputs, candidateIndex: number) => {
           const candidate = candidatesForBrief.candidates[candidateIndex];

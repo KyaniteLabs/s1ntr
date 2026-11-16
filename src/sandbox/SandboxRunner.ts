@@ -93,6 +93,10 @@ export async function runInSandbox(
     });
 
     const page = await browser.newPage();
+    const thrown: string[] = [];
+    page.on('pageerror', (error) => {
+      thrown.push(error instanceof Error ? error.message : String(error));
+    });
     page.setDefaultTimeout(timeoutMs);
     page.setDefaultNavigationTimeout(timeoutMs);
 
@@ -146,9 +150,16 @@ export async function runInSandbox(
     });
 
     await Promise.race([loadPromise, manualTimeout]);
-    await page.waitForSelector('canvas', { timeout: Math.min(10000, timeoutMs) });
+    try {
+      await page.waitForSelector('canvas', { timeout: Math.min(10000, timeoutMs) });
+    } catch (error) {
+      if (thrown.length > 0) return { completed: false, error: `Sketch threw: ${thrown.join(' | ')}` };
+      throw error;
+    }
     await new Promise((r) => setTimeout(r, 300));
 
+    // A sketch that throws in setup or draw is not a sketch that runs.
+    if (thrown.length > 0) return { completed: false, error: `Sketch threw: ${thrown.join(' | ')}` };
     return { completed: true };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

@@ -321,6 +321,42 @@ describe('production executor authority bootstrap', () => {
     });
   });
 
+  it('classifies a declared MiniMax Token Plan seat as subscription only on the exact endpoint', () => {
+    const plan = 'https://api.minimax.io/anthropic';
+    expect(classifyProviderSurface('minimax', plan, { minimaxTokenPlanSeat: true })).toBe('minimax-token-plan-seat');
+    expect(classifyProviderSurface('minimax', plan + '/', { minimaxTokenPlanSeat: true })).toBe('minimax-token-plan-seat');
+    // Undeclared key on the same host stays metered.
+    expect(classifyProviderSurface('minimax', plan)).toBe('minimax-direct');
+    // Declaration never transfers to another path, host, scheme or provider.
+    expect(classifyProviderSurface('minimax', 'https://api.minimax.io/v1', { minimaxTokenPlanSeat: true })).toBe('minimax-direct');
+    expect(classifyProviderSurface('minimax', 'http://api.minimax.io/anthropic', { minimaxTokenPlanSeat: true })).toBe('minimax-direct');
+    expect(classifyProviderSurface('minimax', 'https://evil.example/anthropic', { minimaxTokenPlanSeat: true })).toBe('unknown');
+    expect(classifyProviderSurface('glm', plan, { minimaxTokenPlanSeat: true })).toBe('unknown');
+    for (const url of ['https://api.minimax.io:8443/anthropic', 'https://api.minimax.io/anthropic/v1',
+      'https://evil.api.minimax.io/anthropic', 'https://api.minimax.io.evil/anthropic']) {
+      expect(classifyProviderSurface('minimax', url, { minimaxTokenPlanSeat: true })).not.toBe('minimax-token-plan-seat');
+    }
+  });
+
+  it('binds the MiniMax Token Plan seat to subscription funding without metered receipts', async () => {
+    const authority = bootstrapExecutorAuthority({ rootDir: root() });
+    const identity = { provider: 'minimax' as const, model: 'minimax-m3',
+      effort: 'high' as const, alias: 'minimax-m3' };
+    const context = {
+      role: 'harness' as const, requestDigest: 'mm-request', routeDigest: 'mm-route',
+      requestedIdentity: identity, resolvedIdentity: identity, phase: 'pre-primary-transport' as const,
+      fallbackOrdinal: 0, retryOrdinal: 0, attemptOrdinal: 0, priorTraceDigest: null,
+      policyTraceDigest: 'mm-policy', fallbackChain: [{ ordinal: 0, identity }],
+      surface: 'minimax-token-plan-seat' as const, seatDigest: 'm'.repeat(64),
+    };
+    const reservation = await authority.reserveAttempt(context);
+    expect(reservation?.subject.funding).toMatchObject({
+      mode: 'subscription-seat', quotaSurface: 'minimax-token-plan-seat',
+    });
+    expect(() => authority.reserveAttempt({ ...context, surface: 'minimax-direct' as const }))
+      .toThrow(/metered funding evidence missing for minimax-direct/);
+  });
+
   it('does not expose a staged receipt until its completion nonce is durably accepted', async () => {
     const directory = root();
     const authority = bootstrapExecutorAuthority({ rootDir: directory });

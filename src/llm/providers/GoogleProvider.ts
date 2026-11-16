@@ -15,7 +15,7 @@ import type {
   ProviderCapabilities,
   StreamEvent,
 } from '../ProviderTypes.js';
-import { BaseProvider } from './BaseProvider.js';
+import { BaseProvider, mapNativeFinishReason } from './BaseProvider.js';
 import { CapabilityRegistry } from '../CapabilityRegistry.js';
 import { TIMEOUT_DEFAULT_MS } from '../../constants/limits.js';
 import { createLLMHttpError, isTransientNetworkError, LLMError } from '../errors.js';
@@ -159,7 +159,7 @@ export class GoogleProvider extends BaseProvider {
         thoughtsTokenCount?: number;
       } | undefined;
 
-      const finishReason = toolCalls.length > 0 ? 'tool_calls' as const : 'stop' as const;
+      const finishReason = mapNativeFinishReason((candidates?.[0] as { finishReason?: unknown } | undefined)?.finishReason, toolCalls.length > 0);
 
       return ok({
         content: content.trim(),
@@ -168,9 +168,9 @@ export class GoogleProvider extends BaseProvider {
           : undefined,
         model: data.modelVersion || this.config.model,
         success: content.trim().length > 0 || toolCalls.length > 0,
-        usage: usageMeta ? {
-          inputTokens: usageMeta.promptTokenCount || 0,
-          outputTokens: usageMeta.candidatesTokenCount || 0,
+        usage: typeof usageMeta?.promptTokenCount === 'number' ? {
+          inputTokens: usageMeta.promptTokenCount,
+          outputTokens: (usageMeta.candidatesTokenCount || 0) + (usageMeta.thoughtsTokenCount || 0),
           thinkingTokens: usageMeta.thoughtsTokenCount,
         } : undefined,
         toolCalls: toolCalls.length > 0 ? toolCalls : undefined,

@@ -37,9 +37,14 @@ export interface RenderEvidence {
     rmsAmplitude?: number;
     error?: string;
     warningCount?: number;
+    /** Deterministic measurements and floor verdict (#1631). */
+    silentShare?: number;
+    loudnessDb?: number;
+    noisiness?: number | null;
+    floorFailure?: string;
   };
   playback?: { controlsAccessible: boolean; started: boolean };
-  interaction?: { actions: number; stateChanged: boolean };
+  interaction?: { actions: number; stateChanged: boolean | null; target?: 'control' | 'canvas-pointer' | 'none' | 'error' };
   video?: {
     fps?: number;
     durationSeconds?: number;
@@ -47,6 +52,8 @@ export interface RenderEvidence {
   timingMs: number;
   infraUnavailable: boolean;
   candidateFailure: boolean;
+  /** Why the candidate failed, e.g. the message it threw. Set with candidateFailure. */
+  failure?: string;
   /** Console logs captured during the render pass (diagnostic evidence). */
   logs?: string[];
   /** Page/console errors captured during the render pass (diagnostic evidence). */

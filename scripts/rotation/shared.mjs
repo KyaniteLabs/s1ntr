@@ -41,7 +41,7 @@ export function normalizeGapClass(value) {
 
 /** Infer gapClass from free-text finding (prefer explicit class at call sites). */
 export function inferGapClassFromMessage(msg) {
-  const s = String(msg || '').toLowerCase();
+  const s = withoutPathTokens(String(msg || '').toLowerCase());
   if (!s) return 'unknown';
   if (
     (s.includes('gemini') && s.includes('kilo'))
@@ -108,6 +108,8 @@ export function usagePresence(tokenUsage, { costUsd = null } = {}) {
   const completion = tokenUsage.completion ?? tokenUsage.output ?? null;
   const total = tokenUsage.total ?? null;
   const present = [prompt, completion, total].some((v) => v != null && !Number.isNaN(Number(v)));
+  // #1656: a partial sum must stay marked partial in the ledger.
+  const hasCalls = typeof tokenUsage.calls === 'number';
   const cost = costUsd ?? tokenUsage.costUsd ?? null;
   const costNum = cost == null || Number.isNaN(Number(cost)) ? null : Number(cost);
   return {
@@ -117,6 +119,10 @@ export function usagePresence(tokenUsage, { costUsd = null } = {}) {
       completion: completion ?? null,
       reasoning: tokenUsage.reasoning ?? null,
       total: total ?? null,
+      ...(hasCalls ? {
+        calls: tokenUsage.calls,
+        callsWithUnknownUsage: typeof tokenUsage.callsWithUnknownUsage === 'number' ? tokenUsage.callsWithUnknownUsage : null,
+      } : {}),
     },
     costUsd: costNum,
     costPresent: costNum != null,
@@ -916,9 +922,13 @@ export function isUnkeyedLocalEndpoint(baseUrl) {
 }
 
 /** Auth / key-class failures — must not be scored as model cantTell skill. */
+function withoutPathTokens(text) {
+  return text.replace(/(^|[\s"'=(,:[{])(?:[a-z][a-z0-9+.-]*:\/\/|~?\.{0,2}\/)[^\s"',)\]}]*/g, '$1 ');
+}
+
 export function isAuthFailureMessage(msg) {
   if (!msg) return false;
-  const s = String(msg).toLowerCase();
+  const s = withoutPathTokens(String(msg).toLowerCase());
   // Keep tight: bare "authentication" matches audit-stance prose and false-trips cantTell paths.
   return (
     /\b401\b/.test(s)
@@ -936,7 +946,13 @@ export function isAuthFailureMessage(msg) {
     || /auth_unavailable/.test(s)
     || /sign in to use this model/.test(s)
     || /no auth available\s*\(providers=/.test(s)
+    || /executor_authority_unavailable/.test(s)
   );
+}
+
+/** A harness call refused by policy before transport (not a credential problem). */
+export function isExecutorBlockMessage(msg) {
+  return /executor blocked before transport/i.test(String(msg || ''));
 }
 
 /**
@@ -995,7 +1011,10 @@ export function preflightLiveSeat(seatRes, { seatRunner = null } = {}) {
     return { ok: false, findings };
   }
   const unkeyedLocal = isUnkeyedLocalEndpoint(seatRes.baseUrl);
-  if (!seatRes.apiKey && !unkeyedLocal) {
+  // cli:// seats (CliProvider: codex / claude) authenticate through the CLI's own login,
+  // so they carry no apiKey. Only exempt them when the provider really is 'cli'.
+  const cliSeat = seatRes.provider === 'cli' && /^cli:\/\//i.test(seatRes.baseUrl);
+  if (!seatRes.apiKey && !unkeyedLocal && !cliSeat) {
     findings.push(
       'INVALID: live remote endpoint without apiKey '
       + `(host=${endpointHostFromUrl(seatRes.baseUrl) || '?'}) — refuse wrong-class/null key packs`,
@@ -1010,6 +1029,11 @@ export function preflightLiveSeat(seatRes, { seatRunner = null } = {}) {
   return { ok: true, findings };
 }
 
+function hasTokenUsage(u) {
+  if (!u) return false;
+  return (u.total || 0) > 0 || (u.prompt || 0) > 0 || (u.completion || 0) > 0;
+}
+
 /**
  * Post-run authenticity: mode=live with ms latency and no tokens is INVALID.
  * Unit tests that inject tokenUsage still pass even with low latency.
@@ -1020,11 +1044,28 @@ export function detectInauthenticLive({ useMock, taskResults = [] } = {}) {
   const authFails = primary.filter(
     (r) => r.verdict === 'auth_invalid' || r.failureClass === 'auth',
   );
+  const refused = primary.filter((r) => authFails.includes(r) || r.failureClass === 'executor-blocked');
+  const refusal = refused.flatMap((r) => r.findings || [])
+    .find((f) => isAuthFailureMessage(f) || isExecutorBlockMessage(f));
+  const refusalNote = refusal ? `: ${String(refusal).slice(0, 240)}` : '';
   if (authFails.length > 0 && authFails.length >= Math.ceil(primary.length / 2)) {
     return {
       invalid: true,
       findings: [
-        `INVALID: majority auth_invalid (${authFails.length}/${primary.length}) — not a model skill measurement`,
+        `INVALID: majority auth_invalid (${authFails.length}/${primary.length}${refusalNote}) — not a model skill measurement`,
+      ],
+    };
+  }
+  const answered = primary.filter(
+    (r) => r.livePath !== 'gap'
+      && !refused.includes(r)
+      && !(r.resumed != null && !hasTokenUsage(r.tokenUsage)),
+  );
+  if (refused.length > 0 && answered.length === 0) {
+    return {
+      invalid: true,
+      findings: [
+        `INVALID: no primary task answered (${refused.length}/${primary.length} refused before transport${refusalNote}) — not a model skill measurement`,
       ],
     };
   }
@@ -1038,11 +1079,7 @@ export function detectInauthenticLive({ useMock, taskResults = [] } = {}) {
   if (withLat.length === 0) return { invalid: false, findings: [] };
   const sorted = withLat.map((r) => r.latencyMs).sort((a, b) => a - b);
   const median = sorted[Math.floor(sorted.length / 2)];
-  const anyTokens = withLat.some((r) => {
-    const u = r.tokenUsage;
-    if (!u) return false;
-    return (u.total || 0) > 0 || (u.prompt || 0) > 0 || (u.completion || 0) > 0;
-  });
+  const anyTokens = withLat.some((r) => hasTokenUsage(r.tokenUsage));
   if (median < 200 && !anyTokens) {
     return {
       invalid: true,

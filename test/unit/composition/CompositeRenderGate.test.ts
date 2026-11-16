@@ -8,6 +8,11 @@ vi.mock('puppeteer', () => ({
   default: { launch: puppeteerMocks.launch },
 }));
 
+const mockResolve = vi.hoisted(() => vi.fn(() => '/opt/chromium' as string | null));
+vi.mock('../../../src/utils/browserAssetFallbacks.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../src/utils/browserAssetFallbacks.js')>()),
+  resolveChromiumExecutablePath: mockResolve,
+}));
 import {
   verdictFromMeasure,
   layersToDemote,
@@ -25,7 +30,9 @@ const measure = (meanLuminance: number, brightFraction = 0.3, darkFraction = 0.1
 describe('CompositeRenderGate', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
     puppeteerMocks.launch.mockReset();
+    mockResolve.mockReturnValue('/opt/chromium');
   });
 
   describe('verdictFromMeasure', () => {
@@ -86,6 +93,7 @@ describe('CompositeRenderGate', () => {
   });
 
   it('measures screenshot pixels and always closes the browser', async () => {
+    vi.stubEnv('LIMINAL_DISABLE_SANDBOX', 'false');
     class FakeImage {
       width = 2;
       height = 1;
@@ -137,6 +145,25 @@ describe('CompositeRenderGate', () => {
     });
     expect(page.setViewport).toHaveBeenCalledWith({ width: 320, height: 240 });
     expect(browser.close).toHaveBeenCalledOnce();
+    // The gate measures what the renderer draws: software WebGL, sandbox on.
+    const { args } = puppeteerMocks.launch.mock.calls[0][0] as { args: string[] };
+    expect(args).toContain('--enable-unsafe-swiftshader');
+    expect(args).not.toContain('--no-sandbox');
+    expect(args.some((arg) => arg.startsWith('--disable-web-security'))).toBe(false);
+  });
+
+  it('launches the resolved Chromium with the gate\'s own args', async () => {
+    puppeteerMocks.launch.mockRejectedValue(new Error('stop'));
+    await expect(measureCompositeHtml('<main/>')).rejects.toThrow('stop');
+    const opts = puppeteerMocks.launch.mock.calls[0][0] as { executablePath: string; args: string[] };
+    expect(opts.executablePath).toBe('/opt/chromium');
+    expect(opts.args).toContain('--enable-unsafe-swiftshader');
+  });
+
+  it('throws the missing-browser error and never launches when nothing resolves', async () => {
+    mockResolve.mockReturnValue(null);
+    await expect(measureCompositeHtml('<main/>')).rejects.toThrow(/Chromium executable not found/);
+    expect(puppeteerMocks.launch).not.toHaveBeenCalled();
   });
 
   describe('gate config', () => {

@@ -1,0 +1,8 @@
+osc(20, 0.06, 1.3)
+  .rotate(shape(3))
+  .scale(1.2)
+  .kaleid(3)
+  .color(0.6, 0.9, 0.8)
+  .modulate(noise(2, 0.3))
+  .add(voronoi(15).diff())
+  .out()

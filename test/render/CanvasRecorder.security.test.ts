@@ -12,6 +12,10 @@ const { mockLaunch, mockRequestHandlers } = vi.hoisted(() => {
   return { mockLaunch, mockRequestHandlers };
 });
 
+vi.mock('../../src/utils/browserAssetFallbacks.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/utils/browserAssetFallbacks.js')>()),
+  resolveChromiumExecutablePath: () => '/opt/chromium',
+}));
 vi.mock('puppeteer', () => ({
   default: { launch: mockLaunch },
 }));

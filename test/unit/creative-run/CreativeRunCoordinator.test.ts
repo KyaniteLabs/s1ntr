@@ -380,7 +380,7 @@ describe('CreativeRunCoordinator', () => {
     expect(result.creativeThesis?.thesisId).toBe(thesis.thesisId);
     expect(result.layers[1].artifactHtml).toContain(thesis.thesisId);
     expect(result.audioEvidence?.[0].provenance.thesisId).toBe(thesis.thesisId);
-  });
+  }, 30_000); // whole-pipeline test: 5 s default timed out on the public runner (db1b666)
 
   it('rejects an invalid graph before reserving provider spend', async () => {
     const reserve = vi.fn(async () => ({ id: 'must-not-reserve', status: 'reserved' as const }));

@@ -18,7 +18,7 @@ describe('CLI transport abort', () => {
     try {
       const executable = path.join(directory, 'codex-fixture');
       const argsFile = path.join(directory, 'args');
-      await writeFile(executable, '#!/bin/sh\nprintf "%s\\n" "$@" > "$SINTER_CODEX_ARGV_FILE"\nprintf "art"\n');
+      await writeFile(executable, `#!/bin/sh\nprintf "%s\\n" "$@" > "$SINTER_CODEX_ARGV_FILE"\nprintf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"art"}}'\n`);
       await chmod(executable, 0o700);
       process.env.CODEX_BIN = executable;
       process.env.SINTER_CODEX_ARGV_FILE = argsFile;
@@ -28,7 +28,9 @@ describe('CLI transport abort', () => {
       expect(result.isOk() && result.value.content).toBe('art');
       expect((await readFile(argsFile, 'utf8')).trim().split('\n')).toEqual([
         'exec', '-m', 'gpt-5.6-terra', '-c', 'model_reasoning_effort=low',
-        '--skip-git-repo-check', '--sandbox', 'read-only', 'art',
+        '--skip-git-repo-check', '--sandbox', 'read-only', '--ephemeral',
+        '--json', '--disable', 'multi_agent', '--disable', 'apps', '--disable', 'plugins',
+        '--disable', 'memories', '--disable', 'hooks', 'art',
       ]);
       process.env.SINTER_CODEX_REASONING_EFFORT = 'invalid';
       expect((await provider.run({ systemPrompt: '', userPrompt: 'art' } as ProviderRequest)).isErr()).toBe(true);

@@ -7,6 +7,7 @@
 
 import { TierBasedGenerator, type TierBasedGeneratorOptions } from '../TierBasedGenerator.js';
 import { ASCIIValidator } from '../../core/validators/ASCIIValidator.js';
+import { answerCode, withoutThinkTags } from '../../llm/ModelOutput.js';
 
 export type ASCIIStyle = 'simple' | 'landscape' | 'abstract';
 
@@ -71,12 +72,10 @@ export class ASCIIArtGenerator extends TierBasedGenerator {
   private formatASCII(code: string, width: number, height: number): string {
     // The charset prompt rule alone fails ~2x/night (the model reaches for
     // ◈/◉/◡-class glyphs); rewrite deterministically instead of discarding.
-    code = ASCIIValidator.sanitize(code);
+    code = ASCIIValidator.sanitize(answerCode(code));
     const lines = code.split('\n').filter(line => line.trim() !== '');
-    
-    // Remove code block markers if present
+
     const cleanLines = lines
-      .filter(line => !line.startsWith('```'))
       .filter(line => !line.startsWith('//'))
       .slice(0, height)
       .map(line => line.slice(0, width).padEnd(width, ' '));
@@ -131,7 +130,7 @@ export class ASCIIArtGenerator extends TierBasedGenerator {
       return quotedArtLines.slice(-height).join('\n');
     }
 
-    const withoutThink = text.replace(/<\/?think[^>]*>/gi, '');
+    const withoutThink = withoutThinkTags(text);
     const candidateLines = withoutThink
       .split('\n')
       .map(line => line.replace(/^\s*(?:Line\s*)?\d+\s*:\s*/i, '').replace(/^["'`]|["'`]$/g, ''))

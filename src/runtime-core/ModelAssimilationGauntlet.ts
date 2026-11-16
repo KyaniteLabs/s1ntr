@@ -3,6 +3,7 @@ import path from 'node:path';
 import { buildGenerationAttemptEventV1 } from '../telemetry/generationAttemptEvent.js';
 import { FileGenerationAttemptPersistence, GenerationAttemptLedger } from
   './generationAttemptSink.js';
+import { answerJson } from '../llm/ModelOutput.js';
 
 export interface ModelAssimilationCheck {
   id: string;
@@ -208,7 +209,7 @@ interface ParsedAuditionToolCall {
 
 /** Extract the first JSON object from a model response, tolerating stray prose/fences. */
 function extractJsonObject(text: string): ParsedAuditionToolCall | null {
-  const trimmed = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+  const trimmed = answerJson(text);
   const start = trimmed.indexOf('{');
   const end = trimmed.lastIndexOf('}');
   if (start === -1 || end === -1 || end <= start) return null;

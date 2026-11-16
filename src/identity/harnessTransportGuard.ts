@@ -215,7 +215,8 @@ export class HarnessTransportGuard {
    * {@link admitPersistedCompletionNow} before acting on a completion (#1312).
    */
   verifyPersistedCompletion(attestation: ExecutorAttestationV2 | ExecutorAttestationV3) {
-    return verifyExecutorAttestation(this.#registry, attestation, attestation.subject.issuedAt);
+    return verifyExecutorAttestation(this.#registry, attestation, attestation.subject.issuedAt,
+      { historical: true });
   }
 
   /**

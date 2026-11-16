@@ -49,7 +49,7 @@ Sinter saves generated files under `~/.sinter/output` by default. Pass `--output
 - `sinter provider help` explains provider setup; `sinter provider list` lists configured provider types.
 - `sinter list` lists saved sketches.
 
-See the full [CLI reference](docs/cli-reference.md) and [getting-started guide](docs/getting-started.md) for command syntax.
+See the full [CLI reference](https://docs.s1ntr.com/cli) and [getting-started guide](https://docs.s1ntr.com/guide) for command syntax.
 
 ## Creative domains
 
@@ -93,7 +93,7 @@ pnpm proof:live-creative-domains -- --provider=glm --all --timeout-ms=120000 --o
 sinter market status
 ```
 
-Expected current result: `sinter market status` prints the release-truth report as JSON and exits 0 only when `ownerReleaseReady` is true (otherwise 2). The current launch-candidate proof also includes Studio p5 generation, same-screen preview, revision, microphone preview smoke, and permission-denied UX receipts summarized in `docs/launch/launch-candidate-2026-04-30.md`. Strudel patterns are saved with an external playback link, Tone.js saves playable HTML, HyperFrames saves HTML/GSAP composition artifacts, and Revideo saves composition source/HTML; mp4 export is attempted as a non-blocking video artifact and should be checked explicitly when a rendered file is required. Passing the smoke steps above does not by itself establish launch approval — launch readiness is tracked separately in [`docs/launch/launch-decision-packet-2026-09.md`](./docs/launch/launch-decision-packet-2026-09.md).
+Expected current result: `sinter market status` prints the release-truth report as JSON and exits 0 only when `ownerReleaseReady` is true (otherwise 2). Strudel patterns are saved with an external playback link, Tone.js saves playable HTML, HyperFrames saves HTML/GSAP composition artifacts, and Revideo saves composition source/HTML; mp4 export is attempted as a non-blocking video artifact and should be checked explicitly when a rendered file is required.
 
 ## Local models
 
@@ -111,8 +111,8 @@ When you run `sinter` in a folder with a `.env` file, Sinter reads only API keys
 
 ## Where to go next
 
-- [Getting started](docs/getting-started.md): configure a provider, generate a piece, and open its preview.
-- [CLI reference](docs/cli-reference.md): commands and flags parsed by the current CLI.
-- [Documentation index](docs/README.md): current core docs and historical material.
-- [Composition API](docs/composition-api.md): composition input and output formats.
+- [Getting started](https://docs.s1ntr.com/guide): configure a provider, code your first piece, and open its preview.
+- [CLI reference](https://docs.s1ntr.com/cli): commands and flags parsed by the current CLI.
+- [Handbook](https://docs.s1ntr.com/): the full documentation.
+- [Mediums](https://docs.s1ntr.com/mediums): every medium S1NTR codes in.
 - [Changelog](CHANGELOG.md): release history.

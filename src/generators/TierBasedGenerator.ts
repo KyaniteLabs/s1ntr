@@ -33,6 +33,7 @@ import { EmptyArtifactFailure, type EmptyArtifactMetadata } from '../runtime-cor
 import { randomUUID } from 'node:crypto';
 import { sha256Hex } from '../identity/hostAdapterRegistry.js';
 import type { ExecutorAttestationRef } from '../identity/harnessTransportGuard.js';
+import { answerCode } from '../llm/ModelOutput.js';
 
 /**
  * Sum signed `durationMs` across the refs produced for one logical provider
@@ -793,10 +794,7 @@ export abstract class TierBasedGenerator {
   }
 
   private normalizeGeneratedContent(content: string): string {
-    let clean = (content ?? '').replace(/<think\b[^>]*>[\s\S]*?<\/think>/gi, '');
-    const markdownMatch = clean.match(/```(?:\w+)?\n([\s\S]*?)```/);
-    if (markdownMatch) clean = markdownMatch[1].trim();
-    return clean.trim();
+    return answerCode(content ?? '').trim();
   }
 
   private isStructurallyComplete(code: string): boolean {
@@ -838,6 +836,8 @@ export abstract class TierBasedGenerator {
       `Validation error: ${errorMessage}\n` +
       `Failure classification: ${failure.failureClass}\n\n` +
       `${repairPrompt}\n\n` +
+      // The reply replaces failedCode whole, so the model must see what it repairs.
+      `Previous output (failed):\n${failedCode}\n\n` +
       `Original prompt: ${originalPrompt}`;
 
     const recoveryResult = await this.llm.generateWithToolLoop({

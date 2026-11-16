@@ -117,7 +117,7 @@ stack(
     .resonance(10),
   s("~ cp").gain(0.7)
 )
-.bpm(130)
+.cpm(32)
       `;
 
       const result = StrudelValidator.validate(code);

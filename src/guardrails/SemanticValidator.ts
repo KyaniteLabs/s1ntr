@@ -13,6 +13,7 @@
 import { LLMClient } from '../llm/LLMClient.js';
 import { formatError } from '../utils/errors.js';
 import { Logger } from '../utils/Logger.js';
+import { answerJson } from '../llm/ModelOutput.js';
 
 export interface SemanticValidationResult {
   aligned: boolean;
@@ -91,13 +92,7 @@ Does the code match the user's request? Analyze and return JSON.`;
         };
       }
 
-      // Extract JSON from response (handle markdown code blocks)
-      const jsonMatch = response.code.match(/```json\s*([\s\S]*?)```/) || 
-                        response.code.match(/```\s*([\s\S]*?)```/) ||
-                        [null, response.code];
-      
-      const jsonStr = jsonMatch[1]?.trim() || response.code.trim();
-      const result = JSON.parse(jsonStr);
+      const result = JSON.parse(answerJson(response.code));
 
       return {
         aligned: result.aligned === true && result.score >= this.threshold,

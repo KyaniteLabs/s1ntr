@@ -15,7 +15,7 @@ export interface DreamObservedEvidence {
   pixelFrames: readonly Readonly<{ mimeType: string; dataBase64: string; digest: string }>[];
   temporalSamples: readonly string[];
   audio?: { controlsAccessible: boolean; started: boolean; peakAmplitude: number };
-  interaction?: { actions: number; stateChanged: boolean };
+  interaction?: { actions: number; stateChanged: boolean | null };
   layerAblations?: readonly string[];
   /** Host-signed only when the production authority is configured for restart recovery. */
   durableAttestation?: string;
@@ -106,10 +106,12 @@ export function validateDreamEvidence(evidence: DreamObservedEvidence,
       failures.push('DREAM_AUDIO_SIGNAL_REQUIRED');
     }
   }
-  if (required.includes('interaction')
-    && !(evidence.interaction && evidence.interaction.actions > 0
-      && evidence.interaction.stateChanged)) {
-    failures.push('DREAM_INTERACTION_EVIDENCE_REQUIRED');
+  if (required.includes('interaction')) {
+    if (evidence.interaction?.actions && evidence.interaction.stateChanged === null) {
+      failures.push('DREAM_INTERACTION_UNATTRIBUTABLE');
+    } else if (!(evidence.interaction?.actions && evidence.interaction.stateChanged)) {
+      failures.push('DREAM_INTERACTION_EVIDENCE_REQUIRED');
+    }
   }
   if (required.includes('multi-layer') && !evidence.layerAblations?.length) {
     failures.push('DREAM_LAYER_ABLATION_REQUIRED');

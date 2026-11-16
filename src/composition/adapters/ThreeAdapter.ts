@@ -25,6 +25,7 @@ import { getWebGLBlendFunc } from '../utils/blendModes.js';
 import { VENDOR_ASSETS } from '../../utils/vendorAssets.js';
 import { Logger } from '../../utils/Logger.js';
 import { compileGeneratedCode } from '../../guardrails/GeneratedCodeGuard.js';
+import { scriptSafe } from '../../utils/scriptEmbed.js';
 
 /** Three.js Scene type (simplified) */
 interface THREEScene {
@@ -427,7 +428,7 @@ export class ThreeAdapter implements LayerAdapter {
   container.style.opacity = ${layer.config.opacity};
 ${transparentStyle}${blendStyle}  document.getElementById('composition').appendChild(container);
 
-${layer.code.split('\n').map(line => '  ' + line).join('\n')}
+${scriptSafe(layer.code).split('\n').map(line => '  ' + line).join('\n')}
 })();
 </script>`;
   }

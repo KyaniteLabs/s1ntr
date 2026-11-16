@@ -6,6 +6,11 @@ const { mockLaunch, mockNewContext } = vi.hoisted(() => {
   return { mockLaunch, mockNewContext };
 });
 
+vi.mock('../../src/utils/browserAssetFallbacks.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/utils/browserAssetFallbacks.js')>()),
+  resolveChromiumExecutablePath: () => '/opt/chromium',
+}));
+
 vi.mock('playwright', () => ({
   chromium: {
     launch: mockLaunch,

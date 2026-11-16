@@ -46,6 +46,7 @@ function repository(): string {
   fixtureGit(root, ['config', 'core.hooksPath', '']);
   fixtureGit(root, ['config', 'user.email', 'test@example.com']);
   fixtureGit(root, ['config', 'user.name', 'Test']);
+  fixtureGit(root, ['config', 'commit.gpgsign', 'false']); // fixture commits must not depend on the host's signing setup
   for (const command of FIXED_ULTRAQA_COMMANDS.filter(command => !command.artifactRoots.some(item => item.startsWith('.quality/')))) materializeArtifacts(root, command);
   fixtureGit(root, ['add', '.']); fixtureGit(root, ['commit', '-qm', 'fixture']);
   return root;

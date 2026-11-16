@@ -955,6 +955,7 @@ describe('LLMModeAgent', () => {
 
     expect(mockWriteFile.execute).toHaveBeenCalledWith(expect.objectContaining({
       path: '.omx/proof/operator-trust-proof-20260418.md',
+      content: 'proof',
     }));
     expect(session.status).toBe(Status.SUCCESS);
   });
@@ -1075,6 +1076,50 @@ describe('LLMModeAgent', () => {
     expect(mockRunTests.execute).toHaveBeenCalledWith({ pattern: 'runtime-core' });
     expect(mockRunBuild.execute).not.toHaveBeenCalled();
     expect(session.status).toBe(Status.SUCCESS);
+  });
+
+  it('sums the reported usage of every planning call and counts calls with none', async () => {
+    mockComplete
+      .mockResolvedValueOnce({ text: 'not json', usage: { inputTokens: 100, outputTokens: 7, thinkingTokens: 3 } })
+      .mockResolvedValue({ text: 'not json' });
+    const agent = new LLMModeAgent(mockLLM as any);
+    const session = await agent.executeTask({
+      id: 't-usage', title: 'Fix', description: 'desc', approved: true,
+    });
+    const calls = mockComplete.mock.calls.length;
+    expect(calls).toBeGreaterThan(1);
+    expect(session.llmUsage).toEqual({
+      prompt: 100, completion: 7, reasoning: 3, total: 107, calls, callsWithUnknownUsage: calls - 1,
+    });
+  });
+
+  it('reports reasoning as unknown, not 0, when no call reported thinking, and a half-reported call as unknown', async () => {
+    mockComplete
+      .mockResolvedValueOnce({ text: 'not json', usage: { inputTokens: 50, outputTokens: 5 } })
+      .mockResolvedValueOnce({ text: 'not json', usage: { inputTokens: 40 } })
+      .mockResolvedValue({ text: 'not json' });
+    const agent = new LLMModeAgent(mockLLM as any);
+    const session = await agent.executeTask({
+      id: 't-usage-partial', title: 'Fix', description: 'desc', approved: true,
+    });
+    const calls = mockComplete.mock.calls.length;
+    expect(session.llmUsage).toEqual({
+      prompt: 50, completion: 5, reasoning: null, total: 55, calls, callsWithUnknownUsage: calls - 1,
+    });
+  });
+
+  it('counts a planning call that throws as a call with unknown usage', async () => {
+    mockComplete
+      .mockResolvedValueOnce({ text: 'not json', usage: { inputTokens: 10, outputTokens: 2 } })
+      .mockRejectedValue(new Error('boom'));
+    const agent = new LLMModeAgent(mockLLM as any);
+    const session = await agent.executeTask({
+      id: 't-usage-throw', title: 'Fix', description: 'desc', approved: true,
+    }).catch(() => undefined);
+    const usage = (session ?? (agent as any).currentSession)?.llmUsage;
+    expect(usage.calls).toBe(mockComplete.mock.calls.length);
+    expect(usage.callsWithUnknownUsage).toBeGreaterThan(0);
+    expect(usage.callsWithUnknownUsage).toBe(usage.calls - 1);
   });
 
   it('executeTask calls llmClient.complete with conversation context', async () => {
@@ -1291,6 +1336,76 @@ describe('LLMModeAgent', () => {
     expect(session.backups).toHaveLength(0);
     expect(session.status).toBe(Status.SUCCESS);
     expect(['bounded-no-change', 'bounded-inspection']).toContain(session.exitReason);
+  });
+
+  it('tells bounded runs their step budget and edit deadline up front', async () => {
+    queuePlans('{"tool":"readFile","params":{"path":"src/foo.ts"},"thought":"inspect"}');
+
+    const agent = new LLMModeAgent(mockLLM as any);
+    await agent.executeTask({
+      id: 'tui-self-budget-prompt', title: 'Budget prompt', description: 'desc', approved: true, maxSteps: 8,
+      requiresMutation: true,
+    });
+    const bounded = mockComplete.mock.calls[0][0].prompt as string;
+    expect(bounded).toContain('Step budget: 8 steps. If no applyEdit/writeFile has landed by step 4, the run stops there and fails.');
+
+    mockComplete.mockReset();
+    queuePlans('{"tool":"readFile","params":{"path":"src/foo.ts"},"thought":"inspect"}');
+    await agent.executeTask({
+      id: 'verify-only', title: 'Verify', description: 'desc', approved: true, maxSteps: 8,
+      completionPolicy: 'stop_after_verification',
+    });
+    const inspectOnly = mockComplete.mock.calls[0][0].prompt as string;
+    expect(inspectOnly).toContain('With no edit, the run ends after step 4; no edit is a valid outcome');
+    expect(inspectOnly).not.toContain('edit early');
+
+    mockComplete.mockReset();
+    queuePlans('{"tool":"readFile","params":{"path":"src/foo.ts"},"thought":"inspect"}');
+    await agent.executeTask({ id: 't-open-ended', title: 'Open', description: 'desc', approved: true, maxSteps: 1 });
+    expect(mockComplete.mock.calls[0][0].prompt as string).not.toContain('Step budget:');
+  });
+
+  it('warns a bounded run once before the no-edit guardrail ends it', async () => {
+    queuePlans(
+      '{"tool":"readFile","params":{"path":"src/a.ts"},"thought":"inspect"}',
+      '{"tool":"readFile","params":{"path":"src/b.ts"},"thought":"inspect"}',
+      '{"tool":"readFile","params":{"path":"src/c.ts"},"thought":"inspect"}',
+      '{"tool":"readFile","params":{"path":"src/d.ts"},"thought":"inspect"}',
+    );
+
+    const agent = new LLMModeAgent(mockLLM as any);
+    const session = await agent.executeTask({
+      id: 'tui-self-edit-deadline', title: 'Edit deadline', description: 'desc', approved: true, maxSteps: 8,
+      requiresMutation: true,
+    });
+
+    const warnings = session.messages.filter((m) => typeof m.content === 'string' && m.content.includes('EDIT DEADLINE'));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0].content).toContain('(step 2/8)');
+    expect(warnings[0].content).toContain('This run stops after step 4 unless one does: 3 planning steps left');
+    expect(session.exitReason).toBe('bounded-no-mutation');
+  });
+
+  it('does not tell a run to stop inspecting before it has read anything, or when no edit is required', async () => {
+    const reads = (n: number) => Array.from({ length: n }, (_, i) =>
+      `{"tool":"readFile","params":{"path":"src/f${i}.ts"},"thought":"inspect"}`);
+    const deadlines = (s: { messages: Array<{ content: unknown }> }) =>
+      s.messages.filter((m) => typeof m.content === 'string' && m.content.includes('EDIT DEADLINE'));
+    const agent = new LLMModeAgent(mockLLM as any);
+
+    queuePlans(...reads(4));
+    const small = await agent.executeTask({
+      id: 'tui-self-small', title: 'Small', description: 'desc', approved: true, maxSteps: 4, requiresMutation: true,
+    });
+    expect(deadlines(small).map((m) => String(m.content).match(/\(step (\d+)\//)?.[1])).toEqual(['2']);
+
+    mockComplete.mockReset();
+    queuePlans(...reads(8));
+    const optional = await agent.executeTask({
+      id: 'tui-self-optional', title: 'Optional', description: 'desc', approved: true, maxSteps: 8,
+    });
+    expect(deadlines(optional)).toHaveLength(0);
+    expect(optional.exitReason).toBe('bounded-inspection');
   });
 
   it('tells requiresMutation tasks that inspection-only completion is a failure', async () => {

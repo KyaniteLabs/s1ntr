@@ -307,7 +307,19 @@ describe('GeneratorHarnessTools', () => {
         evidence: 'Unclosed brace',
       };
       const prompt = tools.buildRepairPrompt('glsl', 'fragment shader', 'void main() {', failure);
-      assertRepairPrompt(prompt, 'CONTINUE');
+      assertRepairPrompt(prompt, 'REGENERATE the complete glsl artifact');
+    });
+
+    // The recovery reply replaces the failed code whole (TierBasedGenerator.attemptRecovery),
+    // so no template may ask for a tail, continuation or section only.
+    it('every repair template asks for a complete artifact, never a fragment', () => {
+      const classes = ['wrong_domain', 'missing_required_api', 'too_short', 'truncated',
+        'empty_after_reasoning_strip', 'wrapper_contract_mismatch', 'runtime_error', 'unknown'] as const;
+      for (const failureClass of classes) {
+        const prompt = tools.buildRepairPrompt('tone', 'synth', 'code', { failureClass, evidence: 'x' });
+        expect(prompt, failureClass).not.toMatch(/missing tail|only the continuation|CONTINUE from|version of the failing section\./i);
+        expect(prompt, failureClass).toMatch(/complete|REGENERATE|whole/i);
+      }
     });
 
     it('returns non-empty repair prompt for empty_after_reasoning_strip', () => {
@@ -643,11 +655,11 @@ describe('GeneratorHarnessTools', () => {
       }
     });
 
-    it('Strudel skeleton contains stack and .out()', () => {
+    it('Strudel skeleton ends in a bare stack, never .out() (silences a pattern)', () => {
       const ctx = tools.prepare('strudel');
       if (ctx.skeletonHint) {
         expect(ctx.skeletonHint).toContain('stack');
-        expect(ctx.skeletonHint).toContain('.out()');
+        expect(ctx.skeletonHint).not.toMatch(/\)\.out\(\)/);
       }
     });
 

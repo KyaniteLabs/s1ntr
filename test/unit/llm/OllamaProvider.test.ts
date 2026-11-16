@@ -304,7 +304,7 @@ describe('OllamaProvider — Native Mode (no /v1 suffix)', () => {
   });
 
   it('falls back to stripThinkTags when response contains <think in content', async () => {
-    mockFetchResponse({ response: '<think type="reasoning">thoughts</thinkactual output' });
+    mockFetchResponse({ response: '<think type="reasoning">thoughts</think>actual output' });
     mockNormalizeThinking.mockReturnValue({ source: 'none', text: '' });
     mockStripThinkTags.mockReturnValue({
       content: 'actual output',

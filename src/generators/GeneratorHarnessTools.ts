@@ -115,8 +115,8 @@ Tone.Transport.start();`,
 stack(
   s("bd cp:2 ~ hh").swing(0.1),
   note("C4 ~ D4 E4 ~").swing(0.1)
-).out()`,
-    requiredApis: ['stack', 's(', 'sound(', 'note(', '.out()', 'slow(', 'fast(', 'gain', '.delay(', '.room(', '.pan('],
+)`,
+    requiredApis: ['stack', 's(', 'sound(', 'note(', 'slow(', 'fast(', 'gain', '.delay(', '.room(', '.pan('],
     shapeNotes: 'Strudel REPL pattern with stack + sound/note calls',
   },
   {
@@ -202,6 +202,60 @@ export default makeScene2D('TypingScene', function* (view) {
     requiredApis: ['makeScene2D', 'createRef', 'waitFor', '@revideo/core', '@revideo/2d', 'Txt', 'Rect', 'view.add', 'yield*'],
     shapeNotes: 'Revideo makeScene2D(name, function* (view) { view.add(...); yield* ... }) scene',
   },
+  {
+    domain: 'hyperframes',
+    skeletonText: `<!doctype html>
+<html>
+<head>
+<script src="/vendor/gsap/3.15.0/gsap.min.js"></script>
+<style>html,body{margin:0;width:100%;height:100%;background:#05060a;overflow:hidden}
+.stage{position:absolute;inset:0}.shape{position:absolute;left:45%;top:45%;width:10%;height:10%;background:#9b8cff}</style>
+</head>
+<body>
+<div class="stage" data-composition-id="main" data-width="1920" data-height="1080" data-duration="8">
+  <div class="clip shape" data-start="0" data-duration="8"></div>
+</div>
+<script>
+const tl = gsap.timeline({ paused: true });
+tl.from('.shape', { scale: 0, opacity: 0, duration: 1.5, ease: 'power2.out' })
+  .to('.shape', { rotation: 180, x: 200, duration: 3, ease: 'sine.inOut' });
+window.__timelines = { main: tl };
+</script>
+</body>
+</html>`,
+    requiredApis: ['data-composition-id', 'class="clip"', 'gsap.timeline', 'tl.to', 'tl.from', 'window.__timelines', '/vendor/gsap/3.15.0/gsap.min.js'],
+    shapeNotes: 'one HTML page: a data-composition-id="main" root with class="clip" elements, a paused gsap.timeline registered on window.__timelines',
+  },
+  {
+    domain: 'hydra',
+    skeletonText: `// Hydra video synth skeleton -- globals only, no imports, one chain ending in .out()
+osc(12, 0.08, 1.4)
+  .rotate(() => time * 0.05)
+  .modulate(noise(3, 0.2), 0.15)
+  .kaleid(5)
+  .color(0.7, 0.5, 1.0)
+  .out()`,
+    requiredApis: ['osc(', 'noise(', 'shape(', 'voronoi(', '.rotate(', '.modulate(', '.kaleid(', '.color(', '.out()'],
+    shapeNotes: 'Hydra source -> transforms -> .out(); globals, no import or export',
+  },
+  {
+    domain: 'p5',
+    skeletonText: `// p5.js sketch skeleton -- global mode, no imports
+function setup() {
+  createCanvas(800, 600);
+  noStroke();
+}
+function draw() {
+  background(5, 6, 10, 40);
+  const t = frameCount * 0.01;
+  for (let i = 0; i < 12; i++) {
+    fill(155, 140, 255, 160);
+    circle(width / 2 + cos(t + i) * 200, height / 2 + sin(t * 1.3 + i) * 150, 24);
+  }
+}`,
+    requiredApis: ['function setup', 'createCanvas', 'function draw', 'background', 'frameCount', 'noise(', 'fill', 'circle'],
+    shapeNotes: 'p5 global mode: setup() with createCanvas, draw() loop',
+  },
 ];
 
 const DOMAIN_API_VOCAB: DomainApiVocab[] = [
@@ -212,7 +266,7 @@ const DOMAIN_API_VOCAB: DomainApiVocab[] = [
   },
   {
     domain: 'strudel',
-    apis: ['stack(', 's(', 'sound(', 'note(', '.out()', '.slow(', '.fast(', '.gain(', '.delay(', '.room(', '.pan(', '.cutoff(', '.resonance(', '.attack(', '.decay(', '.sustain(', '.release(', '.every(', '.cat(', '.seq(', '.struct(', '// $:'],
+    apis: ['stack(', 's(', 'sound(', 'note(', '.slow(', '.fast(', '.gain(', '.delay(', '.room(', '.pan(', '.cutoff(', '.resonance(', '.attack(', '.decay(', '.sustain(', '.release(', '.every(', '.cat(', '.seq(', '.struct(', '// $:'],
     contaminationDomains: ['TidalCycles', 'SuperDirt', 'hydra', 'p5.sound'],
   },
   {
@@ -269,7 +323,7 @@ const HARDENING_HINTS: HardeningHint[] = [
   { id: 'tone_transport_pattern', text: 'Use Tone.Transport.scheduleRepeat or Tone.Sequence for rhythmic patterns. Do not use Tone.start() without Transport.', domains: ['tone'] },
   { id: 'tone_synth_chain', text: 'Chain: Synth -> Channel/Effects -> toDestination(). Include Tone.Transport.start().', domains: ['tone'] },
   { id: 'hydra_api_constraints', text: 'Hydra has NO .sin()/.cos()/.sqrt()/.pow()/.feedback() methods — never call JS math on sources. Build visuals from osc()/noise()/shape()/gradient() chained with .rotate()/.scale()/.modulate()/.kaleid()/.repeat()/.color(); math-like shaping via .mult()/.add() with other sources. ALWAYS end the chain with .out().', domains: ['hydra'] },
-  { id: 'strudel_stack', text: 'Wrap patterns in stack() to combine multiple voices. Use .out() at the end.', domains: ['strudel'] },
+  { id: 'strudel_stack', text: 'Wrap patterns in stack() to combine multiple voices. End with the bare stack(...) expression: no .out() (that is a Kabelsalat signal method; on a pattern it routes the sound away and the piece plays silence).', domains: ['strudel'] },
   { id: 'strudel_sound_note', text: 'Use s() for samples and note() for synthesized notes.', domains: ['strudel'] },
   { id: 'strudel_pattern_strings', text: 'Pass quoted pattern strings to s(), sound(), and note() — never raw numbers like s(100).', domains: ['strudel'] },
   { id: 'strudel_complete_structure', text: 'If you open stack(, close it and include complete child patterns; do not leave truncated stack(...) output.', domains: ['strudel'] },
@@ -302,15 +356,15 @@ const REPAIR_PROMPT_TEMPLATES: RepairPromptTemplate[] = [
   },
   {
     failureClass: 'missing_required_api',
-    template: 'The output is missing required API tokens for this domain.\nPATCH or REGENERATE using these required APIs: {requiredApis}\nKeep the same intent and structure, but ensure at least 2 of these APIs appear in the output.\nOutput only raw code, no prose.',
+    template: 'The output is missing required API tokens for this domain.\nPATCH or REGENERATE using these required APIs: {requiredApis}\nKeep the same intent and structure, but ensure at least 2 of these APIs appear in the output.\nOutput the complete artifact as raw code, no prose.',
   },
   {
     failureClass: 'too_short',
-    template: 'The output is too short to be a complete {domain} artifact.\nEXPAND while preserving the domain and intent.\nAdd more content: fuller implementation, more detail, more complete structure.\nOutput only the expanded code, no prose.',
+    template: 'The output is too short to be a complete {domain} artifact.\nEXPAND while preserving the domain and intent.\nAdd more content: fuller implementation, more detail, more complete structure.\nOutput the complete expanded artifact code, no prose.',
   },
   {
     failureClass: 'truncated',
-    template: 'The output appears to be truncated (unclosed braces, incomplete expression, or missing trailing characters).\nCONTINUE from the exact last character. Return ONLY the missing tail -- do not repeat any existing code.\nOutput only the continuation, no markdown fences.',
+    template: 'The output appears to be truncated (unclosed braces, incomplete expression, or missing trailing characters), most often because it hit the output token limit.\nREGENERATE the complete {domain} artifact from its first line, more compact so it fits: fewer lines, no comments, no repeated blocks.\nNever output a continuation or a fragment; the reply code replaces the previous output whole. No markdown fences.',
   },
   {
     failureClass: 'empty_after_reasoning_strip',
@@ -322,7 +376,7 @@ const REPAIR_PROMPT_TEMPLATES: RepairPromptTemplate[] = [
   },
   {
     failureClass: 'runtime_error',
-    template: 'The output caused a runtime or compile error.\nMINIMAL REPAIR: include the exact error message and provide a corrected version of the failing section.\nError: {runtimeError}\nOutput only the corrected code, no explanation.',
+    template: 'The output caused a runtime or compile error.\nMINIMAL REPAIR: fix the failing section and keep everything else as it was.\nError: {runtimeError}\nOutput the complete corrected artifact code, not just the changed section; the reply replaces the previous output whole. No explanation.',
   },
   {
     failureClass: 'unknown',
@@ -336,7 +390,7 @@ const REPAIR_PROMPT_TEMPLATES: RepairPromptTemplate[] = [
 
 const WRAPPER_CONTRACTS: Record<string, string> = {
   tone: 'Complete HTML page with Tone.js loaded via CDN, synth/pattern code in a <script type="module">, audio-playing pattern.',
-  strudel: 'Complete HTML page with Strudel REPL loaded via CDN, pattern code calling .out() in a <script type="module">.',
+  strudel: 'Complete HTML page with Strudel REPL loaded via CDN, pattern code ending in a bare stack(...) (no .out()) in a <script type="module">.',
   ascii: 'Raw fixed-width ASCII art text only -- no HTML, no code fences, no markdown.',
   three: 'Raw Three.js scene JavaScript only; the gallery wrapper injects the HTML shell, module script, and Three.js CDN. Do not return <!DOCTYPE html>, <html>, <script>, import maps, or import statements.',
   glsl: 'GLSL fragment shader code only (precision + uniforms + main or mainImage), no HTML wrapper.',
@@ -350,6 +404,22 @@ const WRAPPER_CONTRACTS: Record<string, string> = {
 // ---------------------------------------------------------------------------
 // GeneratorHarnessTools
 // ---------------------------------------------------------------------------
+
+/**
+ * The full, unsampled scaffold for a domain: a skeleton that passes the domain's own gate,
+ * its API vocabulary and every static hardening rule. External harnesses (the LFM3 shard
+ * worker) read this so a rule hardened here reaches every model that writes for sinter.
+ */
+export function domainScaffold(domain: string): { skeleton: string; apis: string[]; rules: string[] } | null {
+  const d = domain === 'shader' ? 'glsl' : domain;
+  const skeleton = PILOT_DOMAINS.find(s => s.domain === d);
+  if (!skeleton) return null;
+  return {
+    skeleton: skeleton.skeletonText,
+    apis: [...(DOMAIN_API_VOCAB.find(v => v.domain === d)?.apis ?? [])],
+    rules: HARDENING_HINTS.filter(h => h.domains === 'all' || h.domains.includes(d)).map(h => h.text),
+  };
+}
 
 export interface GeneratorHarnessContext {
   domain: string;

@@ -44,6 +44,66 @@ describe('Liminal production effects', () => {
     expect(close).not.toHaveBeenCalled();
   });
 
+  it.each(['tone', 'strudel', 'p5'])('asks the renderer for a 10 s judging window of sound (%s)', async (domain) => {
+    const playable = '<html></html>';
+    const seen: Array<{ audioCaptureMs?: number; stabilizationTime?: number }> = [];
+    const effects = createLiminalProductionEffects({
+      generator: {} as never,
+      evaluator: { getConfig: () => ({ provider: 'fake', model: 'evaluator' }), generate: vi.fn() } as never,
+      renderer: {
+        preflightSandbox: () => ({ sourceDigest: createHash('sha256').update(playable).digest('hex'),
+          networkPolicy: 'isolated', realtimeTransportsDenied: true, outputLimitEnforced: true }),
+        render: async (_code: string, opts: { audioCaptureMs?: number; stabilizationTime?: number }) => {
+          seen.push(opts);
+          return { success: true, errors: [] };
+        },
+        close: async () => {},
+      } as never,
+      generatorIdentity: 'fake/generator',
+      evaluatorIdentity: 'fake/evaluator',
+      rendererIdentity: 'fake/renderer',
+    });
+    await effects.render({ playable, domain: domain as never });
+    expect(seen.map((o) => [o.audioCaptureMs, o.stabilizationTime])).toEqual([[10_000, 750]]);
+  });
+
+  it('renders the governed path with a 60 s arc horizon so long pieces are judged on their arc (#1637)', async () => {
+    const playable = '<html><body>arc</body></html>';
+    const render = vi.fn(async () => ({ success: true, errors: [] }));
+    const effects = createLiminalProductionEffects({
+      generator: {} as never,
+      evaluator: { getConfig: () => ({ provider: 'fake', model: 'evaluator' }), generate: vi.fn() } as never,
+      renderer: {
+        preflightSandbox: () => ({ sourceDigest: createHash('sha256').update(playable).digest('hex'),
+          networkPolicy: 'isolated', realtimeTransportsDenied: true, outputLimitEnforced: true }),
+        render, close: vi.fn(),
+      } as never,
+      generatorIdentity: 'fake/generator', evaluatorIdentity: 'fake/evaluator', rendererIdentity: 'fake/renderer',
+    });
+    await effects.render({ playable, domain: 'p5' });
+    expect(render).toHaveBeenCalledWith(playable, expect.objectContaining({ arcHorizonMs: 60_000, arcWallBudgetMs: 40_000 }));
+  });
+
+  it('keeps how far piece time got in the observation, and adds nothing when there was no arc (#1647)', async () => {
+    const playable = '<html><body>arc</body></html>';
+    const arc = { horizonMs: 60_000, reachedMs: 41_800, wallMs: 40_000 };
+    const results = [{ success: true, errors: [], arc }, { success: true, errors: [] }];
+    const effects = createLiminalProductionEffects({
+      generator: {} as never,
+      evaluator: { getConfig: () => ({ provider: 'fake', model: 'evaluator' }), generate: vi.fn() } as never,
+      renderer: {
+        preflightSandbox: () => ({ sourceDigest: createHash('sha256').update(playable).digest('hex'),
+          networkPolicy: 'isolated', realtimeTransportsDenied: true, outputLimitEnforced: true }),
+        render: async () => results.shift(), close: vi.fn(),
+      } as never,
+      generatorIdentity: 'fake/generator', evaluatorIdentity: 'fake/evaluator', rendererIdentity: 'fake/renderer',
+    });
+    const withArc = await effects.render({ playable, domain: 'p5' });
+    const withoutArc = await effects.render({ playable, domain: 'p5' });
+    expect(withArc.arc).toEqual(arc);
+    expect(Object.keys(withoutArc)).not.toContain('arc');
+  });
+
   describe.each(['tone', 'strudel'])('%s measured audio evidence', (domain) => {
     it.each([
       { name: 'audible', samples: [-0.25, 0.5], success: true, passed: true },
@@ -331,6 +391,61 @@ function draw() {
     expect(artifact.source).not.toContain('The user wants');
   });
 
+  describe('truncated replies (#1643)', () => {
+    const cutP5 = `function setup() {
+  createCanvas(720, 480);
+}
+function draw() {
+  background(8, 12, 24);
+  ellipse(`;
+    const wholeP5 = `function setup() {
+  createCanvas(720, 480);
+  noStroke();
+}
+function draw() {
+  background(8, 12, 24);
+  fill(255, 220, 120);
+  circle(200, 200, 80);
+}`;
+    const makeEffects = (generate: ReturnType<typeof vi.fn>) => createLiminalProductionEffects({
+      generator: { getConfig: () => ({ provider: 'fake', model: 'generator', maxTokens: 4096 }),
+        generate } as never,
+      evaluator: {} as never, renderer: {} as never,
+      generatorIdentity: 'fake/generator', evaluatorIdentity: 'fake/evaluator',
+      rendererIdentity: 'fake/renderer',
+    });
+    const run = (generate: ReturnType<typeof vi.fn>) => makeEffects(generate).generate({
+      identity: 'fake/generator', domain: 'p5', prompt: 'fireflies over a pond',
+      startTransport: vi.fn(async () => 1), failTransport: vi.fn(async () => {}) });
+
+    it('names the cutoff and repairs with double the cap', async () => {
+      const generate = vi.fn()
+        .mockResolvedValueOnce({ success: true, code: cutP5, finishReason: 'length' })
+        .mockResolvedValueOnce({ success: true, code: wholeP5, finishReason: 'stop' });
+      const artifact = await run(generate);
+      expect(generate).toHaveBeenCalledTimes(2);
+      expect(generate.mock.calls[0]?.[5]).toBeUndefined();
+      expect(generate.mock.calls[1]?.[5]).toEqual({ maxTokens: 8192 });
+      expect(String(generate.mock.calls[1]?.[1])).toContain('GENERATION_TRUNCATED: the reply stopped at the 4096-token output cap');
+      expect(JSON.parse(artifact.provenance).acceptedFrom).toBe('repair');
+    });
+
+    it('labels the final failure as truncation when the repair is cut off too', async () => {
+      const generate = vi.fn(async () => ({ success: true, code: cutP5, finishReason: 'length' }));
+      await expect(run(generate)).rejects.toThrow(
+        /^C0_GENERATION_INVALID:GENERATION_TRUNCATED: the reply stopped at the 8192-token output cap/);
+      expect(generate).toHaveBeenCalledTimes(2);
+    });
+
+    it('leaves a plain syntax failure unlabelled and at the configured cap', async () => {
+      const generate = vi.fn(async () => ({ success: true, code: cutP5, finishReason: 'stop' }));
+      const error = await run(generate).then(() => null, (e: unknown) => String(e));
+      expect(error).toMatch(/C0_GENERATION_INVALID/);
+      expect(error).not.toMatch(/GENERATION_TRUNCATED/);
+      expect(generate.mock.calls[1]?.[5]).toBeUndefined();
+    });
+  });
+
   it('fails unsupported domains before transport', async () => {
     const startTransport = vi.fn(async () => 1);
     const failTransport = vi.fn(async () => {});
@@ -338,9 +453,9 @@ function draw() {
       evaluator: {} as never, renderer: {} as never,
       generatorIdentity: 'fake/generator', evaluatorIdentity: 'fake/evaluator',
       rendererIdentity: 'fake/renderer' });
-    await expect(effects.generate({ identity: 'fake/generator', domain: 'revideo',
+    await expect(effects.generate({ identity: 'fake/generator', domain: 'nbe',
       prompt: 'unsupported', startTransport, failTransport }))
-      .rejects.toThrow('LIMINAL_PRODUCTION_DOMAIN_UNSUPPORTED:revideo');
+      .rejects.toThrow('LIMINAL_PRODUCTION_DOMAIN_UNSUPPORTED:nbe');
     expect(startTransport).not.toHaveBeenCalled();
   });
 
@@ -454,6 +569,32 @@ function draw() {
           audio: { relevant: false, state: 'not-applicable' } } });
       expect(generate).toHaveBeenCalledOnce();
       expect(JSON.stringify(generate.mock.calls[0])).toContain('never penalise the absence of movement');
+    });
+
+    it('gives the judge the user prompt as a fenced brief (#1638)', async () => {
+      const frame = await sharp({ create: { width: 800, height: 600, channels: 4,
+        background: { r: 200, g: 190, b: 170, alpha: 1 } } })
+        .composite([{ input: await sharp({ create: { width: 300, height: 200, channels: 4,
+          background: { r: 217, g: 74, b: 61, alpha: 1 } } }).png().toBuffer(), top: 200, left: 250 }])
+        .png().toBuffer();
+      const generate = vi.fn(async () => ({ success: true,
+        code: JSON.stringify({ score: 0.8, confidence: 0.9, failureClass: 'none' }) }));
+      const effects = createLiminalProductionEffects({
+        generator: {} as never,
+        evaluator: { getConfig: () => ({ provider: 'fake', model: 'evaluator' }), generate } as never,
+        renderer: {} as never, generatorIdentity: 'fake/generator',
+        evaluatorIdentity: 'fake/evaluator', rendererIdentity: 'fake/renderer' });
+      await effects.evaluate({ identity: 'fake/evaluator', domain: 'p5', evidenceDigest: null,
+        prompt: 'a piece that reads and shows its own source code',
+        startTransport: vi.fn(async () => 1), failTransport: vi.fn(async () => {}),
+        observation: { status: 'rendered', rendererIdentity: 'fake/renderer', runtimeErrors: [],
+          earlyFrame: frame, lateFrame: frame,
+          earlyFrameSize: { width: 800, height: 600 }, lateFrameSize: { width: 800, height: 600 },
+          audio: { relevant: false, state: 'not-applicable' } } });
+      const sent = JSON.stringify(generate.mock.calls[0]);
+      expect(sent).toContain('a piece that reads and shows its own source code');
+      expect(sent).toContain('untrusted');
+      expect(sent).toContain('Evaluate only the visible temporal artwork');
     });
 
     async function judge(domain: string, audio: unknown, source?: string) {

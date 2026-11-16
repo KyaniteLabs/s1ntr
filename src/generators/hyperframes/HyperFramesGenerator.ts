@@ -10,6 +10,7 @@ import { TierBasedGenerator, type TierBasedGeneratorOptions } from '../TierBased
 import { HyperFramesValidator } from '../../core/validators/HyperFramesValidator.js';
 import { GenerationError } from '../../errors/GenerationError.js';
 import type { LLMResponse } from '../../llm/LLMClient.js';
+import { answerCode } from '../../llm/ModelOutput.js';
 
 export type HyperFramesGeneratorOptions = TierBasedGeneratorOptions;
 
@@ -137,7 +138,7 @@ export class HyperFramesGenerator extends TierBasedGenerator {
 
   private normalizeHyperFramesHtml(response: LLMResponse): string {
     let code = response.code || '';
-    code = code.replace(/^```(?:html)?\n?/i, '').replace(/\n?```$/i, '').trim();
+    code = answerCode(code, ['html']).trim();
     if (!/^<!doctype\s+html/i.test(code) && /<html\b/i.test(code)) {
       code = `<!doctype html>\n${code}`;
     }

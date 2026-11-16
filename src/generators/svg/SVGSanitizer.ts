@@ -1,21 +1,16 @@
-const FENCE_OPEN_RE = /^```(?:svg|xml|html|)\s*\n?/i;
-const FENCE_CLOSE_RE = /\n?```\s*$/;
+import { answerCode } from '../../llm/ModelOutput.js';
 const SVG_BLOCK_RE = /<svg\b[\s\S]*?<\/svg>/i;
 
 /**
- * Deterministic salvage: strip leading/trailing markdown fences (any of
- * ` ```svg `, ` ```xml `, ` ```html `, or bare ` ``` ` variants, case-insensitive)
- * and, if prose still surrounds the document, return the first COMPLETE
+ * Deterministic salvage: take the model's answer (reasoning and fences
+ * removed) and, if prose still surrounds the document, return the first COMPLETE
  * `<svg ...>...</svg>` block. Truncated output (no closing `</svg>`) is left
  * untouched so the validator can still reject it — we never fabricate
  * closing tags.
  */
 export function salvageSVG(input: string): string {
   if (typeof input !== 'string' || input.length === 0) return '';
-  let clean = input
-    .replace(FENCE_OPEN_RE, '')
-    .replace(FENCE_CLOSE_RE, '')
-    .trim();
+  let clean = answerCode(input, ['svg', 'xml', 'html']).trim();
 
   const match = clean.match(SVG_BLOCK_RE);
   if (match) clean = match[0];

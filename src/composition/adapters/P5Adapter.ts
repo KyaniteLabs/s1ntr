@@ -15,6 +15,7 @@ import { getCanvasCompositeOp } from '../utils/blendModes.js';
 import { VENDOR_ASSETS } from '../../utils/vendorAssets.js';
 import { Logger } from '../../utils/Logger.js';
 import { compileGeneratedCode, createGeneratedCodeScope } from '../../guardrails/GeneratedCodeGuard.js';
+import { scriptSafe } from '../../utils/scriptEmbed.js';
 
 /** p5.js sketch instance */
 interface P5Instance {
@@ -298,7 +299,7 @@ export class P5Adapter implements LayerAdapter {
 ${transparentStyle}${blendStyle}  document.getElementById('composition').appendChild(container);
 
   new p5(function(sketch) {
-${layer.code.split('\n').map(line => '    ' + line).join('\n')}
+${scriptSafe(layer.code).split('\n').map(line => '    ' + line).join('\n')}
   }, container);
 })();
 </script>`;

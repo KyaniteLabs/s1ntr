@@ -90,11 +90,24 @@ describe('HydraGenerator', () => {
   describe('sanitizeCode', () => {
     it('strips think tags', () => {
       const gen = new HydraGenerator();
-      const code = '<think reasoning here</thinkosc(10).out(o0)';
+      const code = '<think>reasoning here</think>osc(10).out(o0)';
       const sanitized = (gen as any).sanitizeCode(code);
-      // Input lacks proper </thinkosc(10)> closing tag (no >), so regex won't match
-      // The code is preserved as-is with the malformed think tag
       expect(sanitized).toContain('osc(10).out(o0)');
+      expect(sanitized).not.toContain('reasoning');
+    });
+
+    it('keeps code next to a malformed think tag', () => {
+      const gen = new HydraGenerator();
+      const sanitized = (gen as any).sanitizeCode('<think reasoning here</thinkosc(10).out(o0)');
+      expect(sanitized).toContain('osc(10).out(o0)');
+    });
+
+    it('takes the longest of two same-language blocks: they are alternatives, and joined they double-play', () => {
+      const gen = new HydraGenerator();
+      const raw = 'Option A:\n```js\nosc(10).out(o0)\n```\nOption B:\n```js\nnoise(3).color(1, 0.5, 0.2).out(o0)\n```';
+      const sanitized = (gen as any).sanitizeCode(raw);
+      expect(sanitized).toContain('noise(3)');
+      expect(sanitized).not.toContain('osc(10)');
     });
 
     it('strips markdown fences', () => {
@@ -202,10 +215,15 @@ stack(
   describe('sanitizeCode', () => {
     it('strips think tags', () => {
       const gen = new StrudelGenerator();
-      const code = '<think hmm let me reason</thinkosc(10)>\ns("bd sd")';
+      const code = '<think>hmm let me reason</think>\ns("bd sd")';
       const sanitized = (gen as any).sanitizeCode(code);
-      // Malformed closing tag </thinkosc(10)> doesn't match </thinkosc(10)> regex
-      // The line filter keeps only Strudel-syntax lines, so just verify code is preserved
+      expect(sanitized).toContain('s("bd sd")');
+      expect(sanitized).not.toContain('reason');
+    });
+
+    it('keeps code next to a malformed think tag', () => {
+      const gen = new StrudelGenerator();
+      const sanitized = (gen as any).sanitizeCode('<think hmm let me reason</thinkosc(10)>\ns("bd sd")');
       expect(sanitized).toContain('s("bd sd")');
     });
 
@@ -340,6 +358,7 @@ describe('ASCIIArtGenerator', () => {
     it('strips code block markers (```)', () => {
       const gen = new ASCIIArtGenerator();
       const result = (gen as any).formatASCII('```hello```world', 10, 2);
+      expect(result).toContain('hello');
       expect(result).not.toContain('```');
     });
 
@@ -479,10 +498,15 @@ describe('ToneGenerator', () => {
 
     it('strips think tags', () => {
       const gen = new ToneGenerator();
-      const code = '<think reasoning here</thinkconst synth = new Tone.Synth().toDestination();';
+      const code = '<think>reasoning here</think>const synth = new Tone.Synth().toDestination();';
       const sanitized = (gen as any).sanitizeCode(code);
-      // Input has malformed </thinkconst — missing > after </thinkosc(10)>
-      // Regex won't match, so <thinkosc(10)> content remains. Just verify code is preserved.
+      expect(sanitized).toContain('Tone.Synth');
+      expect(sanitized).not.toContain('reasoning');
+    });
+
+    it('keeps code next to a malformed think tag', () => {
+      const gen = new ToneGenerator();
+      const sanitized = (gen as any).sanitizeCode('<think reasoning here</thinkconst synth = new Tone.Synth().toDestination();');
       expect(sanitized).toContain('Tone.Synth');
     });
 

@@ -229,6 +229,8 @@ describe('Liminal product command authority path', () => {
     const result = await runLiminalCommandJourney(service, command);
 
     expect(result.evaluation).toMatchObject({ score: 0.82, admissionEligible: true });
+    // #1638: the judge is told what the user asked for.
+    expect(vi.mocked(effects.evaluate).mock.calls[0]![0].prompt).toBe(command.prompt);
     expect(result.receipt.authorityTier).toBe('test-proof');
     expect(authority.verify(result.receipt)).toBe(true);
     expect(order).toEqual([
@@ -1224,6 +1226,108 @@ describe('Liminal product command authority path', () => {
       idempotencyKey: 'reevaluate-forged-authority', maxTransportAttempts: 1,
       actionAuthorityDigest: 'not-a-digest',
     })).rejects.toThrow('REEVALUATION_ACTION_AUTHORITY_INVALID');
+  });
+
+  it('re-renders a verified artifact and judges the fresh evidence once (#1645)', async () => {
+    const generate = vi.fn(async input => {
+      await input.startTransport();
+      return { source: 'x', playable: '<canvas id="rerender"/>', provenance: 'fake' };
+    });
+    // the first render is the parent's evidence; the second is a renderer fix's fresh frame
+    const render = vi.fn(async (_input: { playable: string; domain: string }) => ({
+      ...rendered(), lateFrame: Buffer.from(render.mock.calls.length === 1
+        ? 'late-frame' : 'late-frame-after-arc-fix') }));
+    const evaluate = vi.fn(async (input: { startTransport: () => Promise<unknown>;
+      identity: string; evidenceDigest: string | null; prompt?: string }) => {
+      await input.startTransport();
+      return { score: evaluate.mock.calls.length === 1 ? 0.2 : 0.83, degraded: false,
+        identityValid: true, evaluatorIdentity: input.identity,
+        evidenceDigest: input.evidenceDigest };
+    });
+    const authority = createTestReceiptAuthority('rerender-proof-secret');
+    const service = new LiminalCommandService({
+      effects: { generate, render, evaluate } as never,
+      artifacts: new InMemoryLiminalArtifactStore(),
+      journal: new InMemoryLiminalOperationJournal(),
+      authority,
+    });
+    const parent = await service.execute(command);
+    const spec = { idempotencyKey: 'rerender-c0', maxTransportAttempts: 1 as const,
+      actionAuthorityDigest: '9'.repeat(64) };
+
+    const result = await service.rerenderAndReevaluate(command, parent, spec);
+
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(render).toHaveBeenCalledTimes(2);
+    expect(render.mock.calls[1][0]).toEqual({ playable: '<canvas id="rerender"/>',
+      domain: command.domain });
+    expect(evaluate).toHaveBeenCalledTimes(2);
+    expect(evaluate.mock.calls[1][0]).toMatchObject({ prompt: command.prompt,
+      identity: command.roles.evaluator, evidenceDigest: result.evidence.evidenceDigest });
+    expect(result.evidence.evidenceDigest).not.toBe(parent.evidence.evidenceDigest);
+    expect(result.receipt.evidenceDigest).toBe(result.evidence.evidenceDigest);
+    expect(result.evaluation.score).toBe(0.83);
+    expect(result.lineageId).toBe(parent.lineageId);
+    expect(result.artifacts).toEqual(parent.artifacts);
+    expect(result.receipt.artifactDigest).toBe(parent.receipt.artifactDigest);
+    expect(result.receipt.learningEligible).toBe(false);
+    expect(result.receipt.actionAuthorityDigest).toBe('9'.repeat(64));
+    expect(result.attempts).toEqual({ consumed: 1, maximum: 1 });
+    await expect(service.readVerifiedResult('rerender-c0', command)).resolves.toBe(result);
+    await service.restoreVerifiedArtifact(parent, result);
+    await expect(service.readVerifiedArtifact(result)).resolves.toMatchObject({
+      playable: '<canvas id="rerender"/>' });
+
+    // same key: the stored result comes back, with no second render or judge call
+    await expect(service.rerenderAndReevaluate(command, parent, spec)).resolves.toBe(result);
+    expect(render).toHaveBeenCalledTimes(2);
+    expect(evaluate).toHaveBeenCalledTimes(2);
+
+    // a tampered parent receipt, a forged artifact digest and a bad grant never reach the renderer
+    await expect(service.rerenderAndReevaluate(command, { ...parent,
+      receipt: { ...parent.receipt, signature: 'f'.repeat(64) } }, {
+      ...spec, idempotencyKey: 'rerender-tampered' }))
+      .rejects.toThrow('REEVALUATION_PARENT_AUTHORITY_INVALID');
+    await expect(service.rerenderAndReevaluate(command, { ...parent,
+      artifacts: { ...parent.artifacts, playableDigest: 'f'.repeat(64) } }, {
+      ...spec, idempotencyKey: 'rerender-forged-artifact' }))
+      .rejects.toThrow('REEVALUATION_PARENT_AUTHORITY_INVALID');
+    await expect(service.rerenderAndReevaluate(command, parent, {
+      ...spec, idempotencyKey: 'rerender-bad-grant', actionAuthorityDigest: 'not-a-digest' }))
+      .rejects.toThrow('REEVALUATION_ACTION_AUTHORITY_INVALID');
+    expect(render).toHaveBeenCalledTimes(2);
+    expect(evaluate).toHaveBeenCalledTimes(2);
+  });
+
+  it('refuses to judge a re-render that comes back broken (#1645)', async () => {
+    let renders = 0;
+    const evaluate = vi.fn(async (input: { startTransport: () => Promise<unknown>;
+      identity: string; evidenceDigest: string | null }) => {
+      await input.startTransport();
+      return { score: 0.7, degraded: false, identityValid: true,
+        evaluatorIdentity: input.identity, evidenceDigest: input.evidenceDigest };
+    });
+    const service = new LiminalCommandService({
+      effects: {
+        generate: async input => {
+          await input.startTransport();
+          return { source: 'x', playable: '<canvas/>', provenance: 'fake' };
+        },
+        render: async () => (++renders === 1 ? rendered()
+          : { ...rendered(), runtimeErrors: ['ReferenceError: p5 is not defined'] }),
+        evaluate,
+      } as never,
+      artifacts: new InMemoryLiminalArtifactStore(),
+      journal: new InMemoryLiminalOperationJournal(),
+      authority: createTestReceiptAuthority('rerender-broken-secret'),
+    });
+    const parent = await service.execute(command);
+
+    await expect(service.rerenderAndReevaluate(command, parent, {
+      idempotencyKey: 'rerender-broken', maxTransportAttempts: 1,
+      actionAuthorityDigest: '9'.repeat(64) })).rejects.toThrow('REEVALUATION_RENDERED_EVIDENCE_INVALID');
+    expect(renders).toBe(2);
+    expect(evaluate).toHaveBeenCalledTimes(1);
   });
 
   it('verifies a file-backed reevaluation with historical durable payload digests', async () => {

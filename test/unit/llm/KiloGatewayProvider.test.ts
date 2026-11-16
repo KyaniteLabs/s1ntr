@@ -78,6 +78,18 @@ describe('KiloGatewayProvider', () => {
     expect(res.value.usage?.outputTokens).toBe(5);
   });
 
+  it.each([
+    ['length', 'length'], ['stop', 'stop'], [undefined, 'stop'],
+  ])('reports native finish_reason %s as finishReason %s (#1643)', async (native, expected) => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ choices: [{ message: { content: 'function draw(){ ellipse(' }, finish_reason: native }] }),
+    });
+    const res = await makeProvider().generate({ systemPrompt: 'sys', userPrompt: 'usr' });
+    expect(res.isOk()).toBe(true);
+    expect(res.value.finishReason).toBe(expected);
+  });
+
   it('sends image inputs as OpenAI multimodal content parts', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,

@@ -75,6 +75,13 @@ describe('ShaderGenerator', () => {
     expect(wrapped).toContain('out vec4 fragColor');
   });
 
+  it('reads a JSON-escaped fenced shader and drops the reasoning', () => {
+    const gen = new ShaderGenerator();
+    const raw = '<think>plan</think>Here:\\n\\```glsl\\nprecision mediump float;\\nvoid main(){ gl_FragColor = vec4(1.0); }\\n\\```';
+    const sanitized = (gen as any).sanitizeShaderCode(raw);
+    expect(sanitized).toBe('precision mediump float;\nvoid main(){ gl_FragColor = vec4(1.0); }');
+  });
+
   it('extracts fragment shader source from common WebGL wrapper variable names', () => {
     const gen = new ShaderGenerator();
     const sanitized = (gen as any).sanitizeShaderCode([

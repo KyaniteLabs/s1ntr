@@ -5,17 +5,20 @@ import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 
 describe('public entrypoint without executor credentials', () => {
-  it('allows pure imports while refusing harness initialization', () => {
+  it('keeps pure imports free of trust material and binds initialization to the host key', () => {
     const root = mkdtempSync(join(tmpdir(), 'sinter-pure-entrypoint-'));
     try {
       const preload = join(root, 'homedir.cjs');
       writeFileSync(preload, `require('node:os').homedir = () => ${JSON.stringify(root)};`);
       const script = `
+        const { existsSync, statSync } = await import('node:fs');
+        const keyPath = ${JSON.stringify(join(root, '.sinter', 'executor-authority', 'trust-key.json'))};
         const { CompositionEngine, metaHarness } = await import('./src/index.ts');
         if (typeof CompositionEngine !== 'function') throw new Error('missing pure API');
-        try { await metaHarness.initialize(); throw new Error('authority bypassed'); }
-        catch (error) {
-          if (!String(error).includes('EXECUTOR_AUTHORITY_UNAVAILABLE')) throw error;
+        if (existsSync(keyPath)) throw new Error('pure import wrote trust material');
+        await metaHarness.initialize();
+        if (!existsSync(keyPath) || (statSync(keyPath).mode & 0o777) !== 0o600) {
+          throw new Error('initialization did not bind a private host trust key');
         }
         console.log('pure import and authority check passed');
       `;

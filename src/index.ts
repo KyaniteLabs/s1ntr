@@ -66,7 +66,7 @@ import path from 'path';
 import { resolveOutputPath, assertSafeSegment } from './utils/normalizePath.js';
 import { SERVICE_DEFAULTS } from './constants/index.js';
 
-export const SINTER_VERSION = '2.4.0';
+export const SINTER_VERSION = '2.5.0';
 
 export interface SinterConfig {
   name: string;

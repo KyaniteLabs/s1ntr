@@ -21,6 +21,10 @@ import type { AddressInfo } from 'node:net';
 import { PreviewEndpoints } from '../tui-bridge/TuiBridgeServer.js';
 import { SERVICE_DEFAULTS } from '../constants/index.js';
 import { ServerError } from '../errors/ServerError.js';
+import { allowedHostsFor, rejectForeignRequest } from '../security/LocalRequestGuard.js';
+
+/** The preview always binds 127.0.0.1, so only loopback Host names are valid. */
+const LOOPBACK_ONLY = allowedHostsFor('127.0.0.1');
 
 interface PreviewServerOptions {
   galleryDir?: string;
@@ -128,6 +132,7 @@ export class PreviewServer {
   }
 
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (rejectForeignRequest(req, res, LOOPBACK_ONLY)) return;
     const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
     try {
       const handled = await this.endpoints.handle(req, res, url.pathname, url);

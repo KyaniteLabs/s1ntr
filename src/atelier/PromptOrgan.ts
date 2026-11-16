@@ -178,7 +178,7 @@ const STATE_PATH = (cwd: string) => join(cwd, '.omx', 'atelier', 'prompts', 'org
 
 // ═══ Deterministic seeded random (same organ contract as the game) ═══
 
-function mulberry32(seed: number): () => number {
+export function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
   return () => {
     a |= 0; a = (a + 0x6D2B79F5) | 0;

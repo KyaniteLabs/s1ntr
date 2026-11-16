@@ -31,7 +31,7 @@ describe('local CLI provider URL validation', () => {
       .toBe('unknown');
     const directory = mkdtempSync(join(tmpdir(), 'codex-cli-provider-'));
     const executable = join(directory, 'codex');
-    writeFileSync(executable, '#!/bin/sh\ncat >/dev/null\nprintf "generated artwork"\n');
+    writeFileSync(executable, `#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"generated artwork"}}'\n`);
     chmodSync(executable, 0o700);
     const previousCodexBin = process.env.CODEX_BIN;
     process.env.CODEX_BIN = executable;

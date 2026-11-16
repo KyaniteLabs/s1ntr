@@ -1239,7 +1239,7 @@ describe('LLMClient loadRoles', () => {
         model: 'glm-5v-turbo',
         apiKey: 'fake-glm-key',
       });
-      expect(response.endpoint).toBe('https://api.z.ai/api/anthropic/chat/completions');
+      expect(response.endpoint).toBe('https://api.z.ai/api/anthropic/v1/messages');
     } finally {
       process.chdir(originalCwd);
       await fs.rm(projectDir, { recursive: true, force: true });

@@ -13,6 +13,7 @@ import type { DreamTransferEvaluator, DreamTransferProducer }
   from '../dreaming/research/DreamTransferRunner.js';
 import type { CompoundBlindedArm, CompoundCreateJudge, CompoundCreateJudgment }
   from './CompoundCreateProofPort.js';
+import { answerJson } from '../llm/ModelOutput.js';
 // Liminal-owned transfer oracle (AC6) — re-export keeps module on production call graph.
 export {
   buildOracleReceipt,
@@ -53,8 +54,7 @@ export function dreamClientIdentity(client: LLMClient): DreamEvaluatorIdentity {
 }
 
 function parseObject(text: string): Record<string, unknown> {
-  const clean = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
-  const value = JSON.parse(clean) as unknown;
+  const value = JSON.parse(answerJson(text)) as unknown;
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('DREAM_PROVIDER_RESPONSE_INVALID');
   }

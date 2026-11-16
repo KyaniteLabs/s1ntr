@@ -57,7 +57,9 @@ export async function probeTemporal(htmlPath: string, options?: {
   try {
     const { chromium } = await import('playwright');
     const { resolveChromiumExecutablePath } = await import('../utils/browserAssetFallbacks.js');
-    browser = await chromium.launch({ headless: true, executablePath: resolveChromiumExecutablePath(), args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
+    const { launchPlaywrightChromium, sandboxOptOutArgs } = await import('../security/SandboxConfig.js');
+    browser = await launchPlaywrightChromium(chromium, { headless: true, executablePath: resolveChromiumExecutablePath(),
+      args: [...sandboxOptOutArgs(), '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
     const page = await browser.newPage({ viewport: { width, height } });
     // #924 regression: stored playables reference root-absolute /vendor/ URLs
     // that never resolve under file:// — every vendored piece rendered blank,

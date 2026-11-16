@@ -269,10 +269,43 @@ export type AttestationVerificationFailure =
  * reservation. Use {@link verifyAttestationAgainstReservation} for the
  * transport postcondition.
  */
+/**
+ * Surfaces renamed after records were already signed under the old name, keyed
+ * by the sha256 of the retired name so that name never ships in the package.
+ * The value is the successor surface. Only historical ledger replay consults
+ * this table; nothing new can be issued or admitted on a retired surface (#1591).
+ */
+interface RetiredSurface {
+  readonly successor: ProviderSurface;
+  /** sha256 of the adapter id the old records were signed with. */
+  readonly adapterIdSha256: string;
+}
+const RETIRED_SURFACES: ReadonlyMap<string, RetiredSurface> = new Map([
+  ['77544920b504cd11a8833fa2c43d052c09f0ba14199bc10a50632a910f8944ad',
+    { successor: 'lan-gateway-litellm', adapterIdSha256: '641f76b4343f61cc690b9a34487b772bf9e966a687b4b0d3e10794e9a8adc3c2' }],
+]);
+
+const sha256 = (value: string): string => createHash('sha256').update(value).digest('hex');
+
+/** The successor of a retired surface name, or undefined when it is not retired. */
+export function retiredSurfaceSuccessor(surface: string): ProviderSurface | undefined {
+  return RETIRED_SURFACES.get(sha256(surface))?.successor;
+}
+
+export interface VerifyAttestationOptions {
+  /**
+   * Replaying a persisted ledger record: a signature-valid record signed under
+   * a retired surface name verifies against its successor's adapter. Never set
+   * this for issuance or present admission.
+   */
+  readonly historical?: boolean;
+}
+
 export function verifyExecutorAttestation(
   registry: HostAdapterRegistry,
   attestation: ExecutorAttestation,
   now: string,
+  options: VerifyAttestationOptions = {},
 ): { ok: true } | { ok: false; reason: AttestationVerificationFailure; detail: string } {
   const schemaVersion: unknown = attestation.subject.schemaVersion;
   if (schemaVersion !== 'executor-attestation.v1'
@@ -289,12 +322,28 @@ export function verifyExecutorAttestation(
   if (Date.parse(now) >= Date.parse(attestation.subject.expiresAt)) {
     return { ok: false, reason: 'expired', detail: `expired at ${attestation.subject.expiresAt}` };
   }
-  const adapter = registry.adapterForSurface(attestation.subject.surface);
-  if (!adapter) {
-    return { ok: false, reason: 'wrong-surface', detail: `surface ${attestation.subject.surface} has no adapter` };
+  const surface = attestation.subject.surface;
+  let adapter = registry.adapterForSurface(surface);
+  let expectedAdapterId = adapter?.adapterId;
+  if (!adapter && options.historical) {
+    // The signature already verified above, so the record is authentic. A record
+    // signed under a retired surface name binds the successor's adapter under
+    // that old name (#1591).
+    // The old adapter id is pinned by hash, not derived from the successor's.
+    const retired = RETIRED_SURFACES.get(sha256(surface));
+    const successorAdapter = retired ? registry.adapterForSurface(retired.successor) : undefined;
+    if (retired && successorAdapter) {
+      adapter = successorAdapter;
+      expectedAdapterId = sha256(attestation.subject.adapterId) === retired.adapterIdSha256
+        ? attestation.subject.adapterId
+        : '<retired adapter id>';
+    }
   }
-  if (adapter.adapterId !== attestation.subject.adapterId) {
-    return { ok: false, reason: 'wrong-adapter', detail: `adapter ${attestation.subject.adapterId} != ${adapter.adapterId}` };
+  if (!adapter) {
+    return { ok: false, reason: 'wrong-surface', detail: `surface ${surface} has no adapter` };
+  }
+  if (expectedAdapterId !== attestation.subject.adapterId) {
+    return { ok: false, reason: 'wrong-adapter', detail: `adapter ${attestation.subject.adapterId} != ${expectedAdapterId}` };
   }
   if (attestation.subject.effort !== attestation.subject.resolvedIdentity.effort) {
     return { ok: false, reason: 'effort-mismatch', detail: 'effort field does not match resolved identity effort' };

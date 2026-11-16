@@ -159,7 +159,11 @@ export class LLMModeSelfImprovementRuntime implements SelfImprovementRuntime {
     const diagnose = Boolean(forbidMutations) || kind === 'diagnose';
     // Diagnose: do NOT inject the mutation task packet — it trains the model to
     // "edit focus files" and burned K3 recon without ever delivering params.plan.
-    const taskPacket = diagnose ? null : buildTaskPacket(description);
+    // Localize the request before adding learned guidance to the prompt.
+    const taskPacket = diagnose ? null : buildTaskPacket(input.description);
+    if (taskPacket) {
+      taskPacket.description = description + taskPacket.description.slice(input.description.length);
+    }
     // Best-effort sync name; run()/CLI resolveEffectiveModel for seat truth (F1).
     const modelName = llm.getConfig().model || 'unknown';
     const _maxStepsEnv = parseInt(process.env.LIMINAL_TUI_AGENT_MAX_STEPS ?? '', 10);

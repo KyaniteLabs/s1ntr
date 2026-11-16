@@ -20,7 +20,7 @@ import {
 import { HTMLWrapper } from '../utils/htmlWrapper.js';
 import type { Domain as WrapperDomain } from '../utils/htmlWrapper.js';
 import { isAllowedRenderRequestUrl } from '../render/HeadlessRenderer.js';
-import { sandboxOptOutArgs } from '../security/SandboxConfig.js';
+import { launchPlaywrightChromium, sandboxOptOutArgs } from '../security/SandboxConfig.js';
 import { resolveChromiumExecutablePath } from '../utils/browserAssetFallbacks.js';
 import { embedCreativeThesisIdentity, type CreativeThesis } from '../creative-intelligence/CreativeIntelligence.js';
 
@@ -58,7 +58,7 @@ export async function renderHtmlScreenshot(htmlPath: string, pngPath: string, pr
   const launchArgs = sandboxOptOutArgs();
   let browser: import('playwright').Browser;
   try {
-    browser = await chromium.launch({
+    browser = await launchPlaywrightChromium(chromium, {
       headless: true,
       executablePath: resolveChromiumExecutablePath(),
       args: launchArgs,

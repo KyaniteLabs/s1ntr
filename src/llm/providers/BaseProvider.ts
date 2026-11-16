@@ -260,3 +260,14 @@ export abstract class BaseProvider {
 export function usesMaxCompletionTokens(model: string): boolean {
   return /^(gpt-5|o1|o3|o4)/.test(model);
 }
+
+/**
+ * Map a provider's native finish/stop reason onto ProviderResponse.finishReason.
+ * An output-cap stop becomes 'length' so callers can tell a reply that was cut
+ * off from one that ended (#1643: Kilo/OpenRouter/Google used to report 'stop').
+ */
+export function mapNativeFinishReason(native: unknown, hasToolCalls: boolean): 'stop' | 'tool_calls' | 'length' {
+  if (hasToolCalls) return 'tool_calls';
+  const reason = typeof native === 'string' ? native.toLowerCase() : '';
+  return reason === 'length' || reason === 'max_tokens' || reason === 'max_output_tokens' ? 'length' : 'stop';
+}

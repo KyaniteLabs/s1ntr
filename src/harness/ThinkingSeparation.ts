@@ -12,6 +12,7 @@ import { writeFileSync, readFileSync, readdirSync, mkdirSync, existsSync } from 
 import { join } from 'path';
 import { homedir } from 'os';
 import { Logger } from '../utils/Logger.js';
+import { hasFence } from '../llm/ModelOutput.js';
 
 export type ThinkingSource = 'generator' | 'harness' | 'user';
 
@@ -67,7 +68,7 @@ export class ThinkingMiner {
     }
 
     // Look for code-in-thinking
-    if (/<think>.*```.*<\/think>/s.test(thinking)) {
+    if (hasFence(thinking)) {
       insights.push('Model putting code in thinking tags');
       actionItems.push('Add "output code after thinking" instruction');
       patterns.push('code_in_thinking');

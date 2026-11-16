@@ -29,10 +29,12 @@ export type ProviderSurface =
   | 'google-direct'
   | 'glm-direct'
   | 'glm-coding-plan-seat'
+  | 'minimax-token-plan-seat'
   | 'minimax-direct'
   | 'moonshot-direct'
   | 'kimi-cliproxy'
   | 'codex-cli-seat'
+  | 'claude-cli-seat'
   | 'agy-cli-seat'
   | 'command-code-cli-seat'
   | 'grok-cli-seat'
@@ -70,7 +72,7 @@ export type ProviderFamily =
  * Normalized model effort. Hides vendor-specific vocabulary (`reasoning_effort`,
  * `thinking.budget_tokens`, etc.) behind one canonical scale.
  */
-export type ModelEffort = 'low' | 'medium' | 'high' | 'max';
+export type ModelEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 /**
  * Funding mode for a transport. Subscription evidence must bind the seat /
@@ -88,6 +90,7 @@ export type FundingMode = 'subscription-seat' | 'metered-api' | 'offline-local';
 export type QuotaSurface =
   | 'cliproxy-seat'
   | 'codex-cli-seat'
+  | 'claude-cli-seat'
   | 'agy-cli-seat'
   | 'command-code-cli-seat'
   | 'grok-cli-seat'
@@ -96,6 +99,7 @@ export type QuotaSurface =
   | 'kilo-web-balance'
   | 'metered-api'
   | 'glm-coding-plan-seat'
+  | 'minimax-token-plan-seat'
   | 'subscription-seat'
   | 'local';
 

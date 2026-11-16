@@ -12,6 +12,7 @@ import { HTMLValidator } from '../../core/validators/HTMLValidator.js';
 import { ToneValidator } from '../../core/validators/ToneValidator.js';
 import { GenerationError } from '../../errors/GenerationError.js';
 import { VENDOR_ASSETS } from '../../utils/vendorAssets.js';
+import { answerCode, hasFence, hasThinkTags } from '../../llm/ModelOutput.js';
 
 const TONE_CDN_SCRIPT = `<script src="${VENDOR_ASSETS.tone}"></script>`;
 
@@ -89,18 +90,7 @@ export class ToneGenerator extends TierBasedGenerator {
       return '';
     }
     
-    let clean = code;
-    
-    // Strip markdown code fences (only at start/end, preserve code inside).
-    // The language tag must stay GENERIC: an allowlist that omitted `html`
-    // ate only the backticks of a ```html fence and leaked a bare "html"
-    // token into rendered artifacts (investor-audit F13).
-    clean = clean.replace(/^```[ \t]*[\w-]*[ \t]*\r?\n?/gm, '');
-    clean = clean.replace(/\n?```$/gm, '');
-    clean = clean.replace(/^```$/gm, '');
-    
-    // Strip <think> tags and their content (LLM reasoning contamination)
-    clean = clean.replace(/<think>[\s\S]*?<\/think>/gi, '');
+    let clean = answerCode(code, ['javascript', 'js', 'html']);
     
     // Strip HTML-style comments
     clean = clean.replace(/<!--[\s\S]*?-->/g, '');
@@ -231,7 +221,7 @@ export class ToneGenerator extends TierBasedGenerator {
   private isUsableToneDraft(code: string): boolean {
     const clean = code.trim();
     if (clean.length < 80 || !/\bTone\b|tone\.js/i.test(clean)) return false;
-    if (/```|<think\b/i.test(clean)) return false;
+    if (hasFence(clean) || hasThinkTags(clean)) return false;
     if (/<html\b/i.test(clean) && !/<\/html>\s*$/i.test(clean)) return false;
     return this.hasNestedDelimiters(clean);
   }
@@ -301,8 +291,8 @@ const codeEl=document.getElementById('toneCode');
 const generatedCode=JSON.parse(codeEl.textContent||'""');
 const canExecuteGeneratedCode=codeEl.dataset.executable==='true';
 async function startTonePatch(){
+  try { await Tone.start(); } catch (error) { console.warn('Tone audio context did not start:', error); }
   try {
-    await Tone.start();
     if (!canExecuteGeneratedCode) {
       statusEl.textContent='Generated full HTML/module artifact is preserved below; playback requires extracting its Tone.js script.';
       statusEl.className='err';
@@ -318,6 +308,7 @@ async function startTonePatch(){
     statusEl.textContent='Playing. If the patch is transport-based, it should be audible now.';
     statusEl.className='msg';
   } catch (error) {
+    console.error('Tone playback error:', error);
     statusEl.textContent='Playback error: '+(error&&error.message?error.message:String(error));
     statusEl.className='err';
   }

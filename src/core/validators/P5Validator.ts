@@ -7,6 +7,7 @@
 
 import { parse } from '@babel/parser';
 import traverseModule from '@babel/traverse';
+import { P5_GENERATED_GLOBALS } from './p5Globals.generated.js';
 
 // Note: ValidationResult type can be imported from CodeValidator if needed for integration
 
@@ -16,26 +17,15 @@ export interface P5ValidationResult {
 }
 
 export class P5Validator {
-  private static readonly P5_GLOBALS = new Set([
+  private static readonly P5_GLOBALS = new Set<string>([
+    ...P5_GENERATED_GLOBALS,
     'Array', 'Boolean', 'Date', 'Error', 'JSON', 'Map', 'Math', 'Number', 'Object', 'Promise', 'Set', 'String',
     'console', 'document', 'p5', 'window',
-    'ADD', 'BASELINE', 'BLEND', 'MULTIPLY', 'BOLD', 'CENTER', 'CLOSE', 'CORNER', 'DEGREES', 'DOWN_ARROW', 'HALF_PI', 'HSB', 'ITALIC', 'LEFT', 'LEFT_ARROW', 'NORMAL', 'PI', 'QUARTER_PI', 'RADIANS', 'RGB', 'RIGHT', 'RIGHT_ARROW', 'TWO_PI', 'FOUR_PI', 'THREE_PI', 'THREE_PI_2', 'THREE_QUARTERS_PI', 'UP_ARROW',
-    'POINTS', 'LINES', 'TRIANGLES', 'TRIANGLE_FAN', 'TRIANGLE_STRIP', 'QUADS', 'QUAD_STRIP',
-    'draw', 'drawingContext', 'frameCount', 'height', 'key', 'keyCode', 'keyIsPressed', 'mouseButton', 'mouseIsPressed', 'mouseX', 'mouseY', 'pixels', 'pmouseX', 'pmouseY', 'setup', 'windowHeight', 'windowWidth', 'width',
-    'abs', 'acos', 'angleMode', 'asin', 'atan', 'atan2', 'background', 'beginShape', 'bezier', 'blendMode',
-    'bezierVertex', 'bezierPoint', 'bezierTangent', 'quadraticVertex', 'curvePoint', 'curveTangent',
-    'ceil', 'circle', 'color', 'colorMode', 'constrain', 'cos', 'createCanvas', 'createGraphics', 'curveVertex', 'dist', 'ellipse', 'endShape', 'exp',
-    'fill', 'floor', 'frameRate', 'image', 'lerp', 'line', 'map', 'max', 'millis', 'min', 'nf', 'noFill', 'noise', 'noLoop',
-    'createVector',
-    'print',
+    'FOUR_PI', 'THREE_PI', 'THREE_PI_2', 'THREE_QUARTERS_PI',
+    'draw', 'drawingContext', 'setup',
     // Legit p5 globals the whitelist missed (meta-turn postmortem 2026-08-31:
     // a real piece died on noCanvas — C0_GENERATION_INVALID on a valid API).
-    'noCanvas', 'unchar', 'isnan',
-    'loadPixels', 'noStroke', 'pixelDensity', 'point', 'pop', 'pow', 'push', 'radians', 'random', 'rect', 'rectMode', 'red', 'green', 'blue', 'lerpColor',
-    'resizeCanvas', 'rotate', 'round', 'scale', 'sin', 'sqrt',
-    'stroke', 'strokeWeight', 'text', 'textAlign', 'textFont', 'textSize', 'textStyle', 'translate', 'triangle', 'updatePixels', 'vertex',
-    // p5.sound
-    'loadSound', 'createAudio', 'getAudioContext', 'userStartAudio',
+    'isnan',
     // Web Audio API
     'AudioContext', 'OscillatorNode', 'AnalyserNode', 'GainNode',
     'Float32Array', 'Float64Array', 'Int32Array', 'Uint8Array', 'Uint32Array', 'ArrayBuffer',
@@ -44,45 +34,11 @@ export class P5Validator {
     // Browser globals commonly used by generated sketches (were false-rejected
     // as undefined identifiers: performance.now(), devicePixelRatio, etc.)
     'performance', 'localStorage', 'devicePixelRatio', 'location', 'URL', 'fetch',
-    // --- Additional standard p5.js globals (the allowlist above was partial and
-    //     rejected valid sketches, e.g. clear(); expand to the common surface). ---
-    // Canvas / drawing
-    'clear', 'arc', 'quad', 'square', 'ellipseMode', 'imageMode', 'strokeCap', 'strokeJoin',
-    'smooth', 'noSmooth', 'erase', 'noErase', 'curve', 'curveTightness', 'bezierDetail',
-    'beginContour', 'endContour', 'normalMaterial', 'applyMatrix', 'resetMatrix', 'shearX', 'shearY',
-    // Color helpers
-    'tint', 'noTint', 'hue', 'saturation', 'brightness', 'alpha', 'lightness',
-    // Math / trig / conversion
-    'tan', 'log', 'sq', 'fract', 'mag', 'norm', 'degrees', 'int', 'float', 'str', 'boolean', 'byte', 'char',
-    'randomSeed', 'noiseSeed', 'noiseDetail', 'randomGaussian',
-    // Environment / system / time
-    'deltaTime', 'displayWidth', 'displayHeight', 'displayDensity', 'cursor', 'noCursor', 'fullscreen',
-    'focused', 'windowResized', 'getTargetFrameRate', 'getURL', 'getURLPath', 'getURLParams',
-    'year', 'month', 'day', 'hour', 'minute', 'second', 'millis',
+    'windowResized',
     // Input events + state
     'mouseClicked', 'mousePressed', 'mouseReleased', 'mouseMoved', 'mouseDragged', 'mouseWheel',
-    'doubleClicked', 'keyPressed', 'keyReleased', 'keyTyped', 'keyIsDown', 'touches', 'touchStarted',
-    'touchMoved', 'touchEnded', 'movedX', 'movedY', 'winMouseX', 'winMouseY', 'requestPointerLock',
-    // 3D / WEBGL
-    'box', 'sphere', 'cylinder', 'cone', 'torus', 'plane', 'ellipsoid', 'rotateX', 'rotateY', 'rotateZ',
-    'camera', 'perspective', 'ortho', 'frustum', 'ambientLight', 'directionalLight', 'pointLight',
-    'spotLight', 'lights', 'noLights', 'ambientMaterial', 'specularMaterial', 'emissiveMaterial',
-    'shininess', 'texture', 'textureMode', 'textureWrap', 'createShader', 'loadShader', 'resetShader',
-    'orbitControl', 'model', 'loadModel', 'normal', 'lightFalloff',
-    // Typography / DOM
-    'textWidth', 'textAscent', 'textDescent', 'textLeading', 'textWrap', 'loadFont',
-    'createInput', 'createButton', 'createSlider', 'createDiv', 'createP', 'createElement', 'select', 'selectAll',
-    // Image / pixels
-    'loadImage', 'createImage', 'get', 'set', 'copy', 'blend', 'filter', 'save', 'saveCanvas', 'saveGif',
-    // Array / string utilities
-    'append', 'arrayCopy', 'concat', 'reverse', 'shorten', 'shuffle', 'sort', 'splice', 'subset',
-    'join', 'match', 'matchAll', 'nfc', 'nfp', 'nfs', 'split', 'splitTokens', 'trim', 'storeItem', 'getItem',
-    // Constants
-    'WEBGL', 'P2D', 'TAU', 'HSL', 'CORNERS', 'RADIUS', 'ROUND', 'SQUARE', 'PROJECT', 'BEVEL', 'MITER',
-    'TOP', 'BOTTOM', 'CHORD', 'PIE', 'OPEN', 'ARROW', 'CROSS', 'HAND', 'MOVE', 'TEXT', 'WAIT', 'AUTO',
-    'LANDSCAPE', 'PORTRAIT', 'THRESHOLD', 'GRAY', 'OPAQUE', 'INVERT', 'POSTERIZE', 'BLUR', 'ERODE', 'DILATE',
-    'DARKEST', 'LIGHTEST', 'DIFFERENCE', 'SUBTRACT', 'EXCLUSION', 'SCREEN', 'REPLACE', 'OVERLAY',
-    'HARD_LIGHT', 'SOFT_LIGHT', 'DODGE', 'BURN', 'LINEAR', 'CLAMP', 'MIRROR', 'REPEAT', 'IMMEDIATE',
+    'doubleClicked', 'keyPressed', 'keyReleased', 'keyTyped', 'touchStarted',
+    'touchMoved', 'touchEnded',
   ]);
 
 

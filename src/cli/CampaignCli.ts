@@ -190,7 +190,7 @@ export async function runCampaignCliJourney(
     readonly ownerReviews: (
       admission: CampaignRunAdmission,
       manifests: readonly CampaignActualCandidateManifest[],
-    ) => readonly OwnerReviewLifecycleInput[];
+    ) => Promise<readonly OwnerReviewLifecycleInput[]> | readonly OwnerReviewLifecycleInput[];
     /** Called after host-authenticated owner actions create opaque checkpoints. */
     readonly ownerDecisionClosures?: (input: {
       readonly admission: CampaignRunAdmission;
@@ -215,7 +215,7 @@ export async function runCampaignCliJourney(
     const result = await service.runGovernedCampaign(admission, manifest, governed.input,
       { ...request, entryPoint: 'cli-compose', requestKey: admission.creativeRun.requestKey },
       async (actual) => {
-        const inputs = governed.ownerReviews(admission, actual);
+        const inputs = await governed.ownerReviews(admission, actual);
         service.assertOwnerReviewCoverage(manifest, inputs);
         const completed: OwnerReviewLifecycleResult[] = [];
         for (const input of inputs) completed.push(await service.runOwnerReview('cli', admission, input));
