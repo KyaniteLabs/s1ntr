@@ -22,6 +22,7 @@
     "bin",
     "scripts/packaging",
     "vendor",
+    "assets",
     "README.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
