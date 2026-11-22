@@ -1,3 +1,5 @@
+![Sinter — the S1NTR creative-coding studio, by KyaniteLabs](assets/s1ntr-logo.png)
+
 # Sinter
 
 Sinter is a TypeScript creative-coding studio and CLI that turns prompts into visual, audio, and motion pieces, then lets you preview them locally. It routes work to a configured language model and supports local models through OpenAI-compatible endpoints.
