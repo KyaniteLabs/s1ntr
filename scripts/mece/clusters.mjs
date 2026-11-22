@@ -116,6 +116,7 @@ export const CLUSTERS = {
     'goals/',
   ],
   'C-tooling-docs': [
+    'assets/',
     'docs/',
     'site/',
     'deploy/',
