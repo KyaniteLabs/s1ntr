@@ -93,7 +93,8 @@ const LANG_WORD = /^[.{]*[a-z][\w.+#-]*\}*$/i;
  *  also closes, and "```x = 1;```" on one line is a block. A tilde run opens
  *  a fence only with a language word ("~~~js"), and a bare backtick fence
  *  that never closes opens one only when it is three backticks with code
- *  under it: "~~~ * ~~~" and "``````" rows are ASCII art. */
+ *  under it: "~~~ * ~~~" and "``````" rows are ASCII art. A bare fence
+ *  under unfenced code closes it (see orphanClose). */
 export function fencedBlocks(text: string): FencedBlock[] {
   const lines = text.split(/\r?\n/);
   const blocks: FencedBlock[] = [];
@@ -108,6 +109,12 @@ export function fencedBlocks(text: string): FencedBlock[] {
     const open = OPEN_FENCE.exec(lines[i]);
     const word = open?.[2].split(/\s+/)[0] ?? '';
     if (!open || (open[1][0] === '`' ? open[2].includes('`') : !LANG_WORD.test(word))) {
+      i += 1;
+      continue;
+    }
+    const orphan = open[1] === '```' && open[2] === '' ? orphanClose(lines, blocks.at(-1)?.end ?? 0, i) : null;
+    if (orphan) {
+      blocks.push(orphan);
       i += 1;
       continue;
     }
@@ -141,6 +148,26 @@ export function fencedBlocks(text: string): FencedBlock[] {
     blocks.push({ lang, start, end: i, body: body.join('\n'), closed });
   }
   return blocks;
+}
+
+const CODE_LINE = /[;{})]\s*$|^\s*(?:#|\/\/)/;
+
+/** A bare fence that closes code the model never opened ("void main() {...}"
+ *  then "```", then prose). Read as an opener, it shifts every later pair and
+ *  the prose between the model's drafts becomes the "code". It closes when the
+ *  unfenced run above it is mostly code ending on a code line and the next
+ *  text below it is not code. */
+function orphanClose(lines: readonly string[], from: number, at: number): FencedBlock | null {
+  const run = lines.slice(from, at);
+  const first = run.findIndex((line) => CODE_LINE.test(line));
+  if (first < 0) return null;
+  const body = run.slice(first);
+  const filled = body.filter((line) => line.trim() !== '');
+  const code = filled.filter((line) => CODE_LINE.test(line)).length;
+  if (code < 2 || code * 2 < filled.length || !CODE_LINE.test(filled[filled.length - 1])) return null;
+  const next = lines.slice(at + 1).find((line) => line.trim() !== '');
+  if (next !== undefined && (CODE_LINE.test(next) || OPEN_FENCE.test(next))) return null;
+  return { lang: '', start: from + first, end: at + 1, body: body.join('\n'), closed: true };
 }
 
 export function hasFence(text: string): boolean {

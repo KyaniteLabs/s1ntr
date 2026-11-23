@@ -173,3 +173,11 @@ function hasTriad(hues: number[]): boolean {
     )
   );
 }
+
+/** Deterministic palette facts read from a source's hex colours; empty when the code declares none (the extractor's black fallback is never stated as a fact). */
+export function sourcePaletteFacts(code: string): string {
+  if (!/#(?:[0-9a-f]{3}|[0-9a-f]{6})\b/i.test(code)) return '';
+  const found = extractColorsFromCode(code);
+  const top = found.palette.slice(0, 5).map((color) => color.hex).join(' ');
+  return `${found.colors.length} distinct declared hex colours; leading ${top}; dominant lightness ${Math.round(found.dominant.l * 100)}%; harmony ${found.harmony}`;
+}

@@ -1,12 +1,20 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 
-const puppeteerMocks = vi.hoisted(() => ({
+const chromiumMocks = vi.hoisted(() => ({
   launch: vi.fn(),
 }));
 
-vi.mock('puppeteer', () => ({
-  default: { launch: puppeteerMocks.launch },
-}));
+vi.mock('playwright', () => ({ chromium: { launch: chromiumMocks.launch } }));
+
+function launchBrowserWithPage(page: object) {
+  const context = {
+    route: vi.fn(), routeWebSocket: vi.fn(), addInitScript: vi.fn(),
+    newPage: vi.fn(async () => page),
+  };
+  const browser = { newContext: vi.fn(async () => context), close: vi.fn(async () => {}) };
+  chromiumMocks.launch.mockResolvedValue(browser);
+  return { browser, context };
+}
 
 const mockResolve = vi.hoisted(() => vi.fn(() => '/opt/chromium' as string | null));
 vi.mock('../../../src/utils/browserAssetFallbacks.js', async (importOriginal) => ({
@@ -31,7 +39,7 @@ describe('CompositeRenderGate', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
-    puppeteerMocks.launch.mockReset();
+    chromiumMocks.launch.mockReset();
     mockResolve.mockReturnValue('/opt/chromium');
   });
 
@@ -119,16 +127,11 @@ describe('CompositeRenderGate', () => {
       }),
     });
     const page = {
-      setViewport: vi.fn(),
       setContent: vi.fn(),
       screenshot: vi.fn(async () => 'base64-shot'),
       evaluate: vi.fn(async (callback, value) => callback(value)),
     };
-    const browser = {
-      newPage: vi.fn(async () => page),
-      close: vi.fn(async () => {}),
-    };
-    puppeteerMocks.launch.mockResolvedValue(browser);
+    const { browser, context } = launchBrowserWithPage(page);
 
     const result = await measureCompositeHtml('<main>art</main>', {
       width: 320,
@@ -143,19 +146,23 @@ describe('CompositeRenderGate', () => {
       clippedHighlightFraction: 0.5,
       brightnessStd: 127.5,
     });
-    expect(page.setViewport).toHaveBeenCalledWith({ width: 320, height: 240 });
+    expect(browser.newContext).toHaveBeenCalledWith({
+      viewport: { width: 320, height: 240 }, offline: true, serviceWorkers: 'block', permissions: [],
+    });
+    expect(context.route).toHaveBeenCalledWith('**/*', expect.any(Function));
+    expect(context.routeWebSocket).toHaveBeenCalledWith('**/*', expect.any(Function));
     expect(browser.close).toHaveBeenCalledOnce();
     // The gate measures what the renderer draws: software WebGL, sandbox on.
-    const { args } = puppeteerMocks.launch.mock.calls[0][0] as { args: string[] };
+    const { args } = chromiumMocks.launch.mock.calls[0][0] as { args: string[] };
     expect(args).toContain('--enable-unsafe-swiftshader');
     expect(args).not.toContain('--no-sandbox');
     expect(args.some((arg) => arg.startsWith('--disable-web-security'))).toBe(false);
   });
 
   it('launches the resolved Chromium with the gate\'s own args', async () => {
-    puppeteerMocks.launch.mockRejectedValue(new Error('stop'));
+    chromiumMocks.launch.mockRejectedValue(new Error('stop'));
     await expect(measureCompositeHtml('<main/>')).rejects.toThrow('stop');
-    const opts = puppeteerMocks.launch.mock.calls[0][0] as { executablePath: string; args: string[] };
+    const opts = chromiumMocks.launch.mock.calls[0][0] as { executablePath: string; args: string[] };
     expect(opts.executablePath).toBe('/opt/chromium');
     expect(opts.args).toContain('--enable-unsafe-swiftshader');
   });
@@ -163,7 +170,7 @@ describe('CompositeRenderGate', () => {
   it('throws the missing-browser error and never launches when nothing resolves', async () => {
     mockResolve.mockReturnValue(null);
     await expect(measureCompositeHtml('<main/>')).rejects.toThrow(/Chromium executable not found/);
-    expect(puppeteerMocks.launch).not.toHaveBeenCalled();
+    expect(chromiumMocks.launch).not.toHaveBeenCalled();
   });
 
   describe('gate config', () => {
@@ -185,15 +192,14 @@ describe('CompositeRenderGate', () => {
       vi.stubGlobal('document', {
         createElement: () => ({ width: 0, height: 0, getContext: () => ({ drawImage: vi.fn(), getImageData: () => ({ data: new Uint8ClampedArray([0, 0, 0, 255]) }) }) }),
       });
-      const page = { setViewport: vi.fn(), setContent: vi.fn(), screenshot: vi.fn(async () => 'b64'), evaluate: vi.fn(async (cb: (v: string) => void, v: string) => cb(v)) };
-      const browser = { newPage: vi.fn(async () => page), close: vi.fn(async () => {}) };
-      puppeteerMocks.launch.mockResolvedValue(browser);
+      const page = { setContent: vi.fn(), screenshot: vi.fn(async () => 'b64'), evaluate: vi.fn(async (cb: (v: string) => void, v: string) => cb(v)) };
+      launchBrowserWithPage(page);
 
       // Default is 30s (the prior fixed value).
       await measureCompositeHtml('<main>art</main>', { settleMs: 0 });
-      expect(page.setContent).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ timeout: 30_000, waitUntil: 'networkidle0' }));
+      expect(page.setContent).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ timeout: 30_000, waitUntil: 'networkidle' }));
 
-      // Env lifts it for slow CDN-bound hosts.
+      // The environment can extend the navigation deadline.
       process.env.SINTER_COMPOSITE_GATE_TIMEOUT_MS = '90000';
       page.setContent.mockClear();
       await measureCompositeHtml('<main>art</main>', { settleMs: 0 });

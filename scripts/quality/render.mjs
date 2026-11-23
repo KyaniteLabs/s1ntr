@@ -7,6 +7,7 @@ import puppeteer from 'puppeteer';
 import { HTMLWrapper } from '../../dist/utils/htmlWrapper.js';
 import { GenericWrapper } from '../../dist/core/wrappers/GenericWrapper.js';
 import { findRevideoArtifact } from './revideo-render.mjs';
+import { prepareBrowserScratch } from '../lib/scratch-space.mjs';
 
 const SRC = '.omx/proof/live-creative-domains';
 const OUT = '.quality/renders';
@@ -56,6 +57,7 @@ const JOBS = [
   ...(revideoArtifact ? [{ name: 'revideo', previewStill: true, html: () => GenericWrapper.wrap(read(path.basename(revideoArtifact)), { domain: 'revideo' }) }] : []),
 ];
 
+prepareBrowserScratch();   // browser profile off the data volume + free-space check
 const browser = await puppeteer.launch({
   headless: 'new',
   protocolTimeout: 60000,

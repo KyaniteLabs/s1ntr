@@ -28,8 +28,11 @@ describe('ProviderRuntime', () => {
 
   it('normalizes deprecated provider endpoints without changing supported custom endpoints', () => {
     expect(normalizeProviderBaseUrl('glm', 'https://api.z.ai/api/coding/paas')).toBe('https://api.z.ai/api/anthropic');
+    expect(normalizeProviderBaseUrl('glm', 'https://api.z.ai/api/coding/paas/v4')).toBe('https://api.z.ai/api/anthropic');
     expect(normalizeProviderBaseUrl('minimax', 'https://api.minimax.io/v1')).toBe('https://api.minimax.io/anthropic');
     expect(normalizeProviderBaseUrl('glm', 'https://custom.example/v1')).toBe('https://custom.example/v1');
+    const nonAlias = 'https://custom.example/api.z.ai/api/coding/paas';
+    expect(normalizeProviderBaseUrl('glm', nonAlias)).toBe(nonAlias);
   });
 
   it('detects status labels separately from provider adapters', () => {
@@ -121,6 +124,7 @@ describe('ProviderRuntime', () => {
       configuredApiKey: 'YOUR_OPENAI_API_KEY_HERE',
       current: {
         provider: 'openai',
+        baseUrl: 'https://API.OPENAI.COM:443/v1/',
         apiKey: 'sk-live',
       },
       env: {},
@@ -135,6 +139,24 @@ describe('ProviderRuntime', () => {
       model: 'gpt-5.4-mini',
       apiStyle: 'openai',
     });
+  });
+
+  it('binds current and ambient credentials to the selected transport', () => {
+    const configuredBaseUrl = 'https://route.invalid/v1';
+    const runtime = resolveProviderRuntime({
+      provider: 'openai', configuredBaseUrl, model: 'gpt-5.4',
+      current: { provider: 'openai', baseUrl: 'https://api.openai.com/v1', apiKey: 'current-test-marker' },
+      env: { OPENAI_API_KEY: 'vendor-test-marker', LLM_API_KEY: 'generic-test-marker' },
+    });
+    expect(runtime.baseUrl).toBe(configuredBaseUrl);
+    expect(runtime.apiKey).toBeUndefined();
+  });
+
+  it('selects vendor keys from verified protocol and hostname, independently of model labels', () => {
+    expect(apiKeyEnvNamesForEndpoint('https://route.invalid/v1', 'claude-sonnet')).toEqual([]);
+    expect(apiKeyEnvNamesForEndpoint('https://route.invalid/api.openai.com/v1', 'gpt-5.4')).toEqual([]);
+    expect(apiKeyEnvNamesForEndpoint('http://api.openai.com/v1')).toEqual([]);
+    expect(apiKeyEnvNamesForEndpoint('https://api.openai.com/v1', 'claude-sonnet')).toEqual(['OPENAI_API_KEY']);
   });
 
   it('promotes Anthropic to a first-class menu key while Google stays adapter-only', () => {
@@ -185,5 +207,15 @@ describe('ProviderRuntime', () => {
 
     expect(custom.statusProvider).toBe('custom');
     expect(openaiCompatible.statusProvider).toBe('openai');
+  });
+});
+
+describe('credentials across environment namespaces', () => {
+  it('only applies a generic key paired with the selected endpoint in its namespace', () => {
+    const selected = 'https://selected-route.invalid/v1';
+    const other = 'https://other-route.invalid/v1';
+    const env = { SINTER_LLM_BASE_URL: selected, LLM_BASE_URL: other, LLM_API_KEY: 'other-route-key' };
+    expect(resolveProviderRuntime({ provider: 'custom', configuredBaseUrl: selected, env }).apiKey).toBeUndefined();
+    expect(resolveProviderRuntime({ provider: 'custom', configuredBaseUrl: other, env }).apiKey).toBe('other-route-key');
   });
 });

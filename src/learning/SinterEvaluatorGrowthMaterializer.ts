@@ -101,6 +101,21 @@ export async function materializeEvaluatorGrowth(options: GrowthMaterializeOptio
       continue;
     }
 
+    if (kind === 'owner_downvote' || kind === 'judge_hard_negative') {
+      // Advisory rescore tasks keyed by the exact artifact id (owner downvotes carry the voted uid). Never promoted to a signed negative label.
+      reviewItems.set(`${kind}:${id}`, {
+        id,
+        kind,
+        domain,
+        seat: stringValue(payload.seat),
+        currentLabel: kind === 'owner_downvote' ? 'owner_down' : 'judge_below_floor',
+        numericScore: numberValue(payload.judgeScore),
+        requestedAction: 'rescore',
+        reason: stringValue(record.reason),
+      });
+      continue;
+    }
+
     skippedItems++;
   }
 

@@ -15,8 +15,6 @@ const SITE_COMPATIBLE_GENERATOR_NAMES = [
   'textgen',
   'kinetic',
   'ascii',
-  'revideo',
-  'hyperframes',
 ];
 
 describe('registerAllGenerators real registry integration', () => {

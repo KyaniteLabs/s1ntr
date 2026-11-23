@@ -1603,6 +1603,17 @@ export class RalphLoop {
                 );
             aestheticScore = aestheticReport.score;
 
+            // Critic agreement (HybridJudge's synthesizer): when the code scorer and the aesthetic critic
+            // disagree sharply the score is less trustworthy, so say so in the feedback. Default off.
+            if (process.env.LIMINAL_CRITIC_AGREEMENT === '1') {
+              const { synthesize } = await import('../evaluation/ConfidenceSynthesizer.js');
+              const agreement = synthesize(evaluation as unknown as import('./ScoringEngine.js').ScoringResult, aestheticReport);
+              if (agreement.agreement === 'major-divergence') {
+                evaluation.issues = [...(evaluation.issues ?? []),
+                  `[critics] code score ${evaluation.score.toFixed(2)} and aesthetic ${aestheticReport.score.toFixed(2)} diverge sharply; trust neither alone`];
+              }
+            }
+
             // Apply penalty if violations detected. The penalty scales with how
             // far the aesthetic score falls BELOW the threshold — a worse score
             // gets a bigger penalty (the old code multiplied by the raw score,
@@ -2014,13 +2025,7 @@ export class RalphLoop {
           }
         }
 
-        // B1: the routing-bandit writer (`recordRoutingOutcome`) is a write-only
-        // loop — every record fed here is persisted to `~/.sinter/routing/*.json`
-        // but `getOptimalModelBandit` / `getRollingPerformance` / `getBanditStats`
-        // have zero production callers. The static `DOMAIN_ROUTING_DATA` table
-        // is the only routing source consulted downstream. The writer is left
-        // in place (no-deletion-of-unwired) for future re-wiring; the call here
-        // is a no-op until a real reader lands. See: docs/validation/clean-pass-1-2026-06-15.md
+        // Routing bandit: outcomes are recorded at owner review (LiminalProductCommandPort), not here.
 
         // Store previous code before saving current iteration
         if (!persistedCurrentIteration) {
@@ -2173,6 +2178,33 @@ export class RalphLoop {
 
         if (!normalizedOptions.tolerateErrors) {
           throw error;
+        }
+
+        // Loops are NOT starting fresh: a tolerated failure must still carry the last good code and the
+        // error text into the next iteration. When there is nothing to carry, say so loudly.
+        const errorText = error instanceof Error ? error.message : String(error);
+        const lastGood = ContextAccumulation.getHistory().filter(h => h.code).at(-1);
+        const carriedCode = previousCode || lastGood?.code || '';
+        const carried = carriedCode.length > 0;
+        ContextAccumulation.save({
+          iteration: iteration + 0.5,
+          prompt,
+          usedPrompt: '',
+          code: carriedCode,
+          evaluation: {
+            score: lastGood?.evaluation.score ?? 0,
+            issues: [`iteration ${iteration} failed before it could be scored: ${errorText.slice(0, 300)}`],
+            confidence: 0,
+            failureClass: 'infra',
+          },
+          timestamp: new Date().toISOString(),
+          maxIterations: normalizedOptions.maxIterations,
+        });
+        eventBus.emit(EventTypes.LOOP_ITERATION, 'RalphLoop', {
+          iteration, error: errorText, carriedForward: carried, carriedCodeLength: carriedCode.length,
+        });
+        if (!carried) {
+          Logger.warn('RalphLoop', `iteration ${iteration} failed and no earlier code exists: the next iteration carries only the error text (${errorText.slice(0, 200)})`);
         }
       }
     }
@@ -2374,6 +2406,7 @@ export class RalphLoop {
             failureClass: reportedFailureClass,
             activeAdaptationIds: reportedAdaptationIds,
             timestamp: completionTimestamp,
+            durationMs: duration,
           });
           // Additive generation.scored lane (#400): FitnessObservation v1 is the payload.
           if (recorded) {

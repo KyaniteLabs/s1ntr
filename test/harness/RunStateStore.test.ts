@@ -5,8 +5,8 @@
  * and that resume detection works correctly.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { mkdir, mkdtemp, open, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -18,6 +18,7 @@ import {
   SemanticBoundary,
   type RunState,
 } from '../../src/harness/RunStateStore.js';
+import { Logger } from '../../src/utils/Logger.js';
 import { Status } from '../../src/types/status.js';
 
 function makeRunState(overrides?: Partial<RunState>): RunState {
@@ -66,6 +67,40 @@ describe('RunStateStore', () => {
     expect(loaded!.maxSteps).toBe(10);
     expect(loaded!.exploredPaths).toEqual(['src/foo.ts', 'src/bar.ts']);
     expect(loaded!.mutatedFiles).toEqual(['src/foo.ts']);
+  });
+
+  it('publishes a replacement without changing the checkpoint an existing reader opened', async () => {
+    await saveRunState(makeRunState(), tempDir);
+    const previous = await open(join(tempDir, '.omx', 'run-state.json'), 'r');
+    try {
+      const next = makeRunState({ stepsCompleted: 10, lastCheckpointHash: 'feedface' });
+      await saveRunState(next, tempDir);
+      expect(JSON.parse(await previous.readFile('utf8')).stepsCompleted).toBe(3);
+      expect(await hasResumableRun(next.taskId, tempDir)).toEqual(next);
+    } finally {
+      await previous.close();
+    }
+  });
+
+  it('accepts legacy tombstones and surfaces a corrupt ledger', async () => {
+    await mkdir(join(tempDir, '.omx'));
+    const path = join(tempDir, '.omx', 'run-state.json');
+    await writeFile(path, '  \n');
+    expect(await readRunState(tempDir)).toBeNull();
+    await writeFile(path, '{"runId":');
+    await expect(readRunState(tempDir)).rejects.toThrow(/corrupt.*run-state|run-state.*corrupt/i);
+    const warn = vi.spyOn(Logger, 'warn').mockImplementation(() => {});
+    try {
+      expect(await hasResumableRun('task-abc', tempDir)).toBeNull();
+      expect(warn).toHaveBeenCalledWith('RunStateStore', expect.stringContaining('task-abc'), expect.any(Error));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('distinguishes an unreadable checkpoint from a missing one', async () => {
+    await mkdir(join(tempDir, '.omx', 'run-state.json'), { recursive: true });
+    await expect(readRunState(tempDir)).rejects.toMatchObject({ code: 'EISDIR' });
   });
 
   it('returns null when no run state exists', async () => {
@@ -135,6 +170,18 @@ describe('RunStateStore', () => {
     expect(context).toContain('abcdef12');
     expect(context).toContain('Last verification: test failed at 2026-04-11T10:04:30.000Z — LLMModeAgent tests failed');
     expect(context).toContain('Do NOT re-explore');
+  });
+
+  it('guides a suspended run to verify uncheckpointed edits without repeating them', () => {
+    const state = makeRunState({ stepsCompleted: 10, focusStatus: 'committed' });
+    const context = formatResumeContext(state);
+    expect(context).toContain('10/10 steps');
+    expect(context).toContain('Task ID: task-abc');
+    expect(context).toContain('Focus status: committed');
+    expect(context).toMatch(/without a recorded checkpoint/i);
+    expect(context).toMatch(/verify.*before.*edit/i);
+    expect(context).toMatch(/do not re-apply/i);
+    expect(context).not.toContain('Mutations were made and checkpointed.');
   });
 
   it('includes a zero inspection budget and omits an absent budget', () => {

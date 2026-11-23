@@ -48,6 +48,8 @@ export interface DaemonConfig {
 	minVisualScore: number;
 }
 
+const MAX_CHALLENGER_ITERATIONS = 5;
+
 export const DEFAULT_DAEMON_CONFIG: DaemonConfig = {
 	assetDir: "/var/www/kyanitelabs/sinter-asset",
 	minSampleSize: 200,
@@ -88,6 +90,10 @@ export class LivingSiteDaemon {
 		await registerAllGenerators();
 		this.generatorsRegistered = true;
 		Logger.info("LivingSiteDaemon", "Generators registered");
+	}
+
+	generatorAttemptLimit(): number {
+		return this.slotManager.getAllSlots().length * MAX_CHALLENGER_ITERATIONS;
 	}
 
 	/**
@@ -394,7 +400,7 @@ export class LivingSiteDaemon {
 	 */
 	buildRalphLoopOptions(slot: SiteSlot): LoopOptions {
 		return {
-			maxIterations: 5,
+			maxIterations: MAX_CHALLENGER_ITERATIONS,
 			minQualityScore: 0.78,
 			collabDomain: slot.domains[0],
 			evaluationCriteria: [

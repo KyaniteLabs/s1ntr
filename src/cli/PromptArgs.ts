@@ -3,11 +3,21 @@
 // swallowed by the generate path instead of routing to its handler.
 const KNOWN_COMMANDS = new Set([
   'help',
+  'entropy',
+  'plugins',
+  'capabilities',
+  'fragments',
+  'seed',
+  'export',
+  'memo',
+  'notation',
   'data',
   'archive',
   'gui-evolve',
+  'gallery',
   'sss-score',
   'rescue',
+  'rescore',
   'gbg',
   'field',
   'phases',
@@ -25,9 +35,11 @@ const KNOWN_COMMANDS = new Set([
   'taxonomy',
   'authoritative-create',
   'authoritative-reevaluate',
+  'rerender-reevaluate',
   'campaign-continue',
   'campaign-owner-decision',
   'campaign-owner-decision-start',
+  'judge',
   'judgment',
   'organism',
   'bridge',
@@ -69,25 +81,59 @@ const KNOWN_COMMANDS = new Set([
   'self-improve',
   'serve',
   'ship',
-  'sing',
   'site',
   'studio',
   'swarm',
   'taste',
+  'judge-evidence',
+  'legacy-backfill',
+  'learn-from-existing-art',
+  'runtime',
 ]);
+
+// Public spellings expand to the same argv used by the existing handlers.
+export const COMMAND_ALIASES = new Map(Object.entries({
+  mediums: 'domains', score: 'sss-score', learn: 'dream', motifs: 'compost',
+  crossovers: 'gbg', autopilot: 'garden', promote: 'ship', movements: 'islands',
+  'turning-points': 'phases', api: 'bridge', session: 'organism', titles: 'name',
+  vocabulary: 'taxonomy', neighbors: 'field frontier', breed: 'field interpolate',
+  'release-check': 'market status', events: 'ledger query', tasks: 'ledger list', surprise: 'emergence',
+}));
+
+const SUBCOMMAND_ALIASES = new Map(Object.entries({
+  'compost mine': 'compost digest', 'compost list': 'compost seeds list', 'compost evolve': 'compost soup',
+  'domains check': 'domains gauntlet', 'garden balance': 'garden rebalance', 'garden curate': 'garden tend',
+  'dream study': 'dream run', 'dream reserve': 'dream transfer', 'dream pick-best': 'dream autoseal',
+  'dream verify': 'dream guard', 'dream stack': 'dream compound', 'name make': 'name',
+  'name budget': 'conductor', 'prompt from-graph': 'prompt synthesize', 'prompt next': 'prompt-next',
+  'judge compare': 'judgment compare', 'self-improve scan': 'improve scan', 'self-improve run': 'improve run',
+  'ship --undo': 'ship rollback',
+}));
 
 /** Colon forms advertised in help (e.g. image:validate) must never become NL prompts. */
 const KNOWN_COLON_COMMANDS = new Set(['image:validate', 'image:attach']);
 
-/**
- * Normalize help-style `image:validate` into `image validate` argv shape.
- * Returns possibly rewritten [cmd, ...cmdArgs].
- */
+export function cliSubcommandAlias(cmd: string, arg: string): string[] | undefined {
+  return SUBCOMMAND_ALIASES.get(`${cmd} ${arg}`)?.split(' ');
+}
+
+/** Expand public names into the command and arguments used by the existing handlers. */
 export function normalizeCliCommand(
   cmd: string | null,
   cmdArgs: string[],
 ): { cmd: string | null; cmdArgs: string[] } {
   if (!cmd) return { cmd, cmdArgs };
+  const alias = COMMAND_ALIASES.get(cmd);
+  if (alias) {
+    const [canonical, ...prefix] = alias.split(' ');
+    cmd = canonical;
+    cmdArgs = [...prefix, ...cmdArgs];
+  }
+  const sub = cliSubcommandAlias(cmd, cmdArgs[0]);
+  if (sub) {
+    const [canonical, ...prefix] = sub;
+    return { cmd: canonical, cmdArgs: [...prefix, ...cmdArgs.slice(1)] };
+  }
   if (KNOWN_COLON_COMMANDS.has(cmd) || (cmd.startsWith('image:') && cmd.includes(':'))) {
     const [head, ...rest] = cmd.split(':');
     if (head && rest.length > 0) {
@@ -99,7 +145,7 @@ export function normalizeCliCommand(
 
 export function isKnownCliCommand(cmd: string | null): boolean {
   if (!cmd) return false;
-  if (KNOWN_COMMANDS.has(cmd) || KNOWN_COLON_COMMANDS.has(cmd)) return true;
+  if (KNOWN_COMMANDS.has(cmd) || COMMAND_ALIASES.has(cmd) || KNOWN_COLON_COMMANDS.has(cmd)) return true;
   if (cmd.startsWith('image:') && KNOWN_COMMANDS.has('image')) return true;
   return false;
 }
@@ -129,6 +175,17 @@ export interface CommandTypoSuggestion {
 
 const COMMAND_LIKE_MAX_WORDS = 4;
 const BARE_WORD = /^[a-z][a-z0-9-]*$/i;
+
+export function retiredCliCommandMessage(cmd: string | null, cmdArgs: string[]): string | undefined {
+  if (cmd === 'sing') return 'Sing moved to LoopCover.';
+  if (cmd && cmdArgs.length === 0) {
+    const words = cmd.trim().split(/\s+/);
+    if (words[0] === 'sing' && words.length <= COMMAND_LIKE_MAX_WORDS && words.every(w => BARE_WORD.test(w))) {
+      return 'Sing moved to LoopCover.';
+    }
+  }
+  return undefined;
+}
 
 function editDistance(a: string, b: string): number {
   const m = a.length;
@@ -164,7 +221,7 @@ export function suggestCommandForTypo(cmd: string | null, cmdArgs: string[]): Co
   // didn't word-split) whose first word is a real command.
   if (cmdArgs.length === 0 && /\s/.test(cmd)) {
     const words = cmd.trim().split(/\s+/);
-    if (words.length <= COMMAND_LIKE_MAX_WORDS && words.every(w => BARE_WORD.test(w)) && KNOWN_COMMANDS.has(words[0])) {
+    if (words.length <= COMMAND_LIKE_MAX_WORDS && words.every(w => BARE_WORD.test(w)) && isKnownCliCommand(words[0])) {
       return { command: words[0], reason: 'quoted-phrase' };
     }
     return null;

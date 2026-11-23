@@ -1,3 +1,4 @@
+// @no-cli-spawn: spawns scripts/quality helpers, not bin/sinter
 import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -257,7 +258,7 @@ describe('DeterministicUltraQA', () => {
   it('uses the real non-shell executor for the safe startup command and persists recomputable evidence', async () => {
     const repoRoot = process.cwd(); const command = FIXED_ULTRAQA_COMMANDS.find(item => item.kind === 'startup')!;
     const result = await executeFixedUltraQACommand(command, repoRoot);
-    expect(result.exitCode).toBe(0); expect(`${result.stdout}${result.stderr}`).toContain('🎨 Sinter: Creative Coding Agent');
+    expect(result.exitCode).toBe(0); expect(`${result.stdout}${result.stderr}`).toContain('🎨 S1NTR: a tool for coding art.');
     const root = repository(); const frozen = freezeUltraQASource(root); materializeArtifacts(root, command); const persisted = evidence(root, command, result);
     const receipt = createUltraQACommandReceipt(command, result, frozen, 'b'.repeat(64), 'c'.repeat(64), root, { stdout: result.stdout, stderr: result.stderr, toolVersion: result.toolVersion, paths: persisted.logs });
     expect(validateUltraQACommandReceipt(receipt, command, frozen, persisted.target, result, root)).toEqual([]);

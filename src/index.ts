@@ -447,9 +447,9 @@ export async function run(prompt: string, options: {
     // so the custom medium is recorded and reusable. Parsing is best-effort: a
     // missing/invalid descriptor never fails the run (the HTML artifact still wins).
     let domainSidecarPath: string | undefined;
-    if (String(options.collabDomain || '').toLowerCase() === 'meta') {
+    if (String(options.collabDomain || '').toLowerCase() === 'custom') {
       try {
-        const { parseMetaDescriptorFromHtml } = await import('./generators/meta/MetaGenerator.js');
+        const { parseMetaDescriptorFromHtml } = await import('./generators/custom/CustomGenerator.js');
         const descriptor = parseMetaDescriptorFromHtml(finalCode);
         if (descriptor) {
           domainSidecarPath = path.join(outputResolved, `${project}-final.domain.json`);
@@ -886,6 +886,7 @@ export { validateSVG, type SVGValidationOptions, type SVGValidationResult } from
 export { StrudelGenerator } from './generators/strudel/StrudelGenerator.js';
 export { ToneGenerator } from './generators/tone/ToneGenerator.js';
 export { RevideoGenerator } from './generators/revideo/RevideoGenerator.js';
+export { HyperFramesGenerator } from './generators/hyperframes/HyperFramesGenerator.js';
 export { HTMLWebGenerator } from './generators/html/HTMLWebGenerator.js';
 export { ASCIIArtGenerator } from './generators/ascii/ASCIIArtGenerator.js';
 export { TextGenerativeGenerator } from './generators/textgen/TextGenerativeGenerator.js';

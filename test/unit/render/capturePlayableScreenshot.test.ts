@@ -49,6 +49,14 @@ describe('playable screenshot ownership and failure handling', () => {
       .rejects.toThrow(`SCORE_CAPTURE_FAILED: ${stage}`);
     expect(mocks.close).toHaveBeenCalledOnce();
   });
+  it('L3-16: a screenshot deadline is a typed timeout, a plain browser failure is not', async () => {
+    mocks.screenshot.mockRejectedValueOnce(Object.assign(new Error('Timeout 60000ms exceeded'), { name: 'TimeoutError' }));
+    await expect(capturePlayableScreenshot('/tmp/page.html', '/tmp/shot.png')).rejects.toMatchObject({
+      message: 'SCORE_CAPTURE_FAILED: screenshot (timeout)', stage: 'screenshot', timedOut: true });
+    mocks.screenshot.mockRejectedValueOnce(new Error('Target closed'));
+    await expect(capturePlayableScreenshot('/tmp/page.html', '/tmp/shot.png')).rejects.toMatchObject({
+      message: 'SCORE_CAPTURE_FAILED: screenshot', timedOut: false });
+  });
   it('launches sandboxed unless the container opt-out is set', async () => {
     const saved = process.env.LIMINAL_DISABLE_SANDBOX;
     try {

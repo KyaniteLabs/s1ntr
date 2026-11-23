@@ -62,7 +62,7 @@ add('disk-free-mb', freeMb != null && freeMb >= 2048, freeMb == null ? 'df parse
 
 // 3) mece CLI must NOT start generation
 const mece = run(process.execPath, [path.join(repoRoot, 'bin/sinter'), 'mece', 'manifest'], { timeout: 45_000 });
-const meceLooksLikeGen = /Generating:|RalphLoop|Creative Coding Agent/i.test(mece.stdout + mece.stderr);
+const meceLooksLikeGen = /Generating:|RalphLoop|a tool for coding art/i.test(mece.stdout + mece.stderr);
 const meceOk =
   mece.status === 0 &&
   !meceLooksLikeGen &&

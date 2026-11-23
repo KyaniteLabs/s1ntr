@@ -1,0 +1,21 @@
+## 01-model-audition.txt
+# organ: routing | step: model-audition | data: fake
+$ node <repo>/bin/sinter model audition x
+# cwd: <out>/_proj (repo: <repo>)
+# --- stdout
+
+=== Model assimilation audition ===
+Model: x
+Provider: dry-run
+Source: dry-run (UNVERIFIED — not a real promotion pass)
+Ready: YES
+PASS Tool-call schema reliability: Candidate emits JSON tool calls and avoids prose-only completion.
+PASS Creative-domain routing: Audition preserved creative-domain routing before promotion.
+PASS Self-improvement mutation readiness: Candidate satisfies the mutation-required self-improvement contract.
+PASS No-op honesty: Candidate reports no-op/inspection-only as failure when mutation is required.
+PASS Cost/latency record: Cost/latency was recorded for the audition (live measures wall-clock; dry-run uses placeholders).
+Recommendation: x passed dry-run contract checks (unverified); supply a live candidate to audition.
+
+# --- stderr
+# exit: 0
+

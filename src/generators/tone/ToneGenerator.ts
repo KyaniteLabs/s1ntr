@@ -7,7 +7,8 @@
  */
 
 import { TierBasedGenerator, type TierBasedGeneratorOptions } from '../TierBasedGenerator.js';
-import { LLMClient } from '../../llm/LLMClient.js';
+import { directAttemptTimeoutMs } from '../directAttemptTimeout.js';
+import type { LLMClient } from '../../llm/LLMClient.js';
 import { HTMLValidator } from '../../core/validators/HTMLValidator.js';
 import { ToneValidator } from '../../core/validators/ToneValidator.js';
 import { GenerationError } from '../../errors/GenerationError.js';
@@ -125,12 +126,12 @@ export class ToneGenerator extends TierBasedGenerator {
   }
 
   private async retryToneDirect(prompt: string, options?: ToneOptions): Promise<string | null> {
-    const directLlm = this.createDirectToneClient();
+    await this.resolveConfigIfNeeded();
+    const timeoutMs = directAttemptTimeoutMs(this.llm.getTimeoutOverride());
     const prompts = [
       {
         maxTokens: 1600,
         temperature: 0.2,
-        attemptTimeoutMs: 75_000,
         text: [
           'Create compact complete HTML for Tone.js ambient synth audio.',
           'Must start <!DOCTYPE html>, include Tone.js CDN, a button, Tone.start(), Tone.Transport.bpm.value=84, one audible synth loop or drone, and close </html>.',
@@ -140,7 +141,6 @@ export class ToneGenerator extends TierBasedGenerator {
       {
         maxTokens: Math.min(options?.maxTokens ?? 2800, 3200),
         temperature: 0.2,
-        attemptTimeoutMs: 75_000,
         text: [
           `Create a complete browser-playable Tone.js artifact for: ${prompt}`,
           'Return one complete HTML document with <!DOCTYPE html>, <html>, <head>, charset meta, title, <body>, and closing </body></html>.',
@@ -153,7 +153,6 @@ export class ToneGenerator extends TierBasedGenerator {
       {
         maxTokens: Math.min(options?.maxTokens ?? 2800, 3200),
         temperature: 0.2,
-        attemptTimeoutMs: 75_000,
         text: [
           'Return raw complete HTML only. First characters must be <!DOCTYPE html> and final characters must be </html>.',
           '<head> must contain <meta charset="UTF-8">, <title>Tone.js Patch</title>, and the Tone.js CDN script.',
@@ -164,12 +163,13 @@ export class ToneGenerator extends TierBasedGenerator {
     ];
 
     for (const directPrompt of prompts) {
-      const result = await this.completeWithAttemptTimeout(directLlm, {
+      const result = await this.completeWithAttemptTimeout({
         systemPrompt: 'Return only complete runnable source. No markdown, no prose.',
         prompt: directPrompt.text,
         maxTokens: directPrompt.maxTokens,
         temperature: directPrompt.temperature,
-      }, options?.signal, directPrompt.attemptTimeoutMs);
+        preferMiniMaxOpenAI: true,
+      }, options?.signal, timeoutMs);
       if (!result.success || !result.text) continue;
       const clean = this.normalizeToneArtifact(result.text);
       if (this.validateOutput(clean).valid) return clean;
@@ -180,7 +180,6 @@ export class ToneGenerator extends TierBasedGenerator {
   }
 
   private async completeWithAttemptTimeout(
-    llm: LLMClient,
     request: Parameters<LLMClient['complete']>[0],
     parentSignal: AbortSignal | undefined,
     timeoutMs: number,
@@ -193,25 +192,11 @@ export class ToneGenerator extends TierBasedGenerator {
     const abortFromParent = () => controller.abort(parentSignal?.reason);
     parentSignal?.addEventListener('abort', abortFromParent, { once: true });
     try {
-      return await llm.complete({ ...request, signal: controller.signal });
+      return await this.llm.complete({ ...request, signal: controller.signal, providerTimeoutMs: timeoutMs });
     } finally {
       clearTimeout(timeout);
       parentSignal?.removeEventListener('abort', abortFromParent);
     }
-  }
-
-  private createDirectToneClient(): LLMClient {
-    const config = this.llm.getConfig();
-    if (/api\.minimax\.io\/anthropic/i.test(config.baseUrl)) {
-      return new LLMClient({
-        baseUrl: 'https://api.minimax.io/v1',
-        apiKey: config.apiKey,
-        model: config.model,
-        temperature: 0.2,
-        maxTokens: 1600,
-      });
-    }
-    return this.llm;
   }
 
   private describeError(error: unknown): string {

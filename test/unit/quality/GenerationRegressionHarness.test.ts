@@ -1,17 +1,53 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   normalizeRegressionDomain,
+  runGenerationRegression,
   inferRegressionBaseUrl,
 } from '../../../src/quality/GenerationRegressionHarness.js';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { SVGGenerator } from '../../../src/generators/svg/SVGGenerator.js';
 
 describe('GenerationRegressionHarness', () => {
+  it('keeps the HyperFrames engine available through the public API', async () => {
+    const api = await import('../../../src/index.js');
+    const { HyperFramesGenerator } = await import('../../../src/generators/hyperframes/HyperFramesGenerator.js');
+    expect(api.HyperFramesGenerator).toBe(HyperFramesGenerator);
+  });
+
+  it('rejects a retired domain at the CLI before resolving a provider', () => {
+    const script = fileURLToPath(new URL('../../../scripts/quality/generate-wrap-evaluate.ts', import.meta.url));
+    const result = spawnSync(process.execPath, ['--import', 'tsx', script, 'fixture', 'fixture', 'revideo'], { encoding: 'utf8' });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('Unsupported regression domain: revideo');
+  });
+
+  it('saves the SVG generator output as a vector artifact', async () => {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><circle cx="10" cy="10" r="8"/></svg>';
+    const generate = vi.spyOn(SVGGenerator.prototype, 'generate').mockResolvedValue(svg);
+    const outputRoot = mkdtempSync(path.join(tmpdir(), 'svg-regression-'));
+    try {
+      const result = await runGenerationRegression({ domain: 'svg', provider: 'ollama', model: 'fixture', outputRoot });
+      expect(path.basename(result.rawArtifactPath)).toBe('raw.svg');
+      expect(readFileSync(result.rawArtifactPath, 'utf8')).toBe(svg);
+    } finally {
+      generate.mockRestore();
+      rmSync(outputRoot, { recursive: true, force: true });
+    }
+  });
+
   describe('normalizeRegressionDomain', () => {
-    it('preserves revideo domain', () => {
-      expect(normalizeRegressionDomain('revideo')).toBe('revideo');
+    it('rejects retired export engines', () => {
+      for (const engine of ['revideo', 'hyperframes']) {
+        expect(() => normalizeRegressionDomain(engine)).toThrow(/unsupported regression domain/i);
+      }
     });
 
     it('preserves all valid domains', () => {
-      const domains = ['p5', 'glsl', 'three', 'strudel', 'hydra', 'tone', 'html', 'ascii', 'revideo'] as const;
+      const domains = ['p5', 'glsl', 'three', 'strudel', 'hydra', 'tone', 'html', 'ascii', 'svg'] as const;
       domains.forEach((d) => {
         expect(normalizeRegressionDomain(d)).toBe(d);
       });

@@ -1,3 +1,4 @@
+import { writeFile } from 'node:fs/promises';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 interface FakeRequest {
@@ -23,7 +24,8 @@ vi.mock('puppeteer', () => ({
 // Avoid needing ffmpeg.
 vi.mock('../../src/export/VideoExporter.js', () => ({
   VideoExporter: class MockVideoExporter {
-    framesToVideo = vi.fn().mockResolvedValue(undefined);
+    framesToVideo = vi.fn(async (_frames: string, output: string) => writeFile(output, 'video'));
+    probe = vi.fn().mockResolvedValue({ width: 64, height: 64, durationSec: 1 });
   },
 }));
 

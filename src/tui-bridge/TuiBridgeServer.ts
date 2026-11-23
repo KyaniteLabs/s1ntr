@@ -7,12 +7,12 @@ import {
 import fs from 'node:fs';
 import path from 'node:path';
 import { existsSync } from 'node:fs';
-import { readdir, stat } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import { randomBytes, createHmac } from 'node:crypto';
 import { TuiBridgeService } from './TuiBridgeService.js';
 import type { LLMClient } from '../llm/LLMClient.js';
 import type { TuiInputRequest } from './types.js';
-import { loadConfig, saveConfig, type UserConfig } from '../config/ConfigLoader.js';
+import { loadConfig, type UserConfig } from '../config/ConfigLoader.js';
 import { LLMClient as RuntimeLLMClient } from '../llm/LLMClient.js';
 import { formatHarnessExecutorProjection, type HarnessTransportAuthority } from '../identity/harnessTransportGuard.js';
 import { resolveRuntimeExecutorAuthority } from '../identity/executorAuthorityBootstrap.js';
@@ -40,7 +40,7 @@ import { Exporter } from '../export/Exporter.js';
 import { normalizePath, assertSafeSegment } from '../utils/normalizePath.js';
 import { HTMLWrapper } from '../utils/htmlWrapper.js';
 import { Logger } from '../utils/Logger.js';
-import { logRateLimitViolation } from '../security/SecurityLogger.js';
+import { IpRateLimiter, rateLimitEnvMinutes, rateLimitEnvMax } from '../security/RateLimiter.js';
 import { validateCode } from '../utils/validation.js';
 import { isVendorAssetPath, readVendorAsset } from '../utils/vendorAssets.js';
 import { eventBus } from '../core/EventBus.js';
@@ -104,6 +104,24 @@ export function writeSse(res: ServerResponse, chunk: string): boolean {
 export interface PreviewEndpointsOptions {
   /** Gallery directory for `/api/gallery` and the file-backed gallery routes. */
   galleryDir?: string | null;
+  /** Directory of `generate` output (`<64 hex>/playable.html`) that `/api/gallery` also lists. */
+  artifactsDir?: string | null;
+}
+
+/**
+ * Where `sinter serve` looks for saved works (#1711). `generate` writes
+ * `~/.sinter/output/artifacts/<sha>/playable.html`; the `./gallery` project dirs are the
+ * compose/GUI store. An explicit `--gallery <dir>` means "that dir only".
+ */
+export function resolveServeGalleryDirs(
+  galleryFlag: string | undefined,
+  home: string = process.env.HOME || '/tmp',
+): { galleryDir: string; artifactsDir: string | null } {
+  if (galleryFlag) return { galleryDir: path.resolve(galleryFlag), artifactsDir: null };
+  return {
+    galleryDir: path.resolve('gallery'),
+    artifactsDir: path.join(home, '.sinter', 'output', 'artifacts'),
+  };
 }
 
 export class TuiBridgeServer {
@@ -118,6 +136,8 @@ export class TuiBridgeServer {
   private readonly micPreview: TuiMicPreviewEndpoints;
   private readonly preview: PreviewEndpoints;
   private llm?: LLMClient;
+  /** `/model` picks bind to the requesting session only; other sessions keep the server's launch client. */
+  private readonly sessionLlm = new Map<string, LLMClient>();
   private readonly harnessTransportAuthority?: HarnessTransportAuthority;
 
   constructor(bridge: TuiBridgeService, options: BridgeServerOptions = {}) {
@@ -592,9 +612,10 @@ export class TuiBridgeServer {
           return;
         }
         // Pass the full LLMClient (not just stream function)
-        const result = await this.bridge.submitInput(sessionId, input, this.llm);
-        if (this.llm) {
-          this.bridge.updateStatus(sessionId, { executor: this.llm.getHarnessExecutorProjection() });
+        const sessionClient = this.llmFor(sessionId);
+        const result = await this.bridge.submitInput(sessionId, input, sessionClient);
+        if (sessionClient) {
+          this.bridge.updateStatus(sessionId, { executor: sessionClient.getHarnessExecutorProjection() });
         }
         this.json(res, 200, result);
         return;
@@ -712,6 +733,10 @@ data: ${JSON.stringify(stored.event)}
     res.end(JSON.stringify(body));
   }
 
+  private llmFor(sessionId: string): LLMClient | undefined {
+    return this.sessionLlm.get(sessionId) ?? this.llm;
+  }
+
   private async handleModelPicker(sessionId: string, input: TuiInputRequest): Promise<boolean> {
     const text = input.text.trim();
     if (!text.startsWith('/model') && !text.startsWith('/provider')) return false;
@@ -723,13 +748,13 @@ data: ${JSON.stringify(stored.event)}
       parts.shift();
     }
     if (parts.length === 0) {
-      this.bridge.emitCommandResponse(sessionId, await this.renderModelPicker());
+      this.bridge.emitCommandResponse(sessionId, await this.renderModelPicker(sessionId));
       return true;
     }
 
     const resolved = await this.resolveModelSelection(parts);
     if (!resolved) {
-      this.bridge.emitCommandResponse(sessionId, `Unknown model selection: ${parts.join(' ')}\n\n${await this.renderModelPicker()}`);
+      this.bridge.emitCommandResponse(sessionId, `Unknown model selection: ${parts.join(' ')}\n\n${await this.renderModelPicker(sessionId)}`);
       return true;
     }
 
@@ -738,7 +763,7 @@ data: ${JSON.stringify(stored.event)}
       ? ({ defaultProvider: resolved.provider, providers: {} } as UserConfig)
       : (loaded.value as UserConfig);
     const providerConfig = this.providerConfigForSelection(config, resolved.provider);
-    const currentConfig = this.llm?.getConfig();
+    const currentConfig = this.llmFor(sessionId)?.getConfig();
     const runtime = resolveProviderRuntime({
       provider: resolved.provider,
       model: resolved.model,
@@ -746,6 +771,7 @@ data: ${JSON.stringify(stored.event)}
       configuredApiKey: providerConfig.apiKey,
       current: currentConfig ? {
         provider: this.providerLabel(currentConfig.baseUrl, currentConfig.model),
+        baseUrl: currentConfig.baseUrl,
         apiKey: currentConfig.apiKey,
       } : undefined,
       env: process.env,
@@ -756,33 +782,24 @@ data: ${JSON.stringify(stored.event)}
       return true;
     }
 
-    config.defaultProvider = resolved.provider;
-    config.providers = config.providers || {};
-    config.providers[resolved.provider] = {
-      ...providerConfig,
-      baseUrl: runtime.baseUrl,
-      model: runtime.model,
-    };
-    if (runtime.apiKey) config.providers[resolved.provider].apiKey = runtime.apiKey;
-    await saveConfig(config);
-
-    this.llm = new RuntimeLLMClient({
+    const picked = new RuntimeLLMClient({
       role: 'studio',
       baseUrl: runtime.baseUrl,
       model: runtime.model,
-      apiKey: runtime.apiKey,
+      apiKey: runtime.apiKey ?? '',
       temperature: 0.5,
       maxTokens: 4096,
       harnessTransportAuthority: this.harnessTransportAuthority,
     });
+    this.sessionLlm.set(sessionId, picked);
 
     this.bridge.updateStatus(sessionId, {
       provider: runtime.statusProvider,
       model: runtime.model,
-      activeTask: `Model switched to ${resolved.label}`,
-      executor: this.llm.getHarnessExecutorProjection(),
+      activeTask: `Studio dialogue model switched to ${resolved.label}`,
+      executor: picked.getHarnessExecutorProjection(),
     });
-    this.bridge.emitCommandResponse(sessionId, `Switched model to ${resolved.label} (${runtime.model}) via ${runtime.label}\nExecutor truth: ${formatHarnessExecutorProjection(this.llm.getHarnessExecutorProjection())}`);
+    this.bridge.emitCommandResponse(sessionId, `Switched Studio dialogue model to ${resolved.label} (${runtime.model}) via ${runtime.label}\nScope: this session's Studio dialogue only (other sessions keep their model). Governed Create keeps using the configured generator seat (roles.generator).\nExecutor truth: ${formatHarnessExecutorProjection(picked.getHarnessExecutorProjection())}`);
     return true;
   }
 
@@ -808,10 +825,10 @@ data: ${JSON.stringify(stored.event)}
     return {};
   }
 
-  private async renderModelPicker(): Promise<string> {
+  private async renderModelPicker(sessionId: string): Promise<string> {
     const loaded = await loadConfig();
     const config = loaded.isErr() ? undefined : (loaded.value as UserConfig);
-    const currentConfig = this.llm?.getConfig();
+    const currentConfig = this.llmFor(sessionId)?.getConfig();
     const currentModel = currentConfig?.model;
     const currentProvider = currentConfig?.baseUrl ? this.providerLabel(currentConfig.baseUrl, currentConfig.model) : config?.defaultProvider;
     const lines = [
@@ -910,98 +927,13 @@ data: ${JSON.stringify(stored.event)}
 // class, so there is exactly one implementation of each handler.
 // ─────────────────────────────────────────────────────────────────────────────
 
-interface IpRateState {
-  hits: number[];
-}
-
-interface IpRateConfig {
-  windowMs: number;
-  max: number;
-  /** 429 body fields, mirroring the original express-rate-limit handlers. */
-  error: string;
-  message: string;
-}
-
-/**
- * Env parsing mirroring the original `src/security/RateLimiter.ts` factory:
- * window values are minutes clamped to [1, 1440], max values are requests
- * clamped to [1, 10000]; anything unparseable falls back to the default.
- */
-function rateLimitEnvMinutes(envVar: string, defaultMinutes: number): number {
-  const val = process.env[envVar];
-  if (!val) return defaultMinutes;
-  const parsed = parseInt(val, 10);
-  if (Number.isNaN(parsed) || parsed < 1 || parsed > 1440) return defaultMinutes;
-  return parsed;
-}
-
-function rateLimitEnvMax(envVar: string, defaultMax: number): number {
-  const val = process.env[envVar];
-  if (!val) return defaultMax;
-  const parsed = parseInt(val, 10);
-  if (Number.isNaN(parsed) || parsed < 1 || parsed > 10000) return defaultMax;
-  return parsed;
-}
-
-/**
- * Minimal in-memory IP-keyed rate limiter that mirrors the original
- * `express-rate-limit` thresholds (standard/export/sandbox) without pulling
- * Express into the bridge. Sliding window, `RateLimit-*` headers on every
- * response, and a 429 with the original JSON body shape (`error`, `message`,
- * `retryAfter`) when the window is exceeded.
- */
-class IpRateLimiter {
-  private readonly states = new Map<string, IpRateState>();
-  private readonly label: string;
-  private readonly config: IpRateConfig;
-  constructor(label: string, config: IpRateConfig) {
-    this.label = label;
-    this.config = config;
-  }
-  consume(req: IncomingMessage, res: ServerResponse): boolean {
-    const key = (req.socket?.remoteAddress ?? 'unknown') + ':' + this.label;
-    const now = Date.now();
-    const cutoff = now - this.config.windowMs;
-    let state = this.states.get(key);
-    if (!state) { state = { hits: [] }; this.states.set(key, state); }
-    state.hits = state.hits.filter((t) => t > cutoff);
-    const remainingAfter = Math.max(0, this.config.max - state.hits.length - 1);
-    // Sliding window: the limit frees up when the oldest hit in the window
-    // expires, so report the real reset rather than a fresh full window.
-    const resetSeconds = state.hits.length > 0
-      ? Math.max(1, Math.ceil((state.hits[0] + this.config.windowMs - now) / 1000))
-      : Math.ceil(this.config.windowMs / 1000);
-    res.setHeader('RateLimit-Limit', String(this.config.max));
-    res.setHeader('RateLimit-Remaining', String(remainingAfter));
-    res.setHeader('RateLimit-Reset', String(resetSeconds));
-    if (state.hits.length >= this.config.max) {
-      Logger.warn('RateLimiter', `Rate limit exceeded for IP: ${req.socket?.remoteAddress ?? 'unknown'}`, {
-        path: req.url,
-        method: req.method,
-        limit: this.config.max,
-        windowMs: this.config.windowMs,
-      });
-      logRateLimitViolation(req.url ?? 'unknown', {
-        ip: req.socket?.remoteAddress ?? undefined,
-        details: { method: req.method, limit: this.config.max, windowMs: this.config.windowMs },
-      });
-      res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': String(resetSeconds) });
-      res.end(JSON.stringify({
-        error: this.config.error,
-        message: this.config.message,
-        retryAfter: Math.ceil(resetSeconds / 60) + ' minutes',
-      }));
-      return false;
-    }
-    state.hits.push(now);
-    return true;
-  }
-}
-
 export class PreviewEndpoints {
   private currentSketch = '';
+  /** When the current sketch was last set; a newer saved artifact outranks an older sketch at `/` (Sol F14). */
+  private currentSketchAt = 0;
   private versionedSketches: Map<number, string> = new Map();
   private galleryDir: string | null;
+  private artifactsDir: string | null;
   private sseClients: Set<ServerResponse> = new Set();
   private sinterFsInstance: SinterFS | null = null;
   private readonly standardLimiter: IpRateLimiter;
@@ -1016,6 +948,7 @@ export class PreviewEndpoints {
 
   constructor(options: PreviewEndpointsOptions = {}) {
     this.galleryDir = options.galleryDir ?? null;
+    this.artifactsDir = options.artifactsDir ?? null;
     this.isTestEnv = process.env.NODE_ENV === 'test';
     this.isProduction = process.env.NODE_ENV === 'production';
     this.standardLimiter = new IpRateLimiter('standard', {
@@ -1044,8 +977,38 @@ export class PreviewEndpoints {
     this.galleryDir = dir;
   }
 
-  serveSketch(code: string | null): void {
+  setArtifactsDir(dir: string | null): void {
+    this.artifactsDir = dir;
+  }
+
+  /** Saved `generate` output: one folder per artwork holding playable.html (+ optional provenance.txt). */
+  private async listSavedArtifacts(): Promise<Array<{ id: string; domain: string; playable: string; mtimeMs: number }>> {
+    if (!this.artifactsDir) return [];
+    let names: string[];
+    try {
+      names = await readdir(this.artifactsDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    }
+    const out: Array<{ id: string; domain: string; playable: string; mtimeMs: number }> = [];
+    for (const id of names) {
+      const playable = path.join(this.artifactsDir, id, 'playable.html');
+      let mtimeMs: number;
+      try { mtimeMs = (await stat(playable)).mtimeMs; } catch { continue; }
+      let domain = '';
+      try {
+        const provenance = JSON.parse(await readFile(path.join(this.artifactsDir, id, 'provenance.txt'), 'utf8')) as { domain?: unknown };
+        if (typeof provenance.domain === 'string') domain = provenance.domain;
+      } catch { /* provenance is optional */ }
+      out.push({ id, domain, playable, mtimeMs });
+    }
+    return out.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  }
+
+  serveSketch(code: string | null, atMs: number = Date.now()): void {
     this.currentSketch = code || '';
+    this.currentSketchAt = atMs;
   }
 
   setVersionCode(version: number, code: string): void {
@@ -1144,7 +1107,19 @@ export class PreviewEndpoints {
 
     // Root: serve the current sketch as a wrapped HTML page.
     if (req.method === 'GET' && pathname === '/') {
-      const html = HTMLWrapper.wrap(this.currentSketch || '');
+      // Same selection as /api/gallery: the newest saved artifact's playable page wins over an older (or absent)
+      // sketch; with nothing to show the page says so instead of rendering an empty canvas.
+      let html: string;
+      const latest = (await this.listSavedArtifacts())[0];
+      if (latest && (!this.currentSketch || latest.mtimeMs >= this.currentSketchAt)) {
+        html = await readFile(latest.playable, 'utf8');
+      } else if (this.currentSketch) {
+        html = HTMLWrapper.wrap(this.currentSketch);
+      } else {
+        html = '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Nothing to preview yet</title></head>'
+          + '<body style="font-family:sans-serif;background:#0b0d12;color:#e8ecf4;padding:2rem"><h1>Nothing to preview yet</h1>'
+          + '<p>No saved artwork was found. Run <code>sinter generate --prompt "your idea"</code>, then reload.</p></body></html>';
+      }
       this.sandboxGeneratedPage(res);
       res.writeHead(200, { 'Content-Type': 'text/html' });
       res.end(html);
@@ -1201,14 +1176,9 @@ export class PreviewEndpoints {
 
     // /api/gallery — list of project directories under galleryDir.
     if (req.method === 'GET' && pathname === '/api/gallery') {
-      if (!this.galleryDir) {
-        this.jsonOk(res, { projects: [] });
-        return true;
-      }
       try {
-        const gallery = new Gallery(this.galleryDir);
-        const projects = await gallery.listProjectDirs();
-        this.jsonOk(res, { projects });
+        const projects = this.galleryDir ? await new Gallery(this.galleryDir).listProjectDirs() : [];
+        this.jsonOk(res, { projects, artifacts: await this.listSavedArtifacts() });
       } catch (err) {
         Logger.error('PreviewServer', 'Failed to list gallery:', err);
         this.jsonErr(res, 500, 'Failed to list gallery');

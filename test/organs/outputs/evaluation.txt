@@ -1,0 +1,10 @@
+## 03-no-config-after-fix2.txt
+# organ: sss-score | step: no-config-after-fix2 | data: fake
+$ node <repo>/bin/sinter sss-score <out>/_data/pieces/html-0048.html
+# cwd: <out>/_proj (repo: <repo>)
+# --- stdout
+# --- stderr
+[SandboxConfig] Chromium has no usable OS sandbox on this host, so it runs unsandboxed. Give Chromium an AppArmor profile that allows userns, or set LIMINAL_DISABLE_SANDBOX=true to choose this on purp
+sss-score needs the judge seats from <out>/_home/.sinter/config.json, which does not exist. Run "sinter provider help" to set up a provider, then retry.
+# exit: 1
+

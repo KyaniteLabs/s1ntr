@@ -3,7 +3,36 @@ import { describe, expect, it, vi } from 'vitest';
 import { runProductionCliCompose }
   from '../../../src/cli/LiminalProductionCompose.js';
 
+import { assertProviderAttemptAllowed, withProviderAttemptGuard }
+  from '../../../src/llm/LLMClient.js';
+
 describe('governed CLI compose — transport authority', () => {
+  it('counts every Compose transport attempt through nested per-call guards', async () => {
+    const root = path.resolve('/tmp/liminal-compose-attempt-cap');
+    const runResearchProviderEffect = vi.fn(async (input: { effect: () => Promise<unknown> }) =>
+      input.effect());
+    const factory = vi.fn(async () => ({
+      root,
+      identities: { generator: 'test-provider/test-model' },
+      port: { runResearchProviderEffect },
+      close: vi.fn(async () => undefined),
+    }) as never);
+    const sent = vi.fn();
+    const composeFromPrompt = vi.fn(async () => {
+      for (let i = 0; i < 3; i++) {
+        await withProviderAttemptGuard(() => undefined, async () => {
+          assertProviderAttemptAllowed();
+          sent();
+        });
+      }
+      return { html: '<html></html>', title: 'test', successCount: 1, layers: [] } as never;
+    });
+    await expect(runProductionCliCompose(
+      { prompt: 'layered sunset', outputRoot: root, maxProviderCalls: 2 }, { composeFromPrompt }, factory,
+    )).rejects.toThrow('PROVIDER_CALL_LIMIT_EXHAUSTED');
+    expect(sent).toHaveBeenCalledTimes(2);
+  });
+
   it('rejects non-absolute output root', async () => {
     const delegate = { composeFromPrompt: vi.fn() };
     await expect(runProductionCliCompose(
@@ -41,7 +70,7 @@ describe('governed CLI compose — transport authority', () => {
     const grantCall = runResearchProviderEffect.mock.calls[0][0];
     expect(grantCall.role).toBe('generator');
     expect(grantCall.identity).toBe('test-provider/test-model');
-    expect(grantCall.binding).toEqual({ prompt: 'aurora over mountains', surface: 'cli-compose' });
+    expect(grantCall.binding).toEqual({ prompt: 'aurora over mountains', surface: 'cli-compose', hybrid: false });
     expect(grantCall.idempotencyKey).toMatch(/^production-compose:[a-f0-9]{64}$/);
     // Delegate.composeFromPrompt was invoked inside the grant scope
     expect(composeFromPrompt).toHaveBeenCalledTimes(1);

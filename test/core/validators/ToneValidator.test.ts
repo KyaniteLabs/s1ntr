@@ -228,4 +228,30 @@ Tone.Transport.start();
       expect(ToneValidator.getMinSize()).toBe(100);
     });
   });
+
+  describe('singletons and bad arguments that threw at runtime (v2r1: 26 tone runs)', () => {
+    it.each([
+      ['new Tone.Transport()', 'const t = new Tone.Transport();\nt.start();'],
+      ['new Tone.Destination()', 'const d = new Tone.Destination();'],
+      ['Tone.Transport() as a function', 'Tone.Transport();'],
+      ['Tone.Destination() as a function', 'const d = Tone.Destination();'],
+    ])('rejects %s and points at the singleton', (_name, body) => {
+      const result = ToneValidator.validate(`const s = new Tone.Synth().toDestination();\n${body}`);
+      expect(result.valid).toBe(false);
+      expect(result.errors.join('\n')).toMatch(/singleton/i);
+    });
+
+    it('rejects a waveform name passed to setValueAtTime', () => {
+      const result = ToneValidator.validate(
+        'const o = new Tone.Oscillator().toDestination();\no.frequency.setValueAtTime("sine", 0);');
+      expect(result.valid).toBe(false);
+      expect(result.errors.join('\n')).toMatch(/setValueAtTime/);
+    });
+
+    it('still accepts the singletons used as the docs show', () => {
+      const result = ToneValidator.validate(
+        'const s = new Tone.Synth().toDestination();\nTone.Transport.scheduleRepeat((t) => s.triggerAttackRelease("C4", "8n", t), "4n");\nTone.Transport.start();\nTone.Destination.volume.value = -6;\no.frequency.setValueAtTime(440, 0);'.replace('o.frequency', 's.frequency'));
+      expect(result.errors).toEqual([]);
+    });
+  });
 });

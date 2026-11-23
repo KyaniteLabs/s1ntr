@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 /* eslint-disable no-console -- CLI entry point: console output is intentional */
 /**
  * Phase 9 Lane 2: Task Ledger CLI
@@ -10,13 +11,29 @@
  */
 
 import type { TaskLedger } from './TaskLedger.js';
+import { IllegalTaskTransitionError } from './types.js';
 import type { LedgerCLIAction } from './types.js';
-import { TaskRunner } from './TaskRunner.js';
+import { DEFAULT_TASK_ITERATIONS, TaskRunner } from './TaskRunner.js';
 import { TaskVerifier } from './TaskVerifier.js';
 // @architecture Phase 10 conveyor imports
 import { TaskIntake } from './TaskIntake.js';
 import { ConveyorRunner } from './ConveyorRunner.js';
 import { ConveyorMonitor } from './ConveyorMonitor.js';
+
+/**
+ * Provider calls made by a ledger task run under one journal-reserved, receipted generator grant
+ * (same governed path as `sinter fix`). A unique key per run: a repeat run must run again, not replay.
+ */
+async function runGoverned<T>(surface: string, binding: Record<string, unknown>, maxGeneratorAttempts: number,
+  effect: () => Promise<T>): Promise<T> {
+  const { runProductionCliCycleEffect } = await import('../cli/LiminalProductionProviderEffect.js');
+  return runProductionCliCycleEffect({
+    idempotencyKey: `production-${surface}:${randomUUID()}`,
+    binding: { surface, ...binding },
+    maxGeneratorAttempts,
+    effect,
+  });
+}
 
 export function parseArgs(args: string[]): LedgerCLIAction {
   const argv = args[0] === 'ledger' ? args.slice(1) : args;
@@ -224,7 +241,8 @@ export async function execute(
       }
       console.log(`\n  Running task ${task.id}: ${task.title}...\n`);
       const runner = new TaskRunner(ledger);
-      const attempt = await runner.runTask(task);
+      const attempt = await runGoverned('ledger-run', { taskId: task.id }, DEFAULT_TASK_ITERATIONS,
+        () => runner.runTask(task));
       console.log(`  Attempt:     ${attempt.id}`);
       console.log(`  Iterations:  ${attempt.iterations}`);
       console.log(`  Score:       ${attempt.finalScore.toFixed(3)}`);
@@ -272,15 +290,21 @@ export async function execute(
         console.error(`Task not found: ${action.taskId}`);
         process.exit(1);
       }
-      ledger.recordDecision({
-        id: `dec-${Date.now()}`,
-        taskId: action.taskId,
-        candidateId: action.candidateId,
-        decision: 'accepted',
-        rationale: 'Accepted via CLI',
-        score: 0,
-        decidedAt: new Date().toISOString(),
-      });
+      try {
+        ledger.recordDecision({
+          id: `dec-${Date.now()}`,
+          taskId: action.taskId,
+          candidateId: action.candidateId,
+          decision: 'accepted',
+          rationale: 'Accepted via CLI',
+          score: 0,
+          decidedAt: new Date().toISOString(),
+        });
+      } catch (err) {
+        if (!(err instanceof IllegalTaskTransitionError)) throw err;
+        console.error(`Cannot accept: task ${action.taskId} is already ${task.status}.`);
+        process.exit(1);
+      }
       console.log(`Accepted candidate ${action.candidateId} for task ${action.taskId}`);
       break;
     }
@@ -373,7 +397,10 @@ export async function execute(
         break;
       }
       const runner = new ConveyorRunner(ledger);
-      const result = await runner.runBatch({ maxTasks: action.maxTasks });
+      const taskCount = action.maxTasks ? pendingTasks.slice(0, action.maxTasks).length : pendingTasks.length;
+      const result = await runGoverned('ledger-batch', { maxTasks: action.maxTasks ?? null },
+        taskCount * DEFAULT_TASK_ITERATIONS,
+        () => runner.runBatch({ maxTasks: action.maxTasks }));
       const monitor = new ConveyorMonitor(ledger);
       const dashboard = monitor.generateDashboard(result);
       console.log(monitor.formatText(dashboard));

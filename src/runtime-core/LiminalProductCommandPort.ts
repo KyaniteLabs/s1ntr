@@ -1,8 +1,13 @@
+import { JUDGE_SCORE_RULE_ID, JUDGE_POSITIVE_FLOOR, JUDGE_HARD_NEGATIVE_BELOW, classifyJudgeScore } from '../learning/JudgeFloor.js';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, rm, stat, utimes } from 'node:fs/promises';
+import { mkdir, readFile, rm, utimes } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { OperatorStateFileCorruptError, parseOperatorStateFile } from '../utils/operatorStateFile.js';
 import { writeFileAtomic } from '../utils/atomicWrite.js';
+import { acquireDirLease, LeaseTimeoutError } from '../utils/dirLease.js';
+import { buildLegacyBackfillRow, type LegacyBackfillRow } from '../learning/LegacyBackfill.js';
+import { classifyEvaluationBinding, evaluationBindingDigest, type EvaluationBinding } from './LiminalCommandService.js';
 import type { LiminalCommandResult, LiminalCommandService,
   LiminalCreativeCommand, RenderedObservation } from './LiminalCommandService.js';
 import type { KnowledgeApplicationReceipt } from
@@ -40,6 +45,23 @@ export interface VerifiedLiminalOwnerEvidence {
   readonly domain: string;
   readonly quality: number;
   readonly decision: 'accepted';
+  readonly provenance?: 'judge-scoring-evidence';
+}
+
+/** Rule that lets the judge's own score count as admitted review evidence. The thresholds are not a caller knob. */
+export const JUDGE_SCORING_RULE_ID = JUDGE_SCORE_RULE_ID;
+
+export interface JudgeScoringEvidence extends Omit<VerifiedLiminalOwnerEvidence, 'decision'> {
+  readonly provenance: 'judge-scoring-evidence';
+  readonly decision: 'accepted' | 'rejected';
+  readonly ruleId: string;
+  readonly policyDigest: string;
+  readonly judge: string;
+  readonly score: number;
+  /** 'legacy-unbound': the Create predates the signed evaluation binding, so its score is not signature-covered. */
+  readonly evaluationBinding: Exclude<EvaluationBinding, 'mismatch'>;
+  /** Signed label: few-shot/evaluator-training when accepted, hard-negative when rejected. */
+  readonly label: CreativeLabelAdmission;
 }
 
 export interface LiminalCommandProposal {
@@ -116,51 +138,54 @@ export class MemoryLiminalProductCommandStore implements LiminalProductCommandSt
 }
 
 const DEFAULT_LEASE_TIMEOUT_MS = 90_000;
+/** A live, heartbeating holder (a long production-create) is waited for this long. */
+const DEFAULT_LEASE_MAX_WAIT_MS = 30 * 60_000;
 
 export interface FileLiminalProductCommandStoreOptions {
   /** Max wait for the single-writer lease. Env: LIMINAL_PRODUCT_STORE_LEASE_TIMEOUT_MS. */
   readonly leaseTimeoutMs?: number;
+  /** Max wait while the holder is alive and heartbeating. Env: LIMINAL_PRODUCT_STORE_LEASE_MAX_WAIT_MS. Default 30 min. */
+  readonly leaseMaxWaitMs?: number;
   /** Called once when the lease is busy. Defaults to a stderr message. */
   readonly onLeaseWait?: (holder: string) => void;
+}
+
+export class LiminalProductStoreReadError extends Error {
+  readonly code: string;
+  constructor(cause: unknown) {
+    super(cause instanceof OperatorStateFileCorruptError ? cause.message : 'LIMINAL_PRODUCT_STORE_INVALID', { cause });
+    this.code = cause instanceof OperatorStateFileCorruptError ? cause.code : 'LIMINAL_PRODUCT_STORE_INVALID';
+  }
 }
 
 export class FileLiminalProductCommandStore implements LiminalProductCommandStore {
   private queue = Promise.resolve();
   private readonly leaseTimeoutMs: number;
+  private readonly leaseMaxWaitMs: number;
   private readonly onLeaseWait: (holder: string) => void;
   constructor(private readonly file: string, options: FileLiminalProductCommandStoreOptions = {}) {
     const envTimeout = Number(process.env.LIMINAL_PRODUCT_STORE_LEASE_TIMEOUT_MS);
     this.leaseTimeoutMs = options.leaseTimeoutMs
       ?? (Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : DEFAULT_LEASE_TIMEOUT_MS);
+    const envMax = Number(process.env.LIMINAL_PRODUCT_STORE_LEASE_MAX_WAIT_MS);
+    this.leaseMaxWaitMs = options.leaseMaxWaitMs
+      ?? (Number.isFinite(envMax) && envMax > 0 ? envMax : DEFAULT_LEASE_MAX_WAIT_MS);
     this.onLeaseWait = options.onLeaseWait ?? (holder => {
       process.stderr.write(`Waiting for the product store lease held by ${holder} `
-        + `(timeout ${Math.round(this.leaseTimeoutMs / 1000)}s; set LIMINAL_PRODUCT_STORE_LEASE_TIMEOUT_MS to change)\n`);
+        + `(healthy holder: up to ${Math.round(this.leaseMaxWaitMs / 1000)}s, else ${Math.round(this.leaseTimeoutMs / 1000)}s; set LIMINAL_PRODUCT_STORE_LEASE_MAX_WAIT_MS / LIMINAL_PRODUCT_STORE_LEASE_TIMEOUT_MS to change)\n`);
     });
     if (!path.isAbsolute(file)) throw new Error('LIMINAL_PRODUCT_STORE_PATH_NOT_ABSOLUTE');
   }
 
-  private async leaseOwnerAlive(lease: string): Promise<boolean> {
-    try {
-      const ownerText = await readFile(path.join(lease, 'owner.json'), 'utf8');
-      const owner = JSON.parse(ownerText) as { pid?: number };
-      if (!Number.isSafeInteger(owner.pid) || owner.pid! < 1) return false;
-      process.kill(owner.pid!, 0);
-      return true;
-    } catch (error) {
-      return (error as NodeJS.ErrnoException).code === 'EPERM';
-    }
-  }
-  private async leaseHolder(lease: string): Promise<string> {
-    try {
-      const owner = JSON.parse(await readFile(path.join(lease, 'owner.json'), 'utf8')) as { pid?: number };
-      return Number.isSafeInteger(owner.pid) ? `pid ${owner.pid}` : 'unknown holder';
-    } catch {
-      return 'unknown holder';
-    }
-  }
   async read(key: string): Promise<LiminalProductProjection | null> {
     await this.queue;
-    return (await this.readAll())[key] ?? null;
+    const values = await this.readAll();
+    if (!Object.hasOwn(values, key)) return null;
+    const value = values[key];
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new LiminalProductStoreReadError(new Error('Invalid stored projection'));
+    }
+    return value;
   }
   write(key: string, projection: LiminalProductProjection): Promise<void> {
     const operation = this.queue.then(async () => {
@@ -187,36 +212,14 @@ export class FileLiminalProductCommandStore implements LiminalProductCommandStor
     // takeover must be SHORTER than the deadline, or a stale lease can never
     // be reclaimed inside the wait window — every acquire after a crash was a
     // guaranteed timeout (the srv zero-production "missing root" sibling).
-    const deadline = Date.now() + this.leaseTimeoutMs;
-    let acquired = false;
-    let announced = false;
-    while (!acquired && Date.now() < deadline) {
-      try {
-        await mkdir(lease);
-        await writeFileAtomic(path.join(lease, 'owner.json'),
-          `${JSON.stringify({ token, pid: process.pid })}\n`);
-        acquired = true;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-        try {
-          if (Date.now() - (await stat(lease)).mtimeMs > 20_000
-            && !(await this.leaseOwnerAlive(lease))) {
-            await rm(lease, { recursive: true, force: true });
-            continue;
-          }
-        } catch (leaseError) {
-          if ((leaseError as NodeJS.ErrnoException).code !== 'ENOENT') throw leaseError;
-        }
-        if (!announced) {
-          announced = true;
-          this.onLeaseWait(await this.leaseHolder(lease));
-        }
-        await new Promise(resolve => setTimeout(resolve, 25));
+    try {
+      await acquireDirLease({ lease, token, timeoutMs: this.leaseTimeoutMs, maxWaitMs: this.leaseMaxWaitMs,
+        onWait: this.onLeaseWait });
+    } catch (error) {
+      if (error instanceof LeaseTimeoutError) {
+        throw new Error(`LIMINAL_PRODUCT_STORE_LEASE_TIMEOUT: lease ${lease} held by ${error.holder} after ${error.waitedMs}ms`);
       }
-    }
-    if (!acquired) {
-      throw new Error(`LIMINAL_PRODUCT_STORE_LEASE_TIMEOUT: lease ${lease} held by `
-        + `${await this.leaseHolder(lease)} after ${this.leaseTimeoutMs}ms`);
+      throw error;
     }
     const heartbeat = setInterval(() => {
       const now = new Date();
@@ -245,10 +248,14 @@ export class FileLiminalProductCommandStore implements LiminalProductCommandStor
   }
   private async readAll(): Promise<Record<string, LiminalProductProjection>> {
     try {
-      return JSON.parse(await readFile(this.file, 'utf8'));
+      const value = parseOperatorStateFile(this.file, await readFile(this.file, 'utf8'));
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new Error('Invalid product store envelope');
+      }
+      return value as Record<string, LiminalProductProjection>;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
-      throw error;
+      throw new LiminalProductStoreReadError(error);
     }
   }
 }
@@ -321,6 +328,34 @@ export class LiminalProductCommandPort {
         result: await this.createAuthority.execute(compiled?.command ?? command),
         ...(compiled ? { teachingReceipt: compiled.receipt } : {}) };
     });
+  }
+
+  async replayCreate(command: LiminalCreativeCommand): Promise<LiminalProductProjection> {
+    const projection = await this.store.read(command.idempotencyKey);
+    if (projection === null) throw new Error('LOOP_REPLAY_PROJECTION_MISSING');
+    if (projection.kind !== 'create' || projection.commandDigest !== commandDigest(command)) {
+      throw new Error('LOOP_REPLAY_PROJECTION_MISSING_OR_WRONG_COMMAND');
+    }
+    return projection;
+  }
+
+  /** Read a journaled Create bound to its original and, if taught, compiled command. */
+  async readVerifiedCreateResult(command: LiminalCreativeCommand,
+    projection: Extract<LiminalProductProjection, { kind: 'create' }>): Promise<LiminalCommandResult> {
+    if (projection.commandDigest !== commandDigest(command)) {
+      throw new Error('LIMINAL_CREATE_PROJECTION_COMMAND_MISMATCH');
+    }
+    if (command.teaching && !this.teachingCompiler) {
+      throw new Error('LIMINAL_TEACHING_COMPILER_REQUIRED');
+    }
+    const compiled = command.teaching ? await this.teachingCompiler!.compile(command) : undefined;
+    const result = await this.createAuthority.readVerifiedResult(
+      command.idempotencyKey, compiled?.command ?? command);
+    if (projection.result?.operationId !== result.operationId
+      || projection.result.receipt?.signature !== result.receipt.signature) {
+      throw new Error('LIMINAL_CREATE_PROJECTION_RESULT_MISMATCH');
+    }
+    return result;
   }
 
   /** Projects a signed re-evaluation of the exact persisted Create artifact. */
@@ -400,8 +435,11 @@ export class LiminalProductCommandPort {
     return projection;
   }
 
-  async verifiedArtifact(idempotencyKey: string) {
+  async verifiedArtifact(idempotencyKey: string, expectedArtifactDigest?: string) {
     const projection = await this.verifiedCreate(idempotencyKey);
+    if (expectedArtifactDigest && projection.result.receipt.artifactDigest !== expectedArtifactDigest) {
+      throw new Error('LIMINAL_ARTIFACT_RECEIPT_INVALID');
+    }
     return this.createAuthority.readVerifiedArtifact(projection.result);
   }
 
@@ -444,6 +482,133 @@ export class LiminalProductCommandPort {
       quality: review.admissions.routing.criterionScore, decision: review.command.decision });
   }
 
+  /**
+   * The judge's score on a signed, rendered, admission-eligible Create counts as review evidence.
+   * Create receipt, evidence digests and identity checks are the same as for an owner review;
+   * only the human signature is replaced by the judge result, and the label says so.
+   */
+  async readBoundJudgeSource(createKey: string): Promise<{
+    evidence: JudgeScoringEvidence; source: string; rendererEnvironmentDigest?: string;
+  }> {
+    const evidence = await this.judgeScoringEvidence(createKey);
+    const result = await this.readBoundJudgeResult(evidence);
+    const artifact = await this.createAuthority.readVerifiedArtifact(result);
+    return { evidence, source: artifact.source, rendererEnvironmentDigest: result.evidence.rendererEnvironmentDigest };
+  }
+
+  async readBoundTasteAdmission(createKey: string): Promise<CreativeLabelAdmission> {
+    const { evidence, source } = await this.readBoundJudgeSource(createKey);
+    if (evidence.decision !== 'accepted') throw new Error('LIMINAL_JUDGE_EVIDENCE_REJECTED');
+    const artifactDigest = createHash('sha256').update(source).digest('hex');
+    return createCreativeLabelAdmission({
+      artifactDigest, evidenceDigest: evidence.evidenceDigest,
+      decisionDigest: commandDigest({ use: 'evaluator-training', artifactDigest,
+        createReceiptDigest: evidence.createReceiptDigest, reviewDecisionDigest: evidence.reviewDecisionDigest }),
+      trainingEvidence: { operationDigest: createHash('sha256').update(evidence.operationId).digest('hex'),
+        quality: evidence.quality },
+      rendered: true, identityValid: true, digestMatched: true, degraded: false,
+      trustKind: 'judge-scoring', allowedUses: ['evaluator-training'],
+    }, { sealAdmission: value => this.createAuthority.sealOwnerReviewAdmission(value) });
+  }
+
+  private async readBoundJudgeResult(evidence: JudgeScoringEvidence): Promise<LiminalCommandResult> {
+    const result = await this.createAuthority.readVerifiedResult(evidence.createKey);
+    if (evidence.evaluationBinding !== 'bound' || result.operationId !== evidence.operationId
+      || result.lineageId !== evidence.lineageId || result.domain !== evidence.domain
+      || result.receipt.commandDigest !== evidence.createCommandDigest
+      || commandDigest(result.receipt) !== evidence.createReceiptDigest) {
+      throw new Error('LIMINAL_JUDGE_SOURCE_BINDING_INVALID');
+    }
+    return result;
+  }
+
+  async judgeScoringEvidence(createKey: string): Promise<JudgeScoringEvidence> {
+    const create = await this.store.read(createKey);
+    const result = create?.kind === 'create' ? create.result : undefined;
+    if (!create || !result || !this.createAuthority.verifyReceipt(result.receipt)
+      || result.evidence.status !== 'rendered' || !result.evidence.evidenceDigest
+      || result.receipt.evidenceDigest !== result.evidence.evidenceDigest
+      || result.evaluation.evidenceDigest !== result.evidence.evidenceDigest
+      || result.evaluation.degraded
+      || !result.evaluation.identityValid
+      || result.evaluation.evaluatorIdentity !== result.roles.evaluator
+      || !Number.isFinite(result.evaluation.score)
+      || classifyEvaluationBinding(result.receipt, result.evaluation) === 'mismatch') {
+      throw new Error('LIMINAL_JUDGE_EVIDENCE_CREATE_INVALID');
+    }
+    // Only a genuinely judge-scored result teaches; provider/render/timeout failures never mint lessons.
+    // 'none' is what a healthy real Create carries; rejecting it made every genuine judge score look like infra failure.
+    if (result.evaluation.failureClass && result.evaluation.failureClass !== 'aesthetic'
+      && result.evaluation.failureClass !== 'none') {
+      throw new Error('LIMINAL_JUDGE_EVIDENCE_INFRA_FAILURE');
+    }
+    const policyDigest = commandDigest({ ruleId: JUDGE_SCORING_RULE_ID,
+      positiveFloor: JUDGE_POSITIVE_FLOOR, hardNegativeBelow: JUDGE_HARD_NEGATIVE_BELOW });
+    if (result.evaluation.scoreState === 'unscored') throw new Error('LIMINAL_JUDGE_EVIDENCE_INFRA_FAILURE');
+    const decision = classifyJudgeScore(result.evaluation.score);
+    // Sol L3-15: art admission and lesson eligibility are separate. A positive parent must have been admitted; a real,
+    // signed, non-degraded low judgment may still become a hard negative or reach its gray band, but only when the
+    // sole reason it was not admitted is the quality floor (a render, containment or identity failure is no lesson).
+    if (decision === 'accepted' && !result.evaluation.admissionEligible) {
+      throw new Error('LIMINAL_JUDGE_EVIDENCE_CREATE_INVALID');
+    }
+    if (decision !== 'accepted' && (result.receipt.evaluationDigest === undefined
+      || (!result.evaluation.admissionEligible && (
+        result.receipt.evaluationDigest !== evaluationBindingDigest(result.evaluation)
+        || result.evaluation.rejectionReasons.length !== 1
+        || result.evaluation.rejectionReasons[0] !== 'below-quality-floor'
+      )))) {
+      throw new Error('LIMINAL_JUDGE_EVIDENCE_CREATE_INVALID');
+    }
+    // Gray zone: neither a positive nor a hard negative, so it teaches nothing.
+    if (decision === 'gray') throw new Error('LIMINAL_JUDGE_EVIDENCE_GRAY_ZONE');
+    const judge = result.evaluation.evaluatorIdentity;
+    const evaluationBinding = classifyEvaluationBinding(result.receipt, result.evaluation) as
+      Exclude<EvaluationBinding, 'mismatch'>;
+    // The scheme is part of the decision only when legacy, so existing bound digests do not change.
+    const decisionDigest = commandDigest({ ruleId: JUDGE_SCORING_RULE_ID, policyDigest, judge,
+      score: result.evaluation.score, decision, createKey,
+      createReceiptDigest: commandDigest(result.receipt),
+      ...(evaluationBinding === 'legacy-unbound' ? { evaluationBinding } : {}) });
+    const evidenceDigest = result.evidence.evidenceDigest;
+    const label = createCreativeLabelAdmission({
+      artifactDigest: result.receipt.artifactDigest, evidenceDigest, decisionDigest,
+      rendered: true, identityValid: true, digestMatched: true, degraded: false,
+      trustKind: 'judge-scoring',
+      allowedUses: decision === 'accepted' ? ['few-shot', 'evaluator-training']
+        : ['hard-negative'] }, { sealAdmission: value =>
+        this.createAuthority.sealOwnerReviewAdmission(value) });
+    return Object.freeze({ createKey, ownerReviewKey: `judge-scoring:${policyDigest}`,
+      provenance: 'judge-scoring-evidence' as const, operationId: result.operationId,
+      lineageId: result.lineageId,
+      // A taught Create signs the compiled command. The projection tracks the original request.
+      createCommandDigest: evaluationBinding === 'bound' ? result.receipt.commandDigest : create.commandDigest,
+      createReceiptDigest: commandDigest(result.receipt), reviewCommandDigest: policyDigest,
+      reviewDecisionDigest: decisionDigest, reviewReceiptDigest: decisionDigest,
+      artifactDigest: result.receipt.artifactDigest, evidenceDigest,
+      criterionDigest: commandDigest({ ruleId: JUDGE_SCORING_RULE_ID, judge }),
+      domain: result.domain, quality: result.evaluation.score, decision, ruleId: JUDGE_SCORING_RULE_ID,
+      policyDigest, judge, score: result.evaluation.score, evaluationBinding, label });
+  }
+
+  /**
+   * Legacy pieces with no run root or Create receipt: a sealed, reduced-weight label bound to the file
+   * digest and the pinned judge. No Create receipt is forged, and it can never be dream evidence.
+   */
+  legacyBackfillRow(input: Parameters<typeof buildLegacyBackfillRow>[0]): LegacyBackfillRow {
+    return buildLegacyBackfillRow(input, { sealAdmission: value =>
+      this.createAuthority.sealOwnerReviewAdmission(value) });
+  }
+
+  /** Accepted judge evidence in the shape the dream path consumes; rejections throw. */
+  async verifiedJudgeEvidence(createKey: string, requireBoundJournal = false):
+    Promise<JudgeScoringEvidence & VerifiedLiminalOwnerEvidence> {
+    const evidence = await this.judgeScoringEvidence(createKey);
+    if (evidence.decision !== 'accepted') throw new Error('LIMINAL_JUDGE_EVIDENCE_REJECTED');
+    if (requireBoundJournal) await this.readBoundJudgeResult(evidence);
+    return evidence as JudgeScoringEvidence & VerifiedLiminalOwnerEvidence;
+  }
+
   linkDreamProjection(operationIds: readonly string[], projectionDigest: string): Promise<void[]> {
     return Promise.all(operationIds.map(operationId =>
       this.createAuthority.linkDreamProjection(operationId, projectionDigest)));
@@ -456,7 +621,9 @@ export class LiminalProductCommandPort {
 
   runResearchProviderEffect<T>(input: { idempotencyKey: string; binding: unknown;
     identity: string; role: 'generator' | 'evaluator' | 'harness' | 'studio';
-    maxTransportAttempts: 1;
+    maxTransportAttempts: number;
+    countActualAttempts?: boolean;
+    replayOnly?: boolean;
     effect: () => Promise<T> }): Promise<T> {
     return this.createAuthority.runJudgmentEffect(input);
   }
@@ -487,11 +654,11 @@ export class LiminalProductCommandPort {
         || !this.reviewAuthority!.verify(command, receipt)) {
         throw new Error('LIMINAL_OWNER_REVIEW_RECEIPT_INVALID');
       }
+      const authority = { sealAdmission: (value: unknown) => this.createAuthority.sealOwnerReviewAdmission(value) };
+      const admissions = mintOwnerReviewAdmissions(command, receipt, create.result, authority);
+      await recordOwnerRoutingOutcome(command, receipt, create.result, authority);
       return { kind: 'owner-review', status: 'reviewed', commandDigest: digest, command,
-        receipt, admissions: mintOwnerReviewAdmissions(
-          command, receipt, create.result, {
-            sealAdmission: value => this.createAuthority.sealOwnerReviewAdmission(value),
-          }) };
+        receipt, admissions };
     });
   }
 
@@ -526,6 +693,15 @@ export class LiminalProductCommandPort {
 }
 
 const SHA256 = /^[a-f0-9]{64}$/;
+
+/** Production writer for the routing bandit (see routing/OwnerRoutingOutcome.ts). Never blocks the review. */
+async function recordOwnerRoutingOutcome(command: LiminalOwnerReviewCommand,
+  receipt: LiminalOwnerReviewReceipt, create: LiminalCommandResult,
+  authority: CreativeAdmissionSigner): Promise<void> {
+  if (command.decision !== 'accepted') return;
+  const { recordOwnerAcceptedRouting } = await import('../routing/OwnerRoutingOutcome.js');
+  await recordOwnerAcceptedRouting({ create, decisionDigest: receipt.decisionDigest }, authority);
+}
 
 function mintOwnerReviewAdmissions(command: LiminalOwnerReviewCommand,
   receipt: LiminalOwnerReviewReceipt,

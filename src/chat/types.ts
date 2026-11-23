@@ -101,7 +101,7 @@ export interface Suggestion {
 
 // Domain & Technique (types) — derived from the canonical DomainString so this
 // subset can never drift in spelling from src/types/domains.ts (was a hand-copied union).
-export type Domain = Extract<DomainString, 'p5' | 'shader' | 'three' | 'music' | 'hydra' | 'strudel' | 'revideo'>;
+export type Domain = Extract<DomainString, 'p5' | 'shader' | 'three' | 'music' | 'hydra' | 'strudel'>;
 
 export interface Technique {
   name: string;

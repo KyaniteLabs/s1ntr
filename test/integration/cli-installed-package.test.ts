@@ -19,6 +19,7 @@ beforeAll(() => {
   mkdirSync(path.join(pkg, 'bin'), { recursive: true });
   mkdirSync(cwd);
   copyFileSync(path.join(repoRoot, 'bin/sinter'), path.join(pkg, 'bin/sinter'));
+  copyFileSync(path.join(repoRoot, 'bin/wait-for-dist.mjs'), path.join(pkg, 'bin/wait-for-dist.mjs'));
   copyFileSync(path.join(repoRoot, 'package.json'), path.join(pkg, 'package.json'));
   symlinkSync(path.join(repoRoot, 'dist'), path.join(pkg, 'dist'));
   symlinkSync(path.join(repoRoot, 'node_modules'), path.join(pkg, 'node_modules'));

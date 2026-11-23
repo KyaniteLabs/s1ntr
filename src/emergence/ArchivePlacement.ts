@@ -65,8 +65,9 @@ export class ArchivePlacement {
     qualityScore: number;
     signals: EmergenceSignals;
     dreamAdmission?: ArchiveEntry['dreamAdmission'];
+    creativeLabel?: ArchiveEntry['creativeLabel'];
   }): PlacementResult {
-    const { artifactRef, descriptor, lineage, qualityScore, signals, dreamAdmission } = params;
+    const { artifactRef, descriptor, lineage, qualityScore, signals, dreamAdmission, creativeLabel } = params;
     const cellId = this.computeCellId(descriptor);
 
     // Quality gate
@@ -83,6 +84,7 @@ export class ArchivePlacement {
       signals,
       archivedAt: new Date().toISOString(),
       ...(dreamAdmission ? { dreamAdmission } : {}),
+      ...(creativeLabel ? { creativeLabel } : {}),
     };
 
     let cell = this.cells.get(cellId);

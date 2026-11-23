@@ -100,6 +100,9 @@ export function findUnknownPatternMethods(code: string): string[] {
   visit(program);
   return [...unknown].map((name) => {
     const match = METHOD_BY_LOWER.get(name.toLowerCase());
+    if (name === 'bpm') {
+      return "Strudel pattern has no method '.bpm()'; it throws when the pattern is evaluated and the piece plays nothing. Set tempo in cycles per minute with '.cpm()': for 120 bpm in 4/4 write '.cpm(120/4)', and leave it out to keep the default";
+    }
     return match
       ? `Strudel pattern has no method '.${name}()'; names are case-sensitive, use '.${match}()'`
       : `Strudel pattern has no method '.${name}()'; it throws when the pattern is evaluated and the piece plays nothing`;

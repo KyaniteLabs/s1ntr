@@ -17,6 +17,7 @@
  * LLM calls, bounded wall-clock.
  */
 
+import type { Browser } from 'playwright';
 import {
   DARK_LUMINANCE_THRESHOLD,
   BRIGHT_LUMINANCE_THRESHOLD,
@@ -24,9 +25,28 @@ import {
   verdictFromMeasure as sharedVerdictFromMeasure,
   type LuminanceMeasure,
 } from '../render/LuminanceVerdict.js';
-import { SOFTWARE_WEBGL_ARGS, sandboxOptOutArgs } from '../security/SandboxConfig.js';
-import { resolveChromiumExecutablePath } from '../utils/browserAssetFallbacks.js';
+import { launchPlaywrightChromium, SOFTWARE_WEBGL_ARGS, sandboxOptOutArgs } from '../security/SandboxConfig.js';
+import { getPinnedBrowserAssetForUrl, resolveChromiumExecutablePath } from '../utils/browserAssetFallbacks.js';
 import { missingChromiumError } from '../utils/browserPreflight.js';
+
+/** Give generated composition code only pinned local library responses while judging it. */
+export async function createCompositionJudgePage(browser: Browser, width: number, height: number) {
+  const context = await browser.newContext({
+    viewport: { width, height }, offline: true, serviceWorkers: 'block', permissions: [],
+  });
+  await context.route('**/*', async (route) => {
+    const asset = await getPinnedBrowserAssetForUrl(route.request().url()).catch(() => null);
+    if (asset) await route.fulfill({ status: 200, contentType: 'application/javascript', body: asset.body });
+    else await route.abort('blockedbyclient');
+  });
+  await context.routeWebSocket('**/*', (socket) => socket.close());
+  await context.addInitScript(() => {
+    for (const name of ['RTCPeerConnection', 'webkitRTCPeerConnection']) {
+      Object.defineProperty(globalThis, name, { configurable: false, value: undefined });
+    }
+  });
+  return context.newPage();
+}
 
 export type CompositeMeasure = LuminanceMeasure;
 
@@ -105,29 +125,19 @@ export async function measureCompositeHtml(
   options: { width?: number; height?: number; settleMs?: number; navTimeoutMs?: number } = {},
 ): Promise<CompositeMeasure> {
   const { width = 900, height = 600, settleMs = 2500 } = options;
-  // Wave-10 defect #7: the 30s networkidle0 nav timeout was fixed, so on slow
-  // hosts (CDN-bound layers: Three.js/p5/Tone.js) the gate degraded to "skipped"
-  // instead of measuring. Make it overridable via env or caller so the visual
-  // validation can run where it previously could not.
   const envTimeout = Number(process.env.SINTER_COMPOSITE_GATE_TIMEOUT_MS);
   const navTimeoutMs = options.navTimeoutMs ?? (Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : 30_000);
-  const { default: puppeteer } = await import('puppeteer');
+  const { chromium } = await import('playwright');
   const executablePath = resolveChromiumExecutablePath();
   if (!executablePath) throw missingChromiumError();
-  const browser = await puppeteer.launch({
-    headless: true,
-    executablePath,
-    // Software WebGL, so the gate draws WebGL on a host with no GPU, as the
-    // scoring renderer does. Not getChromeArgs: the gate has no request
-    // interception, so it keeps Chrome's default web security.
-    args: [...sandboxOptOutArgs(), ...SOFTWARE_WEBGL_ARGS],
+  const browser = await launchPlaywrightChromium(chromium, {
+    headless: true, executablePath, args: [...sandboxOptOutArgs(), ...SOFTWARE_WEBGL_ARGS],
   });
   try {
-    const page = await browser.newPage();
-    await page.setViewport({ width, height });
-    await page.setContent(html, { waitUntil: 'networkidle0', timeout: navTimeoutMs });
+    const page = await createCompositionJudgePage(browser, width, height);
+    await page.setContent(html, { waitUntil: 'networkidle', timeout: navTimeoutMs });
     await new Promise((resolve) => setTimeout(resolve, settleMs));
-    const shot = (await page.screenshot({ encoding: 'base64' })) as string;
+    const shot = (await page.screenshot()).toString('base64');
     // Drift guard for the inlined browser-side copies of these thresholds
     // (page.evaluate cannot close over module scope).
     if (BRIGHT_LUMINANCE_THRESHOLD !== 0.5 || DARK_LUMINANCE_THRESHOLD !== 0.12

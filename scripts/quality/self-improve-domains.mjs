@@ -266,6 +266,7 @@ export const FAILURE_CLASSES = [
   'candidate_pool_empty',
   'ambiguity_reject',
   'validation_other',
+  'teaching_snapshot_missing',
   'other',
 ];
 
@@ -273,6 +274,7 @@ export function classifyFailure(text) {
   const s = String(text ?? '');
   if (/429|rate.?limit|usage limit/i.test(s)) return 'rate_limited';
   if (/TIMEOUT|exceeded .*s and was killed|SIGTERM/i.test(s)) return 'timeout';
+  if (s.includes('TEACHING_SNAPSHOT_MISSING:')) return 'teaching_snapshot_missing';
   if (/no valid SVG|raw <svg>|must be a raw <svg>/i.test(s)) return 'svg_no_raw';
   if (/empty after stripping/i.test(s)) return 'empty_after_strip';
   if (/Undefined function|must be defined before use/i.test(s)) return 'glsl_undefined_fn';
@@ -322,7 +324,7 @@ export function parseScoreLine(stdout) {
   const score = scoreMatch ? parseFloat(scoreMatch[1]) : null;
 
   // SOURCE A — canonical machine contract on the score line.
-  const sameLineDegraded = /\[degraded[:\]]|degraded \(no real score\)/i.test(scoreLine);
+  const sameLineDegraded = /\[degraded[:\]]|degraded \(no real score\)|unscored \(judge could not score\)/i.test(scoreLine);
   const sameLineFc = scoreLine.match(/failureClass=([a-z_]+)/i);
   const sameLineConf = scoreLine.match(/confidence=([\d.]+)/i);
 
@@ -353,4 +355,31 @@ export function parseScoreLine(stdout) {
     evalFailureClass: degraded ? failureClass : null,
     evalConfidence: degraded && Number.isFinite(confidence) ? confidence : null,
   };
+}
+
+/**
+ * Governed Create takes no --learn/--intuition/--aesthetic/--provider/--model (they fail with GOVERNED_GENERATE_FLAGS_UNSUPPORTED),
+ * so the cycle must call the governed surface with only supported arguments (F14).
+ */
+export function buildGovernedGenerateArgs(prompt, domain, outDir) {
+  // Governed teaching has visual and motion scopes. Audio and text have no matching scope.
+  const args = ['bin/sinter', 'generate', '--domain', domain];
+  if (!['strudel', 'tone', 'textgen'].includes(domain)) {
+    args.push('--teach', domain === 'kinetic' ? 'motion' : 'visual');
+  }
+  return [...args, '-o', outDir, prompt];
+}
+
+/** The dream queue root is shared with `sinter garden tend`: SINTER_DREAM_QUEUE_PATH wins, then the default (F14). */
+export function resolveDreamQueuePath(env = process.env, home = env.HOME || '/tmp') {
+  return env.SINTER_DREAM_QUEUE_PATH || `${home}/.sinter/dreams/queue.json`;
+}
+
+/** The generator-only override used by the former --provider/--model flags. */
+export function governedGeneratorEnv(domain, minimax) {
+  return domain === 'three' ? {
+    LIMINAL_GENERATOR_PROVIDER: 'minimax',
+    LIMINAL_GENERATOR_BASE_URL: minimax.baseUrl,
+    LIMINAL_GENERATOR_MODEL: minimax.model,
+  } : {};
 }

@@ -36,6 +36,7 @@ import {
   resolveProviderAlias,
   resolveProviderRuntime,
   selectRuntimeApiKey,
+  selectScopedEnvApiKey,
   type RuntimeProviderKey,
 } from '../config/ProviderRuntime.js';
 
@@ -260,17 +261,30 @@ const HARNESS_DEFAULTS = {
   contextWindow: 32768,  // Generous context for large files
 } as const;
 
+function finiteOverride(raw: string | undefined, fallback: number, integer = false): number {
+  if (!raw?.trim()) return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return fallback;
+  return integer ? Math.trunc(value) : value;
+}
+
+function requireHarnessKey(provider: ProviderType, apiKey?: string): void {
+  if (providerRequiresApiKey(provider) && !apiKey) {
+    throw new Error(`Harness provider ${provider} requires a usable API key for the selected seat.`);
+  }
+}
+
 /**
  * Get harness-specific LLM configuration
  * Reads from environment variables with defaults
  */
 export function getHarnessLLMConfig(): HarnessLLMConfig {
   return {
-    temperature: parseFloat(process.env.LIMINAL_HARNESS_TEMPERATURE || String(HARNESS_DEFAULTS.temperature)),
-    maxTokens: parseInt(process.env.LIMINAL_HARNESS_MAX_TOKENS || String(HARNESS_DEFAULTS.maxTokens), 10),
-    timeoutMs: parseInt(process.env.LIMINAL_HARNESS_TIMEOUT || String(HARNESS_DEFAULTS.timeoutMs), 10),
-    maxRetries: parseInt(process.env.LIMINAL_HARNESS_MAX_RETRIES || String(HARNESS_DEFAULTS.maxRetries), 10),
-    contextWindow: parseInt(process.env.LIMINAL_HARNESS_CONTEXT_WINDOW || String(HARNESS_DEFAULTS.contextWindow), 10),
+    temperature: finiteOverride(process.env.LIMINAL_HARNESS_TEMPERATURE, HARNESS_DEFAULTS.temperature),
+    maxTokens: finiteOverride(process.env.LIMINAL_HARNESS_MAX_TOKENS, HARNESS_DEFAULTS.maxTokens, true),
+    timeoutMs: finiteOverride(process.env.LIMINAL_HARNESS_TIMEOUT, HARNESS_DEFAULTS.timeoutMs, true),
+    maxRetries: finiteOverride(process.env.LIMINAL_HARNESS_MAX_RETRIES, HARNESS_DEFAULTS.maxRetries, true),
+    contextWindow: finiteOverride(process.env.LIMINAL_HARNESS_CONTEXT_WINDOW, HARNESS_DEFAULTS.contextWindow, true),
   };
 }
 
@@ -288,7 +302,6 @@ export function getHarnessProviderConfig(): LLMConfig | null {
   // Check for separate harness provider configuration
   const harnessBaseUrl = process.env.LIMINAL_HARNESS_BASE_URL;
   const harnessModel = process.env.LIMINAL_HARNESS_MODEL;
-  const harnessApiKey = process.env.LIMINAL_HARNESS_API_KEY;
   const harnessTemp = process.env.LIMINAL_HARNESS_TEMPERATURE;
   const harnessMaxTokens = process.env.LIMINAL_HARNESS_MAX_TOKENS;
   
@@ -299,22 +312,17 @@ export function getHarnessProviderConfig(): LLMConfig | null {
       provider,
       configuredBaseUrl: harnessBaseUrl,
       model: harnessModel,
-      configuredApiKey: harnessApiKey,
-    });
-    const apiKey = selectRuntimeApiKey({
-      provider,
-      baseUrl: runtime.baseUrl,
-      model: runtime.model,
-      configuredApiKey: harnessApiKey,
-      genericFallbackKeys: ['HARNESS_API_KEY', 'LLM_API_KEY'],
+      configuredApiKey: selectScopedEnvApiKey(process.env, 'HARNESS_API_KEY', harnessBaseUrl),
     });
 
+    // Dedicated custom endpoints may implement their own authentication.
+    if (provider !== 'custom') requireHarnessKey(provider, runtime.apiKey);
     return {
       baseUrl: runtime.baseUrl,
       model: runtime.model,
-      apiKey,
-      temperature: harnessTemp ? parseFloat(harnessTemp) : 0.2,
-      maxTokens: harnessMaxTokens ? parseInt(harnessMaxTokens, 10) : 4096,
+      apiKey: runtime.apiKey ?? '',
+      temperature: finiteOverride(harnessTemp, HARNESS_DEFAULTS.temperature),
+      maxTokens: finiteOverride(harnessMaxTokens, 4096, true),
       apiStyle: runtime.apiStyle,
     };
   }
@@ -332,6 +340,7 @@ export function getHarnessProviderConfig(): LLMConfig | null {
     ? getActiveProviderConfig()
     : getProviderConfigInternal(selectedProvider, { respectGenericEnvOverrides: false });
   if (!baseConfig) return null;
+  requireHarnessKey(selectedProvider, baseConfig.apiKey);
   
   const harnessConfig = getHarnessLLMConfig();
   

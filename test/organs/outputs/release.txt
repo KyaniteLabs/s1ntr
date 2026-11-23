@@ -1,0 +1,60 @@
+## 01-gate-dry-run.txt
+# organ: release | step: gate-dry-run | data: real
+$ node <repo>/bin/sinter release gate --dry-run
+# cwd: <repo> (repo: <repo>)
+# --- stdout
+{
+  "ready": true,
+  "level": "level-6-candidate",
+  "checks": [
+    {
+      "id": "self-improvement-gauntlet",
+      "label": "Level 3.5 self-improvement gauntlet",
+      "status": "pass",
+      "evidence": "6/6 prompts passed"
+    },
+    {
+      "id": "creative-domain-gauntlet",
+      "label": "Creative-domain gauntlet",
+      "status": "pass",
+      "evidence": "13/13 domains passed (source-contract)"
+    },
+    {
+      "id": "cognitive-receipts",
+      "label": "Cognitive receipts",
+      "status": "pass",
+      "evidence": "organ participation is reported only from receipts; unreceipted runs are not shippable"
+    },
+    {
+      "id": "model-assimilation",
+      "label": "Model assimilation dry-run (H5 smoke)",
+      "status": "pass",
+      "evidence": "dry-run-model passed dry-run contract checks (unverified); supply a live candidate to audition."
+    },
+    {
+      "id": "workbench-front-door",
+      "label": "Workbench/front-door contract",
+      "status": "pass",
+      "evidence": "Natural CLI and self-improvement front-door contracts are covered by focused tests."
+    }
+  ],
+  "blockers": []
+}
+# --- stderr
+# exit: 0
+
+## 06-6-release-gate.txt
+# organ: chain | step: 6-release-gate | data: real
+$ node <repo>/bin/sinter release gate --dry-run
+# cwd: <repo> (repo: <repo>)
+# --- stdout
+{
+  "ready": true,
+  "level": "level-6-candidate",
+  "checks": [
+    {
+      "id": "self-improvement-gauntlet",
+      "label": "Level 3.5 self-improvement gauntlet",
+      "status": "pass",
+      "evidence": "6/6 prompts passed"
+    },

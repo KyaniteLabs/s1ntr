@@ -16,12 +16,14 @@ export interface GrowthQueueOptions {
   cleanedDatasetDir: string;
   baselineDir: string;
   outputDir: string;
+  /** Where ratings_to_negatives.py writes owner-downvotes.jsonl (learning/); defaults to the dataset dir. */
+  ownerDownvotesFile?: string;
   now?: string;
 }
 
 export interface GrowthQueueItem {
   priority: number;
-  kind: 'baseline_error' | 'quarantined_hard_negative' | 'bucket_gap' | 'domain_gap';
+  kind: 'baseline_error' | 'quarantined_hard_negative' | 'judge_hard_negative' | 'owner_downvote' | 'bucket_gap' | 'domain_gap';
   action: 'rescore' | 'human_label' | 'generate_more' | 'inspect_quarantine';
   reason: string;
   payload: Record<string, unknown>;
@@ -37,23 +39,30 @@ export interface GrowthQueueReport {
     queueItems: number;
     baselineErrors: number;
     quarantineItems: number;
+    judgeNegatives: number;
     bucketGaps: number;
     domainGaps: number;
   };
   topActions: Record<string, number>;
   nextTargets: string[];
+  /** Input lines that were not valid JSON; the valid rows around them are still used. */
+  malformedRows: { file: string; line: number }[];
 }
 
 const TARGET_MIN_BUCKET_PRIMARY = 75;
 const TARGET_MIN_DOMAIN_PRIMARY = 20;
 
 export async function buildEvaluatorGrowthQueue(options: GrowthQueueOptions): Promise<GrowthQueueReport> {
+  const malformed: { file: string; line: number }[] = [];
+  const readRows = (filePath: string) => readRowsInto(filePath, malformed);
   const primaryRows = [
     ...await readRows(path.join(options.cleanedDatasetDir, 'primary-train.jsonl')),
     ...await readRows(path.join(options.cleanedDatasetDir, 'primary-val.jsonl')),
     ...await readRows(path.join(options.cleanedDatasetDir, 'primary-test.jsonl')),
   ];
   const quarantineRows = await readRows(path.join(options.cleanedDatasetDir, 'quarantine.jsonl'));
+  const judgeNegativeRows = await readRows(path.join(options.cleanedDatasetDir, 'judge-negatives.jsonl'));
+  const ownerDownvoteRows = await readRows(options.ownerDownvotesFile ?? path.join(options.cleanedDatasetDir, 'owner-downvotes.jsonl'));
   const baselineErrors = await readRows(path.join(options.baselineDir, 'primary', 'errors.jsonl'));
   const queue: GrowthQueueItem[] = [];
   const confirmedPoorIds = new Set(primaryRows
@@ -105,6 +114,44 @@ export async function buildEvaluatorGrowthQueue(options: GrowthQueueOptions): Pr
     }
   }
 
+  // Judge/scoring evidence below the floor: signed hard-negative labels become next-rescore targets.
+  for (const row of newestUnique(judgeNegativeRows, 200)) {
+    const record = asRecord(row);
+    const input = asRecord(record.input);
+    const admission = asRecord(asRecord(record.label).creative_label) as unknown as CreativeLabelAdmission;
+    if (isCreativeLabelAdmitted(admission, 'hard-negative')
+      && (admission.trustKind === 'judge-scoring' || admission.trustKind === 'legacy-backfill-judge')
+      && stringValue(input.artifact_sha256) === admission.artifactDigest) {
+      const metadata = asRecord(record.metadata);
+      queue.push({
+        // Legacy backfill has no signed Create receipt, so it ranks below live judge evidence.
+        priority: admission.trustKind === 'legacy-backfill-judge' ? 40 : 80,
+        kind: 'judge_hard_negative',
+        action: 'rescore',
+        reason: `Judge scored ${String(metadata.judgeScore ?? '?')} below the floor (${stringValue(metadata.judge) ?? 'unknown judge'})`,
+        payload: { id: record.id, domain: input.domain, judgeScore: metadata.judgeScore },
+      });
+    }
+  }
+
+  // Owner thumbs-downs (learning/owner-downvotes.jsonl from ratings_to_negatives.py). These are
+  // advisory queue items, not signed labels: reason `mud-camo` means the deterministic overmixed
+  // detector agreed, so the judge should be rescored against this piece.
+  for (const row of newestUnique(ownerDownvoteRows, 200)) {
+    const record = asRecord(row);
+    if (record.vote !== 'down' || !stringValue(record.id)) continue;
+    const mud = record.reason === 'mud-camo';
+    queue.push({
+      priority: mud ? 90 : 75,
+      kind: 'owner_downvote',
+      action: 'rescore',
+      reason: mud
+        ? 'Owner thumbs-down; detector agrees: overmixed / lost value structure (mud-camo)'
+        : 'Owner thumbs-down; detector does not flag overmixed, so the judge missed another flaw',
+      payload: { id: stringValue(record.uid) ?? record.id, seat: record.seat, reason: record.reason, measure: record.measure },
+    });
+  }
+
   const byBucket = countBy(primaryRows, (row) => stringValue(asRecord(asRecord(row).target).scoreBucket) ?? 'unknown');
   for (const [bucket, count] of Object.entries(byBucket)) {
     if (count < TARGET_MIN_BUCKET_PRIMARY) {
@@ -145,13 +192,13 @@ export async function buildEvaluatorGrowthQueue(options: GrowthQueueOptions): Pr
   queue.sort((a, b) => b.priority - a.priority);
   await fs.mkdir(options.outputDir, { recursive: true });
   await writeJsonl(path.join(options.outputDir, 'growth-queue.jsonl'), queue);
-  const report = makeReport(options, queue);
+  const report = { ...makeReport(options, queue), malformedRows: malformed };
   await fs.writeFile(path.join(options.outputDir, 'growth-report.json'), `${JSON.stringify(report, null, 2)}\n`);
   await fs.writeFile(path.join(options.outputDir, 'growth-report.md'), renderReport(report, queue.slice(0, 25)));
   return report;
 }
 
-function makeReport(options: GrowthQueueOptions, queue: GrowthQueueItem[]): GrowthQueueReport {
+function makeReport(options: GrowthQueueOptions, queue: GrowthQueueItem[]): Omit<GrowthQueueReport, 'malformedRows'> {
   const topActions = countBy(queue, (item) => item.action);
   return {
     schemaVersion: 1,
@@ -163,6 +210,7 @@ function makeReport(options: GrowthQueueOptions, queue: GrowthQueueItem[]): Grow
       queueItems: queue.length,
       baselineErrors: queue.filter((item) => item.kind === 'baseline_error').length,
       quarantineItems: queue.filter((item) => item.kind === 'quarantined_hard_negative').length,
+      judgeNegatives: queue.filter((item) => item.kind === 'judge_hard_negative').length,
       bucketGaps: queue.filter((item) => item.kind === 'bucket_gap').length,
       domainGaps: queue.filter((item) => item.kind === 'domain_gap').length,
     },
@@ -187,6 +235,7 @@ function renderReport(report: GrowthQueueReport, top: GrowthQueueItem[]): string
     `- Queue items: ${report.counts.queueItems}`,
     `- Baseline errors: ${report.counts.baselineErrors}`,
     `- Quarantined hard negatives: ${report.counts.quarantineItems}`,
+    `- Judge-scoring hard negatives: ${report.counts.judgeNegatives}`,
     `- Bucket gaps: ${report.counts.bucketGaps}`,
     `- Domain gaps: ${report.counts.domainGaps}`,
     '',
@@ -201,13 +250,31 @@ function renderReport(report: GrowthQueueReport, top: GrowthQueueItem[]): string
   ].join('\n');
 }
 
-async function readRows(filePath: string): Promise<unknown[]> {
-  try {
-    const text = await fs.readFile(filePath, 'utf8');
-    return text.split(/\r?\n/).filter((line) => line.trim()).map((line) => JSON.parse(line));
-  } catch {
-    return [];
+/** Every valid row; a corrupt line is recorded, never allowed to discard its neighbours. A missing file is empty. */
+async function readRowsInto(filePath: string, malformed: { file: string; line: number }[]): Promise<unknown[]> {
+  let text: string;
+  try { text = await fs.readFile(filePath, 'utf8'); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
   }
+  const rows: unknown[] = [];
+  text.split(/\r?\n/).forEach((line, index) => {
+    if (!line.trim()) return;
+    try { rows.push(JSON.parse(line)); } catch { malformed.push({ file: path.basename(filePath), line: index + 1 }); }
+  });
+  return rows;
+}
+
+/** Newest first, one row per id (a replayed append must not queue the same piece twice), capped. */
+function newestUnique(rows: unknown[], cap: number): unknown[] {
+  const seen = new Set<string>(); const out: unknown[] = [];
+  for (const row of [...rows].reverse()) {
+    const id = stringValue(asRecord(row).id);
+    if (id !== undefined) { if (seen.has(id)) continue; seen.add(id); }
+    out.push(row);
+    if (out.length >= cap) break;
+  }
+  return out;
 }
 
 async function writeJsonl(filePath: string, rows: unknown[]): Promise<void> {

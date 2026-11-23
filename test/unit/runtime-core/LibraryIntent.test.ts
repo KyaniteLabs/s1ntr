@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseLibraryIntent, eraStampPayload, MAX_LIBRARIES_PER_PIECE } from '../../../src/runtime-core/LibraryIntent.js';
+import { parseLibraryIntent, resolveLibraryIntent, eraStampPayload, MAX_LIBRARIES_PER_PIECE } from '../../../src/runtime-core/LibraryIntent.js';
 
 describe('LibraryIntent connector (#1000)', () => {
 	it('parses a bare library declaration', () => {
@@ -32,8 +32,23 @@ describe('LibraryIntent connector (#1000)', () => {
     });
   });
 
-	it('THROWS on unknown library ids (fail-loud pre-wrap, feeds the repair loop)', () => {
-    expect(() => parseLibraryIntent('code\nlibraries: culri, roughjs')).toThrow(/Unknown vendored library "culri"/);
+	it('IGNORES ids that are not vendored instead of killing the piece (v2r1: 66 of 720 runs died here)', () => {
+    // The 1.7B model declares the CDN libraries its code loads (three, gsap, p5, strudel) and made-up
+    // ids (osc, canvas, bpy). The browser asset fallbacks already serve the CDN ones; none of these needs
+    // a wrapper library, and throwing here sat outside the repair loop, so the whole Create was lost.
+    const r = parseLibraryIntent('code\nlibraries: lodash, culori');
+    expect(r.libraries).toEqual(['culori']);
+    expect(r.ignored).toEqual(['lodash']);
+    expect(parseLibraryIntent('code\nlibraries: lodash')).toEqual({ libraries: [], layers: [], ignored: ['lodash'] });
+    expect(parseLibraryIntent('code\nlibraries: bpy, constructor').libraries).toEqual([]);
+    const layered = parseLibraryIntent('code\nlayers: p5[p5,culori] strudel[strudel]');
+    expect(layered.libraries).toEqual(['culori']);
+    expect(layered.ignored).toEqual(['p5', 'strudel']);
+  });
+
+	it('a misspelt vendored id is recovered from the code, not from the declaration', () => {
+    const code = "import { formatHex } from 'culori';\nformatHex('red');";
+    expect(resolveLibraryIntent(`${code}\nlibraries: culri`, code).libraries).toEqual(['culori']);
   });
 
 	it('THROWS when the budget is exceeded', () => {
@@ -81,5 +96,52 @@ describe('LibraryIntent connector (#1000)', () => {
   it('eraStampPayload: empty intent = empty arrays, never omitted', () => {
     const stamp = eraStampPayload(parseLibraryIntent('just code, no declaration'), 'p5');
     expect(stamp).toEqual({ domains: ['p5'], libraries: [] });
+  });
+});
+
+describe('resolveLibraryIntent: declared list unioned with import inference', () => {
+  const HOLO = 'import { Holo } from "holospot";\nconst holo = new Holo(r);';
+
+  it('infers holospot from the import when no libraries: line was written', () => {
+    expect(resolveLibraryIntent(HOLO, HOLO).libraries).toEqual(['holospot']);
+  });
+
+  it('unions declared and inferred, declared first, without duplicates', () => {
+    const raw = `${HOLO}\nlibraries: culori, holospot`;
+    expect(resolveLibraryIntent(raw, HOLO).libraries).toEqual(['culori', 'holospot']);
+  });
+
+  it('keeps layers from the declaration', () => {
+    const raw = `code\nlayers: p5[culori]`;
+    expect(resolveLibraryIntent(raw, HOLO)).toEqual({
+      libraries: ['culori', 'holospot'],
+      layers: [{ domain: 'p5', libraries: ['culori'] }],
+    });
+  });
+
+  it('applies the per-piece budget to the union', () => {
+    const code = 'import "culori";\nimport "roughjs";\nimport "tonaljs";\nimport "holospot";';
+    expect(() => resolveLibraryIntent(code, code)).toThrow(/Library budget exceeded/);
+  });
+
+  it('returns no libraries for a plain piece', () => {
+    expect(resolveLibraryIntent('function setup(){}', 'function setup(){}')).toEqual({ libraries: [], layers: [] });
+  });
+
+  it('wraps an undeclared holospot import with the holospot import map, three remap and CSP', async () => {
+    const { wrapPlayable } = await import('../../../src/runtime-core/LiminalProductionEffects.js');
+    const intent = resolveLibraryIntent(HOLO, HOLO);
+    const html = wrapPlayable(HOLO, 'three', intent.libraries);
+    expect(html).toContain('/vendor/holospot/0.1.0/dist/holo.js');
+    expect(html).toContain('/vendor/three-webgpu/0.185.1/three.module.min.js');
+    expect(html).toMatch(/worker-src[^;"]*blob:/);
+  });
+
+  it('lets the vendored holospot entry replace a piece-authored import map entry', async () => {
+    const { wrapPlayable } = await import('../../../src/runtime-core/LiminalProductionEffects.js');
+    const page = '<!DOCTYPE html><html><head><script type="importmap">{"imports":{"three":"https://x/three.js","holospot":"/mine/holo.js"}}</script></head><body><script type="module">import { Holo } from "holospot";</script></body></html>';
+    const html = wrapPlayable(page, 'three', resolveLibraryIntent(page, page).libraries);
+    expect(html).toContain('/vendor/holospot/0.1.0/dist/holo.js');
+    expect(html).not.toContain('/mine/holo.js');
   });
 });

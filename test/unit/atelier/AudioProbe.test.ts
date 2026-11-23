@@ -41,6 +41,7 @@ vi.mock('../../../src/utils/vendorAssets.js', () => ({ inlineVendorAssets: async
 vi.mock('../../../src/render/HeadlessRenderer.js', () => ({ audioCapturePageInit: function shim() { /* marker */ } }));
 
 import { probeAudio } from '../../../src/atelier/AudioProbe.js';
+import { musicRuntimeScript } from '../../../src/core/wrappers/musicRuntime.js';
 
 let file: string;
 beforeEach(() => {
@@ -50,6 +51,15 @@ beforeEach(() => {
 });
 
 describe('probeAudio', () => {
+  it('injects the shared music runtime before the capture init, like the renderer', async () => {
+    pw.events = 1;
+    await probeAudio(file);
+    const runtimeAt = pw.content.indexOf(musicRuntimeScript());
+    expect(runtimeAt).toBeGreaterThan(-1);
+    expect(runtimeAt).toBeLessThan(pw.content.indexOf('marker'));
+    expect(runtimeAt).toBeLessThan(pw.content.indexOf('INLINED'));
+  });
+
   it('clicks play once and reports the audio source starts', async () => {
     pw.events = 3;
     expect(await probeAudio(file)).toEqual({ events: 3, clicked: true });

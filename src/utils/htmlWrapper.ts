@@ -19,14 +19,15 @@
  */
 
 import { P5Wrapper } from '../core/wrappers/P5Wrapper.js';
-import { libraryIncludes } from '../core/wrappers/VendoredLibraries.js';
+import { libraryIncludes, widenCspForLibraries } from '../core/wrappers/VendoredLibraries.js';
 import { ThreeWrapper } from '../core/wrappers/ThreeWrapper.js';
 import { GenericWrapper } from '../core/wrappers/GenericWrapper.js';
 import { vendorPathForUrl } from './browserAssetFallbacks.js';
-import type { DomainString } from '../types/domains.js';
+import { inferLibrariesFromCode } from '../core/validators/ImportSpecifiers.js';
+import type { EngineDomainString } from '../types/domains.js';
 import { answerCode } from '../llm/ModelOutput.js';
 
-export type Domain = Extract<DomainString, 'p5' | 'shader' | 'three' | 'strudel' | 'hydra' | 'tone' | 'revideo' | 'hyperframes' | 'svg' | 'html' | 'dataviz' | 'meta' | 'ascii' | 'blender'>;
+export type Domain = Extract<EngineDomainString, 'p5' | 'shader' | 'three' | 'strudel' | 'hydra' | 'tone' | 'revideo' | 'hyperframes' | 'svg' | 'html' | 'dataviz' | 'custom' | 'ascii' | 'blender'>;
 
 export interface WrapOptions {
   domain?: Domain;
@@ -115,8 +116,11 @@ export class HTMLWrapper {
 
   private static stripInvalidMetaHeaders(html: string): string {
     return html
-      .replace(/^\s*<meta\s+http-equiv=["']X-Frame-Options["'][^>]*>\s*$/gim, '')
-      .replace(/^\s*<meta\s+http-equiv=["']Content-Security-Policy["'][^>]*>\s*$/gim, '');
+      // Not line-anchored: a policy inlined beside other head tags (our own
+      // full-page headers are joined without newlines) survived the strip, and
+      // the browser enforces EVERY policy, so the stricter default won.
+      .replace(/[ \t]*<meta\s+http-equiv=["']X-Frame-Options["'][^>]*>[ \t]*\n?/gi, '')
+      .replace(/[ \t]*<meta\s+http-equiv=["']Content-Security-Policy["'][^>]*>[ \t]*\n?/gi, '');
   }
 
   private static injectCompositionForegroundTransparency(html: string): string {
@@ -260,6 +264,9 @@ export class HTMLWrapper {
       analytics = options.analytics ?? false;
     }
 
+    // Deprecated alias: `meta` was renamed `custom` (see canonicalDomainId).
+    if ((domain as string | undefined) === 'meta') domain = 'custom';
+
     // Detect domain if not specified
     const detectedDomain = domain || this.detectDomain(code);
 
@@ -281,7 +288,14 @@ export class HTMLWrapper {
       // A full page the model wrote gets the policy a fragment of its medium
       // gets (FABLE-R3.7), and known CDN libraries load from /vendor so the
       // policy does not blank the page.
-      return this.withFullPagePolicy(this.vendorKnownScripts(stripped), detectedDomain as Domain);
+      // Requested/inferred vendored libraries still need their import map and
+      // CSP grants: a full page that imports "holospot" is blank without them.
+      const fullPage = this.withFullPagePolicy(this.vendorKnownScripts(stripped), detectedDomain as Domain);
+      // The renderer re-wraps the production playable without its library list;
+      // the page's own imports name them (grants come from Sinter's table, never
+      // from a policy the page carried).
+      const pageLibraries = libraries.length ? libraries : inferLibrariesFromCode(stripped).libraries;
+      return pageLibraries.length ? this.injectVendoredLibraries(fullPage, pageLibraries) : fullPage;
     }
 
     // Route to appropriate wrapper
@@ -327,9 +341,12 @@ export class HTMLWrapper {
       // D3 (dataviz) and custom-medium (meta) output are complete self-contained
       // HTML pages — same pass-through as html.
       case 'dataviz':
-      case 'meta':
+      case 'custom':
       case 'html':
-        return this.withFullPagePolicy(this.vendorKnownScripts(this.stripInvalidMetaHeaders(code)), detectedDomain);
+        {
+          const fullPage = this.withFullPagePolicy(this.vendorKnownScripts(this.stripInvalidMetaHeaders(code)), detectedDomain);
+          return libraries.length ? this.injectVendoredLibraries(fullPage, libraries) : fullPage;
+        }
       case 'p5':
       default:
         wrapped = P5Wrapper.wrap(code, { includeP5Sound, title });
@@ -358,7 +375,7 @@ export class HTMLWrapper {
    * Unknown ids throw — see VendoredLibraries.
    */
   private static injectVendoredLibraries(html: string, libs: string[]): string {
-    const { scriptTags, importmapEntries, remappedKeys } = libraryIncludes(libs);
+    const { scriptTags, importmapEntries } = libraryIncludes(libs);
     let out = html;
     const entryIds = Object.keys(importmapEntries);
     if (entryIds.length > 0) {
@@ -367,12 +384,10 @@ export class HTMLWrapper {
       if (m) {
         try {
           const parsed = JSON.parse(m[1]) as { imports: Record<string, string> };
-          // Collision policy: a piece-supplied importmap may never shadow a
-          // vendored specifier — that would silently redirect library code.
-          const collisions = entryIds.filter((id) => id in parsed.imports && !remappedKeys.includes(id));
-          if (collisions.length > 0) {
-            throw new Error(`injectVendoredLibraries: importmap collision on ${collisions.join(', ')} — vendored specifiers cannot be overridden`);
-          }
+          // Collision policy: the vendored entry wins. A piece-supplied map may
+          // name a vendored specifier (a model that imports "holospot" often
+          // writes its own map for it); keeping the piece's URL would redirect
+          // library code to a path we do not serve, so the vendored URL replaces it.
           // system remaps (e.g. three-webgpu re-pointing `three` for THIS piece)
           // legitimately replace the wrapper default; everything else appends.
           parsed.imports = { ...parsed.imports, ...importmapEntries };
@@ -390,7 +405,10 @@ export class HTMLWrapper {
     if (scriptTags) {
       out = out.replace(/<\/head>/i, (h) => `    ${scriptTags}\n  ${h}`);
     }
-    return out;
+    return out.replace(
+      /(<meta http-equiv="Content-Security-Policy" content=")([^"]*)(">)/g,
+      (_m, open: string, csp: string, close: string) => `${open}${widenCspForLibraries(csp, libs)}${close}`,
+    );
   }
 
   private static wrapSVG(code: string, title: string): string {
@@ -552,7 +570,7 @@ posthog.init(${js(apiKey)},{api_host:${js(host)},persistence:'memory',capture_pa
    * Get all supported domains
    */
   static getSupportedDomains(): Domain[] {
-    return ['p5', 'shader', 'three', 'strudel', 'hydra', 'tone', 'revideo', 'hyperframes', 'svg', 'html', 'dataviz', 'meta', 'ascii', 'blender'];
+    return ['p5', 'shader', 'three', 'strudel', 'hydra', 'tone', 'revideo', 'hyperframes', 'svg', 'html', 'dataviz', 'custom', 'ascii', 'blender'];
   }
 
   /**

@@ -18,6 +18,18 @@ export const renderAuthorityRows: readonly ProductionAuthorityPath[] = [
     'authoritative',
   ),
   authorityRow(
+    'src/cli/LiminalRerenderReevaluate.ts:renderer',
+    'renderer',
+    'render-domain-authority',
+    'authoritative',
+  ),
+  authorityRow(
+    'src/cli/LiminalBatchLane.ts:renderer',
+    'renderer',
+    'render-domain-authority',
+    'authoritative',
+  ),
+  authorityRow(
     'src/runtime-core/ProductionLiminalRuntime.ts:renderer',
     'renderer',
     'render-domain-authority',

@@ -150,3 +150,37 @@ describe('htmlBlock', () => {
     expect(htmlBlock('```js\nx()\n```')).toBeNull();
   });
 });
+
+describe('a bare fence closing code the model never opened', () => {
+  // LFM3 on Kaggle (pastx canary-temp-0.5): a draft with no opening fence, a
+  // closing fence, then long prose and fenced redrafts. Read as an opener,
+  // that first fence made the prose the longest "block" and the gate got prose.
+  const draft = 'void main() {\n  float a = 1.0;\n  fragColor = vec4(a);\n}';
+  const prose = 'But there are several issues: the array syntax is invalid.\n\n'
+    + 'We should declare each monolith separately and avoid the constructor. '.repeat(8) + '\n\nLet us rewrite cleanly.';
+  const final = '#version 300 es\nprecision highp float;\nout vec4 fragColor;\nvoid main() {\n  fragColor = vec4(1.0);\n}';
+
+  it('closes the unfenced draft so the redraft pairs correctly', () => {
+    const answer = `${draft}\n\`\`\`\n\n${prose}\n\n\`\`\`\n${final}\n\`\`\`\n`;
+    const blocks = fencedBlocks(answer);
+    expect(blocks.map((b) => b.body)).toEqual([draft, final]);
+    expect(answerCode(answer)).not.toContain('several issues');
+  });
+
+  it('skips prose above the unfenced draft', () => {
+    const blocks = fencedBlocks(`Here it is\n${draft}\n\`\`\`\n\nThat should work.`);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].body).toBe(draft);
+    expect(blocks[0].closed).toBe(true);
+  });
+
+  it('still opens a bare fence under prose', () => {
+    const blocks = fencedBlocks(`Here is the shader (final):\n\`\`\`\n${final}\n\`\`\``);
+    expect(blocks.map((b) => b.body)).toEqual([final]);
+  });
+
+  it('still opens a bare fence with code under it, even after code above', () => {
+    const blocks = fencedBlocks(`${draft}\n\`\`\`\n${final}\n\`\`\``);
+    expect(blocks.map((b) => b.body)).toEqual([final]);
+  });
+});

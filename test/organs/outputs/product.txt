@@ -1,0 +1,38 @@
+## 01-demo-creative-codex.txt
+# organ: product | step: demo-creative-codex | data: real
+$ node <repo>/bin/sinter demo creative-codex
+# cwd: <out>/_proj (repo: <repo>)
+# --- stdout
+
+=== Creative Codex Demo ===
+  Scenario: creative-codex
+  Steps: 8  Passed: true  Duration: 3ms
+
+  1. Generate family
+     Generated 3 creative artifacts with varying quality
+     Data: count=3, avgQuality=0.5666666666666667
+  2. Evaluate & archive
+     Placed artifacts into archive cells
+     Data: cells=3
+  3. Garden policy
+     Garden decided on next actions
+     Data: actions=["frontier-seeking","frontier-seeking","branch-fertile","local-refinement","local-refinement"], priorities=[0.9,0.9,0.7,0.6,0.6]
+  4. Generate challenges
+     Created creative challenges for exploration
+     Data: challenges=[{"title":"Push symmetry-asymmetry to extreme","difficulty":0.7}]
+  5. Steer taste
+     User preferred artifact demo-1
+     Data: preferredId="demo-1", quality=0.6
+  6. Branch & dream
+     Dreamed new artifact from fertile lineage
+     Data: dreamedId="dream-1", quality=0.75, novelty=0.9
+  7. Self-improve
+     Detected weak critic blind spot, scheduled improvement
+     Data: improvement="critic-blind-spot", severity=0.5
+  8. Output family improved
+     Creative output family quality improved through the loop
+     Data: finalAvgQuality=0.6125, totalArtifacts=4
+
+# --- stderr
+# exit: 0
+

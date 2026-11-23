@@ -2,10 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { LIBRARY_CARDS, libraryCardFor } from '../../../src/creative-vocabulary/LibraryCards.js';
 
 describe('LIBRARY_CARDS', () => {
-  it('has 17 cards with unique, trimmed ids', () => {
+  it('has 24 cards with unique, trimmed ids', () => {
     const ids = LIBRARY_CARDS.map(c => c.id);
-    expect(ids).toHaveLength(17);
-    expect(new Set(ids).size).toBe(17);
+    expect(ids).toHaveLength(24);
+    expect(new Set(ids).size).toBe(24);
     expect(ids.filter(id => id !== id.trim() || id === '')).toEqual([]);
   });
 
@@ -19,6 +19,24 @@ describe('LIBRARY_CARDS', () => {
 
   it('keeps the vocabulary the prompt organs rely on', () => {
     expect(LIBRARY_CARDS.map(c => c.id)).toEqual(expect.arrayContaining(['culori', 'tonaljs', 'matter-js', 'paper', 'roughjs']));
+  });
+
+  it('holospot card carries the kit\'s composition rules, compact (the card rides in every three prompt)', () => {
+    const card = libraryCardFor('holospot');
+    expect(card?.rules?.length ?? 0).toBeGreaterThanOrEqual(9);
+    const joined = card!.rules!.join(' | ');
+    for (const marker of [
+      'hero', 'replace mode', 'background: "black"', 'shotCamera', 'shotRotation',
+      'studio.preset', 'three.js lights do nothing', 'slow', 'never also', 'renderer.render',
+      'iridescence', 'sizeMm',
+    ]) {
+      expect(joined).toContain(marker);
+    }
+    // the real lighting call and export names (v7 invented `import { studio }`)
+    expect(joined).toContain('holo.setScene({"studio.preset"');
+    expect(joined).toMatch(/no `?studio`? export/i);
+    // compact: every rule fits in one prompt line
+    expect(card!.rules!.every(r => r.length <= 160)).toBe(true);
   });
 });
 

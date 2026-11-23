@@ -39,6 +39,7 @@ export type ProviderSurface =
   | 'command-code-cli-seat'
   | 'grok-cli-seat'
   | 'hermes-cli-seat'
+  | 'hermes-codex-seat'
   | 'kilo-web-balance'
   | 'kilo-gateway-entitlement'
   | 'kilo-cli-entitlement'
@@ -88,6 +89,7 @@ export type FundingMode = 'subscription-seat' | 'metered-api' | 'offline-local';
  * usage.
  */
 export type QuotaSurface =
+  | 'hermes-codex-seat'
   | 'cliproxy-seat'
   | 'codex-cli-seat'
   | 'claude-cli-seat'

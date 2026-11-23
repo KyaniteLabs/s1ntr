@@ -60,6 +60,10 @@ import {
 } from '../runtime-core/generationAttemptSink.js';
 import type { GenerationAttemptTelemetryContext } from '../telemetry/generationAttemptEvent.js';
 import { answerJson } from '../llm/ModelOutput.js';
+import { inlineVendorAssets } from '../utils/vendorAssets.js';
+import type { HybridPlan } from './hybrid/HybridPlan.js';
+import type { HybridProjectBuild } from './hybrid/HybridProject.js';
+import type { HybridGenerationEvidence } from './hybrid/HybridGeneration.js';
 
 export interface CompositionGenerationContext {
   runId: string;
@@ -120,6 +124,8 @@ export interface ComposedLayer {
   blendMode: BlendMode;
   opacity: number;
   codeLength: number;
+  /** The layer's generated source (improvement loops carry it into the next loop; kept layers reuse it byte-for-byte). */
+  code?: string;
   /** True if a generator produced code; false if the layer failed to generate. */
   generated: boolean;
   error?: string;
@@ -136,6 +142,12 @@ export interface ComposedLayer {
 
 export interface CompositionResult {
   html: string;
+  /** Set by the hybrid path (SINTER_HYBRID_LAYERS=1): what S1NTR chose, and why. */
+  hybridPlan?: HybridPlan;
+  /** Set with hybridPlan: the composition organs' record (engine project, masks, beat animations). */
+  hybridBuild?: HybridProjectBuild;
+  /** Set with hybridPlan: how the layers were generated (LayerSequencer.generateLayers, evidence for the manifest). */
+  hybridGeneration?: HybridGenerationEvidence;
   title: string;
   background: string;
   layers: ComposedLayer[];
@@ -168,7 +180,7 @@ export interface CompositionResult {
   failureProjection?: GenerationFailureProjection;
 }
 
-type GeneratedLayerResult = {
+export type GeneratedLayerResult = {
   spec: CompositionLayerSpec;
   code: string;
   generated: boolean;
@@ -195,8 +207,14 @@ function briefInvitesAudio(prompt: string): boolean {
 
 const layerStateBridge = (sourceIndex: number): string => `<script>(function(){
 window.sinterCompositionState={time:0,sequence:0,pointer:{x:.5,y:.5,down:false}};
-window.sinterCausalInput=0;
+window.sinterCausalInput=0;window.sinterSignal={beat:0,beats:0};window.sinterControl={};window.__sinterErrors=[];
+addEventListener('error',function(e){window.__sinterErrors.push(String(e.message||e.error||'error'))});
 addEventListener('message',function(e){var s=e.data&&e.data.state,p=s&&s.pointer;
+if(e.source===parent&&e.data&&e.data.type==='sinter:signal'&&Number.isFinite(e.data.value)){
+if(typeof e.data.name==='string'&&e.data.name.indexOf('control:')===0){var cn=e.data.name.slice(8);window.sinterControl[cn]=e.data.value;
+dispatchEvent(new CustomEvent('sinter:control',{detail:{name:cn,value:e.data.value}}));return}
+window.sinterSignal={beat:e.data.value,beats:Number(e.data.beats)||0};
+dispatchEvent(new CustomEvent('sinter:signal',{detail:window.sinterSignal}));return}
 if(e.source===parent&&e.data&&e.data.type==='sinter:causal'&&Number.isFinite(e.data.value)&&
 e.data.value>=0&&e.data.value<=1){window.sinterCausalInput=e.data.value;
 document.documentElement.style.setProperty('--sinter-causal-input',String(e.data.value));
@@ -225,6 +243,11 @@ const DOMAIN_TO_ENTRY: Record<string, string> = {
   hydra: 'hydra',
   ascii: 'ascii',
   html: 'html',
+  glsl: 'shader',
+  svg: 'svg',
+  kinetic: 'kinetic',
+  nbe: 'nbe',
+  custom: 'custom',
 };
 
 /** Map a composition DomainType to the HTMLWrapper Domain. */
@@ -238,6 +261,11 @@ const DOMAIN_TO_WRAP: Record<string, WrapDomain> = {
   hydra: 'hydra',
   ascii: 'ascii',
   html: 'html',
+  glsl: 'shader',
+  svg: 'svg',
+  kinetic: 'html',
+  nbe: 'html',
+  custom: 'custom',
 };
 
 function createProviderCallGuard(maxProviderCalls?: number): (() => void) | undefined {
@@ -335,7 +363,7 @@ export class CompositionOrchestrator {
       : await Promise.all(spec.layers.map((layer, index) =>
         this.generateLayer(layer, index, spec.background, compositionBrief, creativeThesis, providerCallGuard, undefined, spec.generationContext)));
 
-    const html = this.assemble(title, background, results, results.map(r => r.code), creativeThesis,
+    const html = await this.assemble(title, background, results, results.map(r => r.code), creativeThesis,
       spec.executionPlan);
 
     // Measured-frame gate: what is actually ON SCREEN decides, not the spec.
@@ -352,19 +380,20 @@ export class CompositionOrchestrator {
     }
     finalHtml = this.embedGraphEvidence(finalHtml, spec.executionPlan, graphExecution);
 
-    const layers: ComposedLayer[] = results.map((r, index) => ({
+    const layers: ComposedLayer[] = await Promise.all(results.map(async (r, index) => ({
       domain: r.spec.domain,
       prompt: r.spec.prompt,
       blendMode: r.spec.blendMode ?? 'normal',
       opacity: r.spec.opacity ?? 1,
       codeLength: r.code.length,
+      ...(r.generated ? { code: r.code } : {}),
       generated: r.generated,
       error: r.error,
       opaqueBackground: r.opaqueBackground,
       seamGuarded: r.seamGuarded,
       audioEvidence: r.audioEvidence,
-      artifactHtml: r.generated ? this.wrapLayer(r.spec, r.code, index, creativeThesis) : undefined,
-    }));
+      artifactHtml: r.generated ? await this.wrapLayer(r.spec, r.code, index, creativeThesis) : undefined,
+    })));
     const plan = creativeThesis?.formTypography;
     const creativeEvidence = plan ? {
       rationale: plan.rationale,
@@ -512,7 +541,7 @@ export class CompositionOrchestrator {
       const demoted = results.map((r, i) => (demote.includes(i)
         ? { ...r, spec: { ...r.spec, blendMode: 'normal' as BlendMode, opacity: (r.spec.opacity ?? 1) * DEMOTED_OPACITY_FACTOR } }
         : r));
-      const retryHtml = this.assemble(title, background, demoted, demoted.map(r => r.code),
+      const retryHtml = await this.assemble(title, background, demoted, demoted.map(r => r.code),
         creativeThesis, executionPlan);
       const measureAfter = await measureCompositeHtml(retryHtml);
       const verdictAfter = verdictFromMeasure(measureAfter);
@@ -547,6 +576,29 @@ export class CompositionOrchestrator {
     return this.compose(spec);
   }
 
+  /**
+   * Generate ONE layer through the same governed path compose() uses (generator registry, provider
+   * call ledger, seam guard, deterministic music), returning the code and the seam-guarded spec.
+   * LayerSequencer.generateLayers drives this per layer for the layered build; vendor inlining
+   * happens when the generated code is assembled and wrapped.
+   */
+  static async generateGovernedLayer(
+    spec: CompositionLayerSpec,
+    index: number,
+    context: {
+      layers: readonly CompositionLayerSpec[];
+      background?: string;
+      creativeThesis?: CreativeThesis;
+      generationContext?: CompositionGenerationContext;
+      signal?: AbortSignal;
+    },
+  ): Promise<GeneratedLayerResult> {
+    preflightMusicLayer(spec);
+    await registerAllGenerators();
+    return this.generateLayer(spec, index, context.background, buildCompositionBrief([...context.layers]),
+      context.creativeThesis, undefined, context.signal, context.generationContext);
+  }
+
   /** Generate one source-indexed layer without touching any sibling. */
   static async regenerateLayer(
     spec: CompositionLayerSpec,
@@ -573,7 +625,7 @@ export class CompositionOrchestrator {
       seamGuarded: result.seamGuarded,
       audioEvidence: result.audioEvidence,
       artifactHtml: result.generated
-        ? this.wrapLayer(result.spec, result.code, sourceIndex, executionThesis)
+        ? await this.wrapLayer(result.spec, result.code, sourceIndex, executionThesis)
         : undefined,
     };
   }
@@ -777,28 +829,37 @@ export class CompositionOrchestrator {
     }
   }
 
-  private static wrapLayer(spec: CompositionLayerSpec, code: string, sourceIndex: number, creativeThesis?: CreativeThesis): string {
+  private static async wrapLayer(spec: CompositionLayerSpec, code: string, sourceIndex: number, creativeThesis?: CreativeThesis): Promise<string> {
     const rawHtml = spec.domain === 'music' && /^<!DOCTYPE html>/i.test(code.trim())
       ? code
       : HTMLWrapper.wrap(code, {
         domain: DOMAIN_TO_WRAP[spec.domain] ?? 'p5',
         compositionForeground: sourceIndex > 0 && !AUDIO_DOMAINS.has(spec.domain),
       });
-    const html = rawHtml.includes('</head>')
+    // Each layer ships as a data: URI iframe, where root-absolute /vendor/ script URLs
+    // resolve to nothing, so p5/three/tone/hydra never load and the layer renders
+    // blank in any standalone composition.html. Inline the vendored libraries so the
+    // composite is genuinely self-contained.
+    // Bridge first: vendored library bodies contain literal '</head>' strings that
+    // a later replace would hit instead of the document head.
+    const bridged = rawHtml.includes('</head>')
       ? rawHtml.replace('</head>', `${layerStateBridge(sourceIndex)}\n</head>`)
       : `${layerStateBridge(sourceIndex)}\n${rawHtml}`;
-    return creativeThesis ? embedCreativeThesisIdentity(html, creativeThesis) : html;
+    // Thesis identity BEFORE inlining: the embed rewrites the first <head>/<body> tag it finds, and an
+    // inlined p5 body contains the literal string "<body>" (it would be rewritten, breaking the library).
+    const identified = creativeThesis ? embedCreativeThesisIdentity(bridged, creativeThesis) : bridged;
+    return inlineVendorAssets(identified);
   }
 
   /** Build the composite HTML: stacked, blended iframes — one per generated layer. */
-  private static assemble(
+  private static async assemble(
     title: string,
     background: string,
     results: Array<{ spec: CompositionLayerSpec; code: string; generated: boolean; opaqueBackground?: boolean }>,
     _codes: string[],
     creativeThesis?: CreativeThesis,
     executionPlan?: CompositionGraphExecutionPlan,
-  ): string {
+  ): Promise<string> {
     const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     const safeTitle = esc(title);
     const hasAudio = results.some((r) => r.generated && AUDIO_DOMAINS.has(r.spec.domain));
@@ -810,7 +871,7 @@ export class CompositionOrchestrator {
       const blend = r.spec.blendMode ?? 'normal';
       const opacity = r.spec.opacity ?? 1;
       const isAudio = AUDIO_DOMAINS.has(r.spec.domain);
-      const layerHtml = this.wrapLayer(r.spec, r.code, layerIndex, creativeThesis);
+      const layerHtml = await this.wrapLayer(r.spec, r.code, layerIndex, creativeThesis);
       const dataUri = `data:text/html;base64,${Buffer.from(layerHtml, 'utf-8').toString('base64')}`;
       // Audio layers are invisible but must stay in the DOM to keep playing.
       const visualStyle = isAudio

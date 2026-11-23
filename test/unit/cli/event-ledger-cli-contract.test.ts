@@ -6,6 +6,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { createSinterEvent, inputHash } from '../../../src/telemetry/EventLedger.js';
+import { isolatedCliEnv } from '../../helpers/isolatedCli.js';
 
 describe('event ledger CLI contract', () => {
   it('prints filtered JSONL without loading provider configuration', () => {
@@ -66,7 +67,7 @@ describe('event ledger CLI contract', () => {
           cwd: process.cwd(),
           encoding: 'utf8',
           env: {
-            ...process.env,
+            ...isolatedCliEnv().env,
             SINTER_EVENT_LEDGER_PATH: root,
             // Avoid lifting real fitness files from the developer machine.
             SINTER_FITNESS_OBSERVATIONS_PATH: path.join(root, 'no-fitness.jsonl'),
@@ -96,7 +97,7 @@ describe('event ledger CLI contract', () => {
           {
             cwd: process.cwd(),
             encoding: 'utf8',
-            env: { ...process.env, SINTER_EVENT_LEDGER_PATH: root },
+            env: { ...isolatedCliEnv().env, SINTER_EVENT_LEDGER_PATH: root },
           },
         ),
       ).toThrow(/Invalid value for --limit: expected a non-negative integer/);

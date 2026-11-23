@@ -2,11 +2,13 @@ import { existsSync, readdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { readVendorAsset } from './vendorAssets.js';
+import { VENDORED_LIBRARIES } from '../core/wrappers/VendoredLibraries.js';
 import {
   ensurePurgeResistantBrowserEnv,
   checkDiskPressureOnce,
   attemptBrowserInstallOnce,
   scanLegacyBrowserCaches,
+  defaultPlaywrightBrowsersPath,
   type BrowserPreflightOptions,
 } from './browserPreflight.js';
 
@@ -93,12 +95,84 @@ function isD3V7CdnUrl(rawUrl: string): boolean {
   try { url = new URL(rawUrl); } catch { return false; }
   const host = url.hostname.toLowerCase();
   const p = url.pathname.toLowerCase();
-  if (host === 'd3js.org') return p === '/d3.v7.min.js' || p === '/d3.v7.js';
+  // d3js.org/d3.min.js is the latest build, which is v7.
+  if (host === 'd3js.org') return p === '/d3.v7.min.js' || p === '/d3.v7.js' || p === '/d3.min.js' || p === '/d3.js';
   if (host === 'cdn.jsdelivr.net' || host === 'unpkg.com') {
     return /^\/(npm\/)?d3@7(\.\d+){0,2}(\/(dist\/d3(\.min)?\.js)?)?$/.test(p);
   }
   if (host === 'cdnjs.cloudflare.com') return /^\/ajax\/libs\/d3\/7\.\d+\.\d+\/d3(\.min)?\.js$/.test(p);
   return false;
+}
+
+/**
+ * Script-loaded libraries from the vendored index (culori, the d3 add-ons,
+ * roughjs, matter-js, ...), keyed by npm name. Without this a model that
+ * writes <script src=".../culori@4/..."> keeps the CDN URL, the page CSP
+ * (script-src 'self') blocks it, and the piece dies on "culori is not
+ * defined" even though the same library ships in /vendor.
+ */
+const SCRIPT_LIBRARIES = Object.entries(VENDORED_LIBRARIES)
+  .filter(([, e]) => e.load === 'script')
+  .map(([id, e]) => ({ npm: (e.npm ?? id).toLowerCase(), version: e.file.split('/')[3], file: e.file }));
+
+/** Same API line as the vendored build: same major, or same 0.minor below 1.0. */
+function sameApiLine(requested: string, vendored: string): boolean {
+  const [rMaj, rMin] = requested.split('.');
+  const [vMaj, vMin] = vendored.split('.');
+  if (rMaj !== vMaj) return false;
+  return vMaj !== '0' || rMin === vMin;
+}
+
+/** A jsdelivr/unpkg/cdnjs URL for a script library Sinter vendors, mapped to its /vendor file. */
+function vendoredLibraryForCdnUrl(rawUrl: string): string | null {
+  let url: URL;
+  try { url = new URL(rawUrl); } catch { return null; }
+  const host = url.hostname.toLowerCase();
+  const p = url.pathname.toLowerCase();
+  // ESM builds are imports, not classic scripts; the UMD file would not stand in for them.
+  if (p.includes('+esm') || p.endsWith('.mjs') || /\/(esm|es)\//.test(p)) return null;
+  let pkg: string | undefined;
+  let version: string | undefined;
+  if (host === 'cdn.jsdelivr.net' || host === 'unpkg.com') {
+    const m = /^\/(?:npm\/)?((?:@[^/]+\/)?[^/@]+)@(\d+(?:\.\d+){0,2})(?:\/|$)/.exec(p);
+    [pkg, version] = m ? [m[1], m[2]] : [];
+  } else if (host === 'cdnjs.cloudflare.com') {
+    const m = /^\/ajax\/libs\/([^/]+)\/(\d+(?:\.\d+){0,2})\//.exec(p);
+    [pkg, version] = m ? [m[1], m[2]] : [];
+  }
+  if (!pkg || !version) return null;
+  const lib = SCRIPT_LIBRARIES.find((l) => l.npm === pkg || `${l.npm}.js` === pkg || l.npm === `${pkg}.js`);
+  return lib && sameApiLine(version, lib.version) ? lib.file : null;
+}
+
+/**
+ * three on jsdelivr/unpkg: the 0.160 module build (any 0.160.x spelling) and the
+ * classic build, which the vendored r128 global stands in for. Other majors of
+ * the module build would not match the vendored API, so they stay unmapped.
+ */
+function vendoredThreeForCdnUrl(rawUrl: string): string | null {
+  let url: URL;
+  try { url = new URL(rawUrl); } catch { return null; }
+  const host = url.hostname.toLowerCase();
+  if (host !== 'cdn.jsdelivr.net' && host !== 'unpkg.com') return null;
+  const m = /^\/(?:npm\/)?three@(\d+(?:\.\d+){0,2})\/build\/(three\.module\.js|three\.min\.js)$/i.exec(url.pathname);
+  if (!m) return null;
+  if (m[2].toLowerCase() === 'three.min.js') return '/vendor/three/r128/three.min.js';
+  return /^0\.160(\.\d+)?$/.test(m[1]) ? '/vendor/three/0.160.0/three.module.js' : null;
+}
+
+/** Only the classic GSAP 3 core bundle can use the vendored script. */
+function isGsapV3CdnUrl(rawUrl: string): boolean {
+  let url: URL;
+  try { url = new URL(rawUrl); } catch { return false; }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return false;
+  if (url.hostname === 'cdnjs.cloudflare.com') {
+    return /^\/ajax\/libs\/gsap\/3\.\d+\.\d+\/gsap(?:\.min)?\.js$/.test(url.pathname);
+  }
+  const prefix = url.hostname === 'cdn.jsdelivr.net' ? '/npm/' : '/';
+  return (url.hostname === 'cdn.jsdelivr.net' || url.hostname === 'unpkg.com')
+    && url.pathname.startsWith(prefix)
+    && /^gsap@3(?:\.\d+){0,2}(?:\/dist\/gsap(?:\.min)?\.js|\/?)$/.test(url.pathname.slice(prefix.length));
 }
 
 /** The served /vendor path for a known CDN library URL, or null (#924, FABLE-R3.7). */
@@ -107,11 +181,30 @@ export function vendorPathForUrl(rawUrl: string): string | null {
   const legacy = LEGACY_CDN_URLS[rawUrl];
   if (legacy) return legacy;
   if (isD3V7CdnUrl(rawUrl)) return '/vendor/d3/7.9.0/d3.min.js';
+  if (isGsapV3CdnUrl(rawUrl)) return '/vendor/gsap/3.15.0/gsap.min.js';
+  const library = vendoredLibraryForCdnUrl(rawUrl);
+  if (library) return library;
+  const three = vendoredThreeForCdnUrl(rawUrl);
+  if (three) return three;
   const p5Key = isP5CdnUrl(rawUrl);
   if (p5Key) {
     return p5Key === 'p5' ? '/vendor/p5/1.9.0/p5.min.js' : '/vendor/p5/1.9.0/p5.sound.min.js';
   }
   return null;
+}
+
+/**
+ * External <script src> URLs in a page that no vendored copy can stand in for.
+ * The page CSP is script-src 'self', so each of these is blocked at render and
+ * the piece dies on a missing global (v2r1: 12 runs, one on an invented host).
+ */
+export function unservedScriptUrls(html: string): string[] {
+  const urls: string[] = [];
+  for (const m of html.matchAll(/<script\b[^>]*\bsrc\s*=\s*(["'])(.*?)\1/gi)) {
+    const src = m[2].trim();
+    if (/^(?:https?:)?\/\//i.test(src) && !vendorPathForUrl(src.startsWith('//') ? `https:${src}` : src)) urls.push(src);
+  }
+  return urls;
 }
 
 /**
@@ -177,22 +270,21 @@ export function resolveChromiumExecutablePathLookup(): string | undefined {
   const explicitBrowsersPath = process.env.PLAYWRIGHT_BROWSERS_PATH;
 
   // Tier 2: playwright's own default
-  // Dynamic import avoids eager-loading the heavy playwright module.
-  let chromium;
+  // Lazy require avoids eager-loading the heavy playwright module. The
+  // Chromium handle stays inline (never a bare local) so the sandbox
+  // scanner in test/security/playwright-sandbox.test.ts can track it.
+  let preferredPath: string | undefined;
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    chromium = require('playwright').chromium;
+    preferredPath = require('playwright').chromium.executablePath();
   } catch {
-    // playwright not installed — fall through to tier 3 scan.
-    chromium = null;
+    // playwright or its browser registry absent — fall through to tier 3 scan.
+    preferredPath = undefined;
   }
-  if (chromium) {
-    const preferredPath = chromium.executablePath();
-    if (existsSync(preferredPath)) {
-      // When browsers path is pinned, only accept binaries under that root.
-      if (!explicitBrowsersPath || preferredPath.startsWith(explicitBrowsersPath)) {
-        return preferredPath;
-      }
+  if (preferredPath && existsSync(preferredPath)) {
+    // When browsers path is pinned, only accept binaries under that root.
+    if (!explicitBrowsersPath || preferredPath.startsWith(explicitBrowsersPath)) {
+      return preferredPath;
     }
   }
 
@@ -233,8 +325,10 @@ export function resolveChromiumExecutablePathLookup(): string | undefined {
     }
   }
 
-  // Explicit path set but empty → fail closed (no legacy Caches/ leak).
-  if (explicitBrowsersPath) return undefined;
+  // A path the caller pinned that is empty → fail closed (no legacy Caches/ leak).
+  // The durable default the preflight itself exports is not a pin: with a throwaway
+  // HOME it is empty by construction, so the shared caches are still read.
+  if (explicitBrowsersPath && explicitBrowsersPath !== defaultPlaywrightBrowsersPath()) return undefined;
 
   // Tier 5: legacy caches (reuse only — do not re-home env to Caches/)
   return scanLegacyBrowserCaches();

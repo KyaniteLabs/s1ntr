@@ -23,7 +23,7 @@ export interface DreamTransferRunInput {
 
 export interface DreamTransferProducer {
   produce(input: { holdout: string; contextDigest: string;
-    findingDigest: string | null }): Promise<DreamCreativeCandidate>;
+    findingDigest: string | null; technique?: string }): Promise<DreamCreativeCandidate>;
 }
 
 export interface DreamTransferEvaluator {
@@ -74,6 +74,8 @@ export class DreamTransferRunner {
       holdoutAccessedBeforeProposal: !findingRevision || !accessRevisionObserved
         || accessRevisionObserved < findingRevision };
     validateTransferIsolation(isolation);
+    const parentTechniques = [...new Set((plan.context.liminalParentBindings ?? [])
+      .map(binding => binding.parentTechnique).filter((value): value is string => !!value))].sort();
     const controlCandidate = await this.service.runOperation(input.aggregateId, 'transfer-control',
       () => this.runProvider(input.aggregateId, 'transfer-control', 'generator',
         input.producerIdentityDigest, () => input.producer.produce({ holdout: opened.bytes,
@@ -82,7 +84,8 @@ export class DreamTransferRunner {
       () => this.runProvider(input.aggregateId, 'transfer-treatment', 'generator',
         input.producerIdentityDigest, () => input.producer.produce({ holdout: opened.bytes,
           contextDigest: opened.protocol.treatmentContextDigest,
-          findingDigest: opened.protocol.findingDigest })));
+          findingDigest: opened.protocol.findingDigest,
+          ...(parentTechniques.length ? { technique: parentTechniques.join('; ') } : {}) })));
     if (controlCandidate.source === treatmentCandidate.source
       || controlCandidate.graphDigest === treatmentCandidate.graphDigest) {
       throw new Error('DREAM_TRANSFER_ASSIGNMENT_NOT_APPLIED');

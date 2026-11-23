@@ -1,0 +1,10 @@
+## 01-status.txt
+# organ: git | step: status | data: real
+$ node <repo>/bin/sinter git status
+# cwd: <repo> (repo: <repo>)
+# --- stdout
+On branch dogfood/organ-outputs
+Working tree clean
+# --- stderr
+# exit: 0
+

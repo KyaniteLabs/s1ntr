@@ -1,3 +1,4 @@
+// @no-cli-spawn: reads bin/sinter as text, never runs it
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { execSync } from 'child_process';
 import { existsSync, writeFileSync, mkdirSync, rmSync } from 'fs';

@@ -8,7 +8,7 @@
  */
 
 import { existsSync, mkdirSync, readdirSync, statfsSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { Logger } from './Logger.js';
@@ -214,7 +214,7 @@ export function probeDiskPressure(
       ? `[browser-preflight] DISK PRESSURE: volume for "${targetPath}" has ` +
         `${freeGB.toFixed(1)}GB free (${freePct.toFixed(1)}% < ${(threshold * 100).toFixed(0)}%). ` +
         `macOS purges regenerable caches first (~/.cache/puppeteer, ~/Library/Caches/ms-playwright), ` +
-        `which silently breaks render/sandbox/sing. Durable browser home: ${DEFAULT_BROWSERS_HOME}.`
+        `which silently breaks render and sandbox. Durable browser home: ${DEFAULT_BROWSERS_HOME}.`
       : null;
 
     return {
@@ -448,6 +448,7 @@ export function missingChromiumError(details?: {
     `Fix: \`pnpm exec playwright install chromium\` and/or \`pnpm exec puppeteer browsers install chrome\` ` +
     `(or set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH). ` +
     `Browsers live at ${DEFAULT_BROWSERS_HOME} (purge-resistant; not under Caches). ` +
+    `Also looked in the shared caches: ${sharedBrowserCacheRoots().join(', ')}. ` +
     `See docs/agents/browser-home.md.`,
   );
 }
@@ -491,15 +492,32 @@ export function preflightChromiumExecutablePath(
  * Legacy-cache scan helpers (reuse if durable home empty but old install remains).
  * Used only as a last-resort read path before install — does not re-home env to Caches.
  */
-export function scanLegacyBrowserCaches(): string | undefined {
-  const candidates: string[] = [];
-  if (process.platform === 'darwin') {
-    candidates.push(join(homedir(), 'Library', 'Caches', 'ms-playwright'));
+/**
+ * Shared browser caches to read when the durable home has no browser. HOME can
+ * be a throwaway directory (spawned CLIs under test, sandboxes), so the account's
+ * real home from the passwd entry is searched too, plus PLAYWRIGHT_BROWSERS_PATH
+ * from the parent environment. Read-only: nothing here re-homes env to Caches.
+ */
+export function sharedBrowserCacheRoots(): string[] {
+  const homes = new Set<string>([homedir()]);
+  try {
+    homes.add(userInfo().homedir);
+  } catch {
+    // No passwd entry (containers); HOME alone is searched.
   }
-  candidates.push(join(homedir(), '.cache', 'ms-playwright'));
-  candidates.push(join(homedir(), '.cache', 'puppeteer'));
+  const roots: string[] = [];
+  const envPath = process.env.PLAYWRIGHT_BROWSERS_PATH;
+  if (envPath && envPath !== '0') roots.push(envPath);
+  for (const home of homes) {
+    if (process.platform === 'darwin') roots.push(join(home, 'Library', 'Caches', 'ms-playwright'));
+    roots.push(join(home, '.cache', 'ms-playwright'));
+    roots.push(join(home, '.cache', 'puppeteer'));
+  }
+  return [...new Set(roots)];
+}
 
-  for (const root of candidates) {
+export function scanLegacyBrowserCaches(): string | undefined {
+  for (const root of sharedBrowserCacheRoots()) {
     if (!existsSync(root)) continue;
     const found = scanChromiumUnder(root);
     if (found) return found;

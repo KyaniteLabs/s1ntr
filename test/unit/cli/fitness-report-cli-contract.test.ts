@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { describe, expect, it } from 'vitest';
+import { isolatedCliEnv } from '../../helpers/isolatedCli.js';
 
 describe('fitness report CLI contract', () => {
   it('prints a machine-readable aggregate without loading provider configuration', () => {
@@ -30,7 +31,7 @@ describe('fitness report CLI contract', () => {
       const stdout = execFileSync(process.execPath, ['bin/sinter', 'report', 'fitness', '--json'], {
         cwd: process.cwd(),
         encoding: 'utf8',
-        env: { ...process.env, SINTER_FITNESS_OBSERVATIONS_PATH: filePath },
+        env: { ...isolatedCliEnv().env, SINTER_FITNESS_OBSERVATIONS_PATH: filePath },
       });
       const report = JSON.parse(stdout) as { count: number; byDomain: Record<string, { count: number }> };
       expect(report.count).toBe(1);

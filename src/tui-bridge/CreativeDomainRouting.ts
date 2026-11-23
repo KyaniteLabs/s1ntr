@@ -4,19 +4,23 @@ import type { Domain as PreviewDomain } from '../utils/htmlWrapper.js';
 
 const VISUAL_FALLBACKS: Domain[] = [Domain.THREE, Domain.P5, Domain.HYDRA, Domain.GLSL];
 
+// Mediums the direct `--domain` route serves but the conversational classifier did not know (Sol G12).
+const SVG_CUE = /\bsvg\b|\bvector\b|\blogo\b|\bicon\b|\bdiagram\b|\bcutfile\b|\bcnc\b|\bsticker\b/;
+const BLENDER_CUE = /\bblender\b|\bbpy\b/;
+const DATAVIZ_CUE = /\bd3(?:\.js)?\b|\bdata\s*viz(?:ualization|ualisation)?\b|\bdata\s+visuali[sz]ation\b/;
+const NBE_CUE = /\bnbe\b|\bneural\s+bloom\b/;
+
 export function hasExplicitCreativeDomainCue(prompt: string): boolean {
   const lower = prompt.toLowerCase();
-  const hasRevideoHandle = lower.includes('@revideo');
   return /\bp5\.?js\b|\bp5js\b|\bp5\s+(sketch|code)\b|\bprocessing\b/.test(lower)
     || /\bthree\.js\b|\bthreejs\b|\bthree\s*js\b/.test(lower)
     || /\bshader\b|\bglsl\b|\bfragment\s+shader\b/.test(lower)
     || /\bstrudel\b|\btidal\b|\blive\s+coding\s+music\b/.test(lower)
     || /\bhydra\b|\bvideo\s+synth\b/.test(lower)
-    || hasRevideoHandle || /\brevideo\b/.test(lower)
     || /\btone\.?js\b|\btonejs\b|\bweb\s*audio\b/.test(lower)
-    || /\bhyperframes?\b/.test(lower)
     || /\bkinetic\s+(typography|type|text|css)\b|\bcss\s+kinetic\b/.test(lower)
-    || /\bascii\b|\btext\s*art\b/.test(lower);
+    || /\bascii\b|\btext\s*art\b/.test(lower)
+    || SVG_CUE.test(lower) || BLENDER_CUE.test(lower) || DATAVIZ_CUE.test(lower) || NBE_CUE.test(lower);
 }
 
 export interface CreativeDomainRouteTruth {
@@ -29,20 +33,16 @@ export interface CreativeDomainRouteTruth {
 
 export function inferCreativeDomain(prompt: string): Domain {
   const lower = prompt.toLowerCase();
-  const hasRevideoHandle = lower.includes('@revideo');
-  const hasExplicitFrameworkCue = hasRevideoHandle || /\bhyperframes?\b|\brevideo\b|\bthree\.js\b|\bthreejs\b|\b3d\b|\bwebgl\b|\bscene\b|\bcamera\b|\bmesh\b|\bgeometry\b|\bshader\b|\bglsl\b|\bstrudel\b|\bhydra\b|\btone\.?js\b|\btonejs\b|\bweb\s*audio\b/.test(lower);
+  const hasExplicitFrameworkCue = /\bthree\.js\b|\bthreejs\b|\b3d\b|\bwebgl\b|\bscene\b|\bcamera\b|\bmesh\b|\bgeometry\b|\bshader\b|\bglsl\b|\bstrudel\b|\bhydra\b|\btone\.?js\b|\btonejs\b|\bweb\s*audio\b/.test(lower);
 
   if (/\bp5\.?js\b|\bp5js\b|\bp5\s+sketch\b|\bp5\s+code\b/.test(lower)) return Domain.P5;
+  if (BLENDER_CUE.test(lower)) return Domain.BLENDER;
+  if (NBE_CUE.test(lower)) return Domain.NBE;
+  if (DATAVIZ_CUE.test(lower)) return Domain.DATAVIZ;
+  // An SVG cue wins unless a different framework is named outright.
+  if (/\bsvg\b/.test(lower) || (!hasExplicitFrameworkCue && SVG_CUE.test(lower))) return Domain.SVG;
   if (!hasExplicitFrameworkCue && /\bkinetic\s+(typography|type|text|css)\b|\bcss\s+kinetic\b|\b(animated|moving|orbiting|spinning|pulsing)\s+(words?|letters?|typography|text|type)\b|\b(typography|text|type)\b.*\b(animated|moving|kinetic|orbiting|spinning|pulsing)\b/.test(lower)) {
     return Domain.KINETIC;
-  }
-  const forbidsRevideo = /\b(do not|don't|dont|never|avoid)\b[^.\n]*(?:@?revideo)/.test(lower);
-  const explicitlyHyperframes = /\bhyperframes?\b/.test(lower);
-  const explicitlyRevideo = hasRevideoHandle || /\brevideo\b/.test(lower);
-  if (explicitlyHyperframes) return Domain.HYPERFRAMES;
-  if (!forbidsRevideo && explicitlyRevideo) return Domain.REVIDEO;
-  if (/\b(promo|trailer|slideshow|title\s*card|subtitle|caption|social\s*media)\b|\b(composite|assemble|overlay|watermark|intro|outro)\b/.test(lower)) {
-    return Domain.HYPERFRAMES;
   }
   if (/\bshader\b|\bglsl\b|\bfragment\b|\bray\s*march\b|\bsdf\b/.test(lower)) return Domain.GLSL;
   if (/\bthree\.js\b|\bthreejs\b|\bthree\b|\b3d\b|\bwebgl\b|\bscene\b|\bcamera\b|\bmesh\b|\bgeometry\b|\borbit(?:ing)?\b/.test(lower)) {
@@ -53,7 +53,6 @@ export function inferCreativeDomain(prompt: string): Domain {
   if (/\btone\.?js\b|\btonejs\b|\bweb\s*audio\b|\bsynth\b|\bdrone\b|\bsequencer\b/.test(lower)) return Domain.TONE;
   if (/\boscillator\b/.test(lower)) return Domain.HYDRA;
   if (/\bascii\b|\btext\s*art\b/.test(lower)) return Domain.ASCII;
-  if (/\bsvg\b|\bvector\b|\blogo\b|\bicon\b|\bdiagram\b|\bcutfile\b|\bcnc\b|\bsticker\b/.test(lower)) return Domain.GENERIC;
   return Domain.P5;
 }
 
@@ -125,8 +124,6 @@ export function previewDomainForCode(code: string, requestedDomain: Domain): Pre
   if (requestedDomain === Domain.GLSL || requestedDomain === Domain.SHADER || requestedDomain === Domain.WEBGL) return 'shader';
   if (requestedDomain === Domain.HYDRA) return 'hydra';
   if (requestedDomain === Domain.TONE) return 'tone';
-  if (requestedDomain === Domain.REVIDEO) return 'revideo';
-  if (requestedDomain === Domain.HYPERFRAMES) return 'hyperframes';
   if (requestedDomain === Domain.KINETIC) return 'html';
   if (requestedDomain === Domain.STRUDEL || requestedDomain === Domain.MUSIC) return 'strudel';
   if (requestedDomain === Domain.ASCII) return 'ascii';
@@ -147,12 +144,10 @@ export function expectedPreviewDomainsForCreativeDomain(domain: Domain): Preview
   if (domain === Domain.HYDRA) return ['hydra'];
   if (domain === Domain.TONE) return ['tone'];
   if (domain === Domain.STRUDEL || domain === Domain.MUSIC) return ['strudel'];
-  if (domain === Domain.REVIDEO) return ['revideo'];
-  if (domain === Domain.HYPERFRAMES) return ['hyperframes'];
   if (domain === Domain.KINETIC) return ['html'];
   if (domain === Domain.ASCII) return ['ascii'];
   if (domain === Domain.P5) return ['p5'];
-  return ['p5', 'three', 'shader', 'hydra', 'tone', 'strudel', 'ascii', 'html', 'revideo', 'hyperframes'];
+  return ['p5', 'three', 'shader', 'hydra', 'tone', 'strudel', 'ascii', 'html'];
 }
 
 export function validateGeneratedDomainForRequest(code: string, requestedDomain: Domain): GeneratedDomainValidation {

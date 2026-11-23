@@ -4,6 +4,7 @@
  * Type definitions for the background executive autonomy system.
  * Includes forward-looking types for all 5 increments.
  */
+import type { GoalStatus } from './GoalLifecycle.js';
 
 // ── Increment 1: Perception ──
 
@@ -53,7 +54,7 @@ export interface CortexSnapshot {
 
 export type GoalPriority = 'critical' | 'high' | 'normal' | 'low';
 export type GoalCategory = 'coverage' | 'performance' | 'reliability' | 'feature' | 'maintenance';
-export type GoalStatus = 'active' | 'completed' | 'dropped';
+export type { GoalStatus } from './GoalLifecycle.js';
 
 export interface CortexGoal {
   id: string;

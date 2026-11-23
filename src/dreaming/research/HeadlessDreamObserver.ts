@@ -14,7 +14,7 @@ export class HeadlessDreamObserver implements DreamRenderedObserver {
   async observe(candidate: DreamCreativeCandidate,
     plan: DreamExperimentPlan): Promise<DreamObservedEvidence> {
     const render = await this.renderer.renderWithEvidence(candidate.source, {
-      domain: 'unknown', timeout: this.policy.timeoutMs, networkPolicy: 'isolated',
+      domain: 'html', timeout: this.policy.timeoutMs, networkPolicy: 'isolated',
       keepPageOpen: false, maximumOutputBytes: this.policy.maximumOutputBytes,
       observeInteraction: plan.requiredModalities.includes('interaction') });
     const layerAblations = await this.observeAblations(candidate, plan);
@@ -32,7 +32,7 @@ export class HeadlessDreamObserver implements DreamRenderedObserver {
     const digests: string[] = [];
     for (const ablation of candidate.layerAblations ?? []) {
       const receipt = await this.renderer.renderWithEvidence(ablation.source, {
-        domain: 'unknown', timeout: this.policy.timeoutMs, networkPolicy: 'isolated',
+        domain: 'html', timeout: this.policy.timeoutMs, networkPolicy: 'isolated',
         keepPageOpen: false, maximumOutputBytes: this.policy.maximumOutputBytes });
       if (!receipt.screenshot || !receipt.lateScreenshot || receipt.infraUnavailable
         || receipt.candidateFailure || receipt.errors?.length

@@ -5,6 +5,7 @@ import fs from 'fs';
 import path from 'path';
 import puppeteer from 'puppeteer';
 import { CompositionOrchestrator } from '../../dist/composition/CompositionOrchestrator.js';
+import { prepareBrowserScratch } from '../lib/scratch-space.mjs';
 
 const OUT = '.quality/matrix';
 fs.mkdirSync(OUT, { recursive: true });
@@ -31,6 +32,7 @@ const SPECS = [
     { domain: 'tone',   prompt: 'bright arpeggiated bells', blendMode: 'normal', opacity: 0.5 } ] },
 ];
 
+prepareBrowserScratch();   // browser profile off the data volume + free-space check
 const browser = await puppeteer.launch({
   headless: 'new', protocolTimeout: 90000,
   args: ['--no-sandbox','--disable-setuid-sandbox','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--enable-webgl','--ignore-gpu-blocklist'],

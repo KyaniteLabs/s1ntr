@@ -1,5 +1,13 @@
 export { DreamQueue } from './DreamQueue.js';
-export type { DreamStrategy, DreamTask, DreamTaskKind, DreamQueueConfig } from './DreamQueue.js';
+export type { DreamStrategy, DreamTask, DreamTaskKind, DreamTaskStatus, DreamQueueConfig } from './DreamQueue.js';
+export {
+  DREAM_TASK_STATUSES,
+  DREAM_TASK_TRANSITIONS,
+  IllegalDreamTaskTransitionError,
+  isDreamTaskStatus,
+  isTerminalDreamTaskStatus,
+  transitionDreamTask,
+} from './DreamQueue.js';
 export { buildDreamTaskPrompt, buildGovernedDreamRequest,
   GovernedDreamTaskRunner, runNextDreamTask } from './DreamTaskRunner.js';
 export type {

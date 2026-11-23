@@ -3,8 +3,7 @@
  *
  * An adaptive low-pass filter for noisy interactive signals: it smooths heavily
  * when the value is steady and opens up (low lag) when the value moves fast.
- * Replaces the fixed-coefficient EMA in the Sing pipeline, which forced a
- * jitter-vs-lag tradeoff.
+ * Replaces a fixed-coefficient EMA, which forced a jitter-vs-lag tradeoff.
  */
 
 export interface OneEuroOptions {

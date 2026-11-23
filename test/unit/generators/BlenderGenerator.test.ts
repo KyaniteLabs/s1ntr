@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { BlenderGenerator } from '../../../src/generators/blender/BlenderGenerator.js';
 import { LLMClient } from '../../../src/llm/LLMClient.js';
-import { blenderConfidence, metaConfidence, p5Confidence } from '../../../src/generators/registerGenerators.js';
+import { blenderConfidence, customConfidence, p5Confidence } from '../../../src/generators/registerGenerators.js';
 import { GenerationError } from '../../../src/errors/GenerationError.js';
 
 const GOOD_SCRIPT = [
@@ -97,8 +97,8 @@ describe('blenderConfidence routing', () => {
   it('stays out of the way of every other domain', () => {
     expect(blenderConfidence('a p5.js flow field with particles')).toBe(0);
     expect(blenderConfidence('a smoothie recipe visual, mixes like a blender')).toBe(0);
-    expect(blenderConfidence('Target creative domain: meta\nan ink simulation')).toBe(0);
+    expect(blenderConfidence('Target creative domain: custom\nan ink simulation')).toBe(0);
     expect(p5Confidence('a blender scene of a donut')).toBeLessThan(0.95);
-    expect(metaConfidence('a blender scene of a donut')).toBe(0);
+    expect(customConfidence('a blender scene of a donut')).toBe(0);
   });
 });

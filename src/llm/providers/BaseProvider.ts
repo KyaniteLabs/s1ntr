@@ -6,7 +6,7 @@
  * common configuration and capability checking.
  */
 
-import { Result, err } from 'neverthrow';
+import { Result, err, ok } from 'neverthrow';
 import { createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type {
@@ -38,6 +38,51 @@ export interface ReservedProviderTransport {
   readonly credentialDigest: string;
 }
 
+type Effort = NonNullable<NonNullable<ProviderRequest['thinking']>['effort']>;
+const EFFORT_STEP_DOWN: Record<Effort, Effort | undefined> = {
+  max: 'high', xhigh: 'high', high: 'medium', medium: 'low', low: undefined,
+};
+
+/** finish_reason=length with no visible content and no tool call: the budget went to reasoning. */
+function isReasoningExhausted(response: ProviderResponse): boolean {
+  return response.failureClass === 'reasoning-exhausted'
+    || (!response.success && response.finishReason === 'length'
+      && response.content.length === 0 && !(response.toolCalls && response.toolCalls.length > 0));
+}
+
+/** One level down, or undefined when thinking is off or already at low. */
+function stepDownEffort(req: ProviderRequest): Effort | undefined {
+  if (!req.thinking?.enabled) return undefined;
+  return EFFORT_STEP_DOWN[req.thinking.effort ?? 'high'];
+}
+
+function withReasoningRecovery(req: ProviderRequest, effort: Effort): ProviderRequest {
+  const budget = req.maxTokens !== undefined
+    ? `Your total output budget is ${req.maxTokens} tokens, reasoning included. A previous attempt spent all of it on reasoning and produced no answer. Keep reasoning brief and always finish with the complete answer.`
+    : 'A previous attempt spent its whole output budget on reasoning and produced no answer. Keep reasoning brief and always finish with the complete answer.';
+  return {
+    ...req,
+    systemPrompt: `${req.systemPrompt}\n\n${budget}`.trim(),
+    thinking: { ...req.thinking, enabled: true, effort },
+  };
+}
+
+function describeAttempt(response: ProviderResponse, req: ProviderRequest): string {
+  const effort = req.thinking?.enabled ? (req.thinking.effort ?? 'high') : 'off';
+  const out = response.usage ? `output_tokens=${response.usage.outputTokens}, input_tokens=${response.usage.inputTokens}` : 'tokens=unreported';
+  const provider = response.error ? `; provider said: ${response.error}` : '';
+  return `effort=${effort}, finish_reason=${response.finishReason ?? 'unknown'}, ${out}${provider}`;
+}
+
+function markReasoningExhausted(response: ProviderResponse, detail: string): ProviderResponse {
+  return {
+    ...response,
+    success: false,
+    failureClass: 'reasoning-exhausted',
+    error: `reasoning-exhausted: the model spent its whole output budget on reasoning and returned no visible content (${detail})`,
+  };
+}
+
 const signalTimeouts = new WeakMap<AbortSignal, { provider: string; timeoutMs: number }>();
 
 export abstract class BaseProvider {
@@ -46,6 +91,8 @@ export abstract class BaseProvider {
   readonly #transportContext = new AsyncLocalStorage<Readonly<ProviderConfig>>();
   #config: Readonly<ProviderConfig>;
   readonly #reservations = new WeakMap<object, Readonly<ProviderConfig>>();
+  /** Requests that are themselves the one reasoning-exhausted recovery attempt. */
+  readonly #recoveryRequests = new WeakSet<object>();
   #reservedCount = 0;
   #inFlightCount = 0;
 
@@ -114,9 +161,33 @@ export abstract class BaseProvider {
           model: config.model, endpoint: config.baseUrl,
         }));
       }
-      const result = await this.#transportContext.run(config, () => this.generateImpl(req));
-      const response = result.isOk() ? result.value : undefined;
+      let result = await this.#transportContext.run(config, () => this.generateImpl(req));
+      let response = result.isOk() ? result.value : undefined;
       completeProviderInvocation(callId, result.isOk() && response?.success ? 'success' : 'error', response?.usage);
+      if (response && isReasoningExhausted(response)) {
+        const isRecovery = this.#recoveryRequests.has(req);
+        const lower = isRecovery ? undefined : stepDownEffort(req);
+        if (lower) {
+          // One recovery attempt: a full provider call through generate(), so the
+          // pre-spend interlock, budget ledger and call accounting all apply.
+          const retryReq = withReasoningRecovery(req, lower);
+          this.#recoveryRequests.add(retryReq);
+          const retry = await this.generate(retryReq);
+          const retried = retry.isOk() ? retry.value : undefined;
+          if (retried?.success) return retry;
+          if (retried && isReasoningExhausted(retried)) {
+            return ok(markReasoningExhausted(retried, `${describeAttempt(response, req)}; retry at effort=${lower}: ${describeAttempt(retried, retryReq)}`));
+          }
+          if (retry.isErr()) return retry;
+          return ok(markReasoningExhausted(response, describeAttempt(response, req)));
+        }
+        // No recovery was possible: keep the adapter's own, more specific
+        // diagnostic when it wrote one, and only add the failure class.
+        response = response.error
+          ? { ...response, success: false, failureClass: 'reasoning-exhausted' }
+          : markReasoningExhausted(response, describeAttempt(response, req));
+        result = ok(response);
+      }
       return result;
     } catch (error) {
       completeProviderInvocation(callId, 'error');
@@ -255,10 +326,11 @@ export abstract class BaseProvider {
 
 /**
  * Detect whether a model requires `max_completion_tokens` instead of `max_tokens`.
- * OpenAI reasoning models (o1, o3, o4) and GPT-5 family reject `max_tokens`.
+ * OpenAI reasoning models (o1, o3, o4) and the GPT-5-and-later families reject `max_tokens`
+ * (api.openai.com answers gpt-6.2-sol with 400 unsupported_parameter).
  */
 export function usesMaxCompletionTokens(model: string): boolean {
-  return /^(gpt-5|o1|o3|o4)/.test(model);
+  return /^(gpt-(?:[5-9]|\d{2,})(?:[.-]|$)|o[1-9](?:-|$))/.test(model);
 }
 
 /**

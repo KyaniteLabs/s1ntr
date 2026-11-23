@@ -472,6 +472,18 @@ describe('getHarnessLLMConfig', () => {
     expect(config.contextWindow).toBe(32768);
   });
 
+  it('falls back independently for invalid numeric overrides and preserves zero', () => {
+    process.env.LIMINAL_HARNESS_TEMPERATURE = 'Infinity';
+    process.env.LIMINAL_HARNESS_MAX_TOKENS = '12oops';
+    process.env.LIMINAL_HARNESS_TIMEOUT = ' ';
+    process.env.LIMINAL_HARNESS_MAX_RETRIES = '0';
+    process.env.LIMINAL_HARNESS_CONTEXT_WINDOW = 'NaN';
+
+    expect(getHarnessLLMConfig()).toEqual({
+      temperature: 0.2, maxTokens: 16384, timeoutMs: 120000, maxRetries: 0, contextWindow: 32768,
+    });
+  });
+
   it('reads LIMINAL_HARNESS_TEMPERATURE from env', () => {
     process.env.LIMINAL_HARNESS_TEMPERATURE = '0.5';
     expect(getHarnessLLMConfig().temperature).toBeCloseTo(0.5);
@@ -554,6 +566,7 @@ describe('getHarnessProviderConfig', () => {
     process.env.LIMINAL_HARNESS_BASE_URL = 'https://api.minimaxi.com/v1';
     process.env.LIMINAL_HARNESS_MODEL = 'MiniMax-M2.7';
     process.env.LIMINAL_HARNESS_TEMPERATURE = '0.4';
+    process.env.LIMINAL_HARNESS_API_KEY = 'fixture';
 
     const config = getHarnessProviderConfig();
     expect(config!.temperature).toBeCloseTo(0.4);
@@ -568,13 +581,26 @@ describe('getHarnessProviderConfig', () => {
     expect(config!.apiKey).toBe('mm-key');
   });
 
-  it('falls back to LIMINAL_LLM_API_KEY then OPENAI_API_KEY for non-minimax harness URL', () => {
+  it('uses the configured Harness key before the ambient vendor key through official URL normalization', () => {
+    process.env.LIMINAL_HARNESS_BASE_URL = 'https://api.minimax.io/v1';
+    process.env.LIMINAL_HARNESS_MODEL = 'MiniMax-M2.7';
+    process.env.LIMINAL_HARNESS_API_KEY = 'configured-harness-key';
+    process.env.MINIMAX_API_KEY = 'ambient-vendor-key';
+
+    const harness = getHarnessProviderConfig();
+    expect(harness?.baseUrl).toBe('https://api.minimax.io/anthropic');
+    expect(harness?.apiKey).toBe('configured-harness-key');
+  });
+
+  it('keeps an explicit Harness key separate from the generic generator route', () => {
     process.env.LIMINAL_HARNESS_BASE_URL = 'https://custom.example.com/v1';
     process.env.LIMINAL_HARNESS_MODEL = 'custom-model';
-    process.env.LIMINAL_LLM_API_KEY = 'lim-key';
+    process.env.LIMINAL_LLM_API_KEY = 'generator-only-key';
+    process.env.LIMINAL_LLM_BASE_URL = 'https://generator.example.com/v1';
 
-    const config = getHarnessProviderConfig();
-    expect(config!.apiKey).toBe('lim-key');
+    expect(getHarnessProviderConfig()?.apiKey).toBe('');
+    process.env.LIMINAL_HARNESS_API_KEY = 'harness-only-key';
+    expect(getHarnessProviderConfig()?.apiKey).toBe('harness-only-key');
   });
 
   it('does not return harness-specific config when only MODEL is set (no BASE_URL)', () => {
@@ -584,6 +610,22 @@ describe('getHarnessProviderConfig', () => {
     // Should be ollama (default active provider), not harness-specific
     expect(config).toMatchObject({ baseUrl: 'http://localhost:11434' });
     expect(config!.baseUrl).toBe('http://localhost:11434');
+  });
+
+  it('rejects an uncredentialed paid provider pin during harness resolution', () => {
+    process.env.LIMINAL_LLM_PROVIDER = 'openrouter';
+    expect(getHarnessProviderConfig).toThrow(/openrouter.*API key/i);
+  });
+
+  it('requires a usable key for a dedicated paid seat and keeps its numeric defaults', () => {
+    process.env.LIMINAL_HARNESS_BASE_URL = PROVIDER_TEMPLATES.openrouter.baseUrl;
+    process.env.LIMINAL_HARNESS_MODEL = 'fixture-model';
+    process.env.LIMINAL_HARNESS_API_KEY = 'placeholder';
+    expect(getHarnessProviderConfig).toThrow(/openrouter.*API key/i);
+    process.env.LIMINAL_HARNESS_API_KEY = 'fixture';
+    process.env.LIMINAL_HARNESS_TEMPERATURE = 'bad';
+    process.env.LIMINAL_HARNESS_MAX_TOKENS = 'Infinity';
+    expect(getHarnessProviderConfig()).toMatchObject({ temperature: 0.2, maxTokens: 4096 });
   });
 
   it('preserves explicitly pinned OpenRouter identity for the harness', () => {

@@ -72,19 +72,13 @@ export const providerAuthorityRows: readonly ProductionAuthorityPath[] = [
     'quarantined-history',
   ),
   authorityRow(
-    'src/generators/kinetic/KineticGenerator.ts:provider',
-    'provider',
-    'legacy-role-bound-transport',
-    'quarantined-history',
-  ),
-  authorityRow(
     'src/generators/p5/P5GeneratorLLM.ts:provider',
     'provider',
     'legacy-role-bound-transport',
     'quarantined-history',
   ),
   authorityRow(
-    'src/generators/tone/ToneGenerator.ts:provider',
+    'src/generators/registerGenerators.ts:provider',
     'provider',
     'legacy-role-bound-transport',
     'quarantined-history',
@@ -295,6 +289,20 @@ export const providerAuthorityRows: readonly ProductionAuthorityPath[] = [
   ),
   authorityRow(
     'src/cli/LiminalProductionCompose.ts:provider',
+    'provider',
+    'liminal-effect-broker',
+    'authoritative',
+  ),
+  // Batch lane: each piece's generation is answered from an Anthropic batch result, inside the same governed Create.
+  authorityRow(
+    'src/cli/LiminalBatchLane.ts:provider',
+    'provider',
+    'liminal-effect-broker',
+    'authoritative',
+  ),
+  // Reflection sends only role-bound Studio requests through the effect broker.
+  authorityRow(
+    'src/chat/commands/chatReflect.ts:provider',
     'provider',
     'liminal-effect-broker',
     'authoritative',

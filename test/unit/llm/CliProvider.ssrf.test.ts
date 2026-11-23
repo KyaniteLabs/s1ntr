@@ -60,8 +60,13 @@ describe('local CLI provider URL validation', () => {
       .toBe('agy-cli-seat');
     expect(classifyProviderSurface('cli', 'cli://agy/chat/completions', { model: 'gemini-3.7-flash-medium' }))
       .toBe('agy-cli-seat');
-    expect(classifyProviderSurface('cli', 'cli://agy', { model: 'gemini-3.8-flash-high' }))
-      .toBe('unknown');
+    for (const model of ['gemini-3.8-flash-low', 'gemini-3.8-flash-medium', 'gemini-3.8-flash-high']) {
+      expect(classifyProviderSurface('cli', 'cli://agy/high', { model })).toBe('agy-cli-seat');
+    }
+    // agy also serves Claude and GPT-OSS; those must never ride the Gemini seat.
+    for (const model of ['claude-sonnet-4-6', 'claude-opus-4-6-thinking', 'gpt-oss-120b-medium', 'gemini', 'gemini-', 'gemini-3.8 flash']) {
+      expect(classifyProviderSurface('cli', 'cli://agy', { model })).toBe('unknown');
+    }
     const directory = mkdtempSync(join(tmpdir(), 'agy-cli-provider-'));
     const executable = join(directory, 'agy');
     writeFileSync(executable, '#!/bin/sh\nprintf "generated artwork"\n');

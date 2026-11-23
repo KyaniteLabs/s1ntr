@@ -24,3 +24,12 @@ export function parseHermesSeat(baseUrl: string): HermesSeat | null {
   if (!HERMES_REASONING_LEVELS.includes(reasoning)) return null;
   return { provider: m[1], reasoning };
 }
+
+/**
+ * AGY serves Gemini plus Claude and GPT-OSS models. Only the Gemini family rides
+ * the Gemini subscription seat; pinning one version made every new id (3.8 low/
+ * medium/high) unlabelled. Any `gemini-<version>[-tier]` id is a Gemini seat id.
+ */
+export function isAgyGeminiModel(model: string | undefined): boolean {
+  return typeof model === 'string' && /^gemini-[a-z0-9]+(?:[.-][a-z0-9]+)*$/.test(model);
+}

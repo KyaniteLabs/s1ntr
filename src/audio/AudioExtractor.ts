@@ -151,7 +151,13 @@ export function extractFeatures(buffer: Float32Array): AudioFeatures {
   if (!M) return extractFallbackFeatures(buffer);
 
   try {
-    // Meyda requires bufferSize to match the input buffer length
+    // Meyda needs a power-of-two window. A longer recording (a whole voice file) is analysed
+    // through its largest power-of-two window, centred, instead of failing into the fallback.
+    if ((buffer.length & (buffer.length - 1)) !== 0) {
+      const size = 2 ** Math.floor(Math.log2(buffer.length));
+      const start = Math.floor((buffer.length - size) / 2);
+      buffer = buffer.subarray(start, start + size);
+    }
     if (M.bufferSize !== buffer.length) {
       M.bufferSize = buffer.length;
     }

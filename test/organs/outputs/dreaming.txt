@@ -1,0 +1,11 @@
+# organ: dreaming | data: real command, fake provider
+$ sinter dream guard --scheduled <work>/sched.json --incumbent <work>/inc.json --candidate <path>
+[CLI] Resolved provider: openai @ http://127.0.0.1:33991/v1 (model=gpt-5.4)
+{"decision":"promote","reason":"GAIN_AND_LOWER_BOUND_CLEAR","scheduled":2,"meanGain":0.30000000000000004,"lowerBound95":0.30000000000000004,"incumbentFailures":0,"candidateFailures":0}
+# exit: 0
+
+$ sinter dream guard --scheduled <work>/sched.json --incumbent <path> --candidate <path>
+[CLI] Resolved provider: openai @ http://127.0.0.1:33991/v1 (model=gpt-5.4)
+{"decision":"keep-incumbent","reason":"GAIN_BELOW_PREDECLARED_MARGIN","scheduled":2,"meanGain":-0.09999999999999998,"lowerBound95":-0.09999999999999998,"incumbentFailures":0,"candidateFailures":0}
+# exit: 4
+

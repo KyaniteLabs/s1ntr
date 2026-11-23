@@ -166,21 +166,45 @@ export interface OwnerReviewLifecycleResult {
   readonly closureContext: OwnerReviewClosureContext;
 }
 
+type ReviewCapture = OwnerReviewPacket['candidates'][number]['evidence'][number];
+
+function projectReviewerCapture(capture: ReviewCapture) {
+  const { payloadUri, evidenceClass, digest, resultDigest, byteLength, artifactDigest } = capture;
+  const receipt = { evidenceClass, digest, resultDigest, byteLength, artifactDigest,
+    mimeType: capture.mimeType.slice(0, 120) };
+  if (capture.evidenceClass === 'audio' || capture.evidenceClass === 'visual'
+    || /^(image|audio|video)\//.test(capture.mimeType)) {
+    return Object.freeze({ ...receipt, payloadDisposition: 'owner-playable-only' as const });
+  }
+  const text = Buffer.from(payloadUri.slice(payloadUri.indexOf(',') + 1), 'base64').toString('utf8');
+  const excerptLength = 4_096;
+  if (text.length <= 2 * excerptLength) {
+    return Object.freeze({ ...receipt, payloadText: text, payloadDisposition: 'text' as const });
+  }
+  return Object.freeze({ ...receipt,
+    payloadText: text.slice(0, excerptLength) + '\n[Middle omitted]\n' + text.slice(-excerptLength),
+    payloadDisposition: 'bounded-text-excerpt' as const });
+}
+
 /** Bound text transport for reviewers; the intact playable packet remains owner-facing. */
 function reviewerPacketProjection(packet: OwnerReviewPacket, blindId: string) {
-  return Object.freeze({
+  const compact = (items: readonly string[]) => items.slice(0, 8).map((item) => item.slice(0, 240));
+  const candidates = packet.candidates.filter((candidate) => candidate.blindId === blindId)
+    .map((candidate) => ({
+      blindId: candidate.blindId, artifactDigest: candidate.artifactDigest,
+      audioRequirement: candidate.audioRequirement, evidenceRootDigest: candidate.evidenceRootDigest,
+      prohibitedClaims: candidate.prohibitedClaims,
+      inconclusiveReasons: compact(candidate.inconclusiveReasons),
+      knownFailures: compact(candidate.knownFailures), hardFloorFailures: compact(candidate.hardFloorFailures),
+      totalHardFloorFailures: candidate.hardFloorFailures.length,
+      evidence: candidate.evidence.map(projectReviewerCapture),
+    }));
+  return {
     schema: 'sinter.owner-review-transport-projection' as const, schemaVersion: 1 as const,
     sourcePacketDigest: packet.packetDigest, blindPacketDigest: packet.blindPacketDigest,
     briefId: packet.briefId, contactSheetDigest: sha256Hex(packet.contactSheetHtml),
-    candidates: Object.freeze(packet.candidates.filter((candidate) => candidate.blindId === blindId)
-      .map((candidate) =>
-    Object.freeze({ ...candidate, evidence: Object.freeze(candidate.evidence.map((capture) =>
-      capture.evidenceClass === 'audio'
-        ? Object.freeze({ ...capture, payloadUri: undefined,
-          payloadDisposition: 'owner-playable-only' as const })
-        : capture),
-    ) }))),
-  });
+    candidates,
+  };
 }
 
 export function ownerReviewerSystemPrompt(role: 'specialist' | 'holistic'): string {
@@ -397,7 +421,12 @@ export async function runOwnerReviewLifecycle(
   });
   const reviews: CreativeQualityReviewInput[] = [];
   for (const candidate of packet.candidates) {
-    const reviewPacket = reviewerPacketProjection(packet, candidate.blindId);
+    const reviewRequest = JSON.stringify({
+      evidencePacket: reviewerPacketProjection(packet, candidate.blindId), blindId: candidate.blindId,
+    });
+    if (Buffer.byteLength(reviewRequest) > 48 * 1024) {
+      throw new Error('OWNER_REVIEW_TRANSPORT_EVIDENCE_TOO_LARGE');
+    }
     const binding = resolveCampaignBlindCandidateBinding(input.session, input.session.packet.candidates
       .find((item) => item.blindId === candidate.blindId)!);
     const sourceCapture = candidate.evidence.find((item) => item.evidenceClass === 'source');
@@ -416,7 +445,7 @@ export async function runOwnerReviewLifecycle(
       const client = host[role];
       const response = await service.runStageTransport(admission, stageId, 'product-review', () => client.generate(
         ownerReviewerSystemPrompt(role),
-        JSON.stringify({ evidencePacket: reviewPacket, blindId: candidate.blindId }),
+        reviewRequest,
       ));
       const refs = response.executorAttestations ?? [];
       const lastSuccess = [...refs].reverse().find(r => r.outcome === 'success');

@@ -1,328 +1,51 @@
 /**
- * Tests for HydraAdapter
- * 
- * Following TDD: RED, GREEN, REFACTOR
- * 
+ * Tests for HydraAdapter: validate/getImports/generateScript, and the
+ * sandbox lifecycle. Render/exports behavior lives in SandboxedAdapters.test.ts.
+ *
  * @vitest-environment jsdom
  */
 
-import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { HydraAdapter } from '../../../../src/composition/adapters/HydraAdapter.js';
 import type { Layer, GlobalSettings } from '../../../../src/composition/types.js';
-import type { RenderContext } from '../../../../src/composition/CompositionEngine.js';
-import { StateManager } from '../../../../src/composition/CompositionEngine.js';
+import { attachedContainer, makeLayer, STUB_LIB } from './sandboxTestUtils.js';
 
-// Mock Hydra synth class
-class MockHydraSynth {
-  canvas: HTMLCanvasElement;
-  width = 800;
-  height = 600;
-  stopped = false;
-  started = false;
-  o0 = { src: vi.fn() };
-  o1 = { src: vi.fn() };
-  o2 = { src: vi.fn() };
-  o3 = { src: vi.fn() };
-
-  constructor(options: { canvas: HTMLCanvasElement; width?: number; height?: number }) {
-    this.canvas = options.canvas;
-    if (options.width) this.width = options.width;
-    if (options.height) this.height = options.height;
-  }
-
-  stop() {
-    this.stopped = true;
-  }
-
-  start() {
-    this.started = true;
-    this.stopped = false;
-  }
-
-  setResolution(width: number, height: number) {
-    this.width = width;
-    this.height = height;
-  }
-
-  src(_input: unknown) {
-    return this;
-  }
-}
-
-// Create a proper constructor function that vitest can track
-function createMockHydra() {
-  return function(this: MockHydraSynth | void, options: { canvas: HTMLCanvasElement; width?: number; height?: number }) {
-    const instance = new MockHydraSynth(options);
-    // Bind methods to preserve this context
-    return instance;
-  };
-}
+const loadSandboxLib = vi.fn(async (_path: string) => STUB_LIB);
+vi.mock('../../../../src/composition/adapters/sandboxFrame.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../../src/composition/adapters/sandboxFrame.js')>()),
+  loadSandboxLib: (path: string) => loadSandboxLib(path),
+}));
 
 describe('HydraAdapter', () => {
   let adapter: HydraAdapter;
   let mockLayer: Layer;
-  let mockContainer: HTMLElement;
-  let mockSettings: GlobalSettings;
-  let MockHydra: ReturnType<typeof createMockHydra>;
+  const mockSettings: GlobalSettings = { width: 800, height: 600, frameRate: 60, backgroundColor: '#000000' };
 
   beforeEach(() => {
-    // Create mock Hydra constructor
-    MockHydra = createMockHydra();
-
-    // Reset adapter
     adapter = new HydraAdapter();
-
-    // Setup mock layer
-    mockLayer = {
-      id: 'test-hydra-layer',
-      type: 'hydra',
-      code: 'osc(10, 0.1, 0.5).out()',
-      config: {
-        zIndex: 1,
-        blendMode: 'normal',
-        opacity: 1.0,
-        position: { x: 0, y: 0 },
-        scale: 1.0,
-      },
-      metadata: {
-        prompt: 'Test hydra layer',
-        generator: 'HydraGenerator',
-        model: 'test-model',
-        generatedAt: new Date().toISOString(),
-      },
-      enabled: true,
-      locked: false,
-    };
-
-    // Setup mock container
-    mockContainer = document.createElement('div');
-    mockContainer.id = 'test-container';
-
-    // Setup mock settings
-    mockSettings = {
-      width: 800,
-      height: 600,
-      frameRate: 60,
-      backgroundColor: '#000000',
-    };
-
-    // Setup mock window.Hydra
-    (window as unknown as { Hydra: typeof MockHydra }).Hydra = MockHydra;
-
-    // Reset mocks
-    vi.clearAllMocks();
-  });
-
-  afterEach(() => {
-    vi.clearAllMocks();
+    mockLayer = makeLayer('hydra', 'test-hydra-layer', 'osc(10, 0.1, 0.5).out()');
+    loadSandboxLib.mockClear();
   });
 
   describe('initialize()', () => {
-    it('should load Hydra module from window global', async () => {
+    it('should load the vendored Hydra source once', async () => {
       await adapter.initialize();
-
-      // After initialization, render should work without throwing
-      const container = document.createElement('div');
-      expect(() => adapter.render(mockLayer, container)).not.toThrow('Hydra not loaded');
-    });
-
-    it('should not reload if already initialized', async () => {
       await adapter.initialize();
-      const firstInit = adapter;
-      
-      await adapter.initialize();
-      
-      // Should be the same instance
-      expect(adapter).toBe(firstInit);
-    });
-  });
-
-  describe('render()', () => {
-    it('should throw error if Hydra is not loaded', () => {
-      // Create fresh adapter without initialization and remove window.Hydra
-      delete (window as unknown as { Hydra?: typeof MockHydra }).Hydra;
-      const freshAdapter = new HydraAdapter();
-      
-      expect(() => {
-        freshAdapter.render(mockLayer, mockContainer);
-      }).toThrow('Hydra not loaded. Call async initialize() first.');
-      
-      // Restore window.Hydra
-      (window as unknown as { Hydra: typeof MockHydra }).Hydra = MockHydra;
-    });
-
-    it('should create a canvas element in the container', async () => {
-      await adapter.initialize();
-      const instance = adapter.render(mockLayer, mockContainer);
-
-      const canvases = mockContainer.querySelectorAll('canvas');
-      expect(canvases).toHaveLength(1);
-      expect(canvases[0]).toBe(instance.canvas);
-      expect(canvases[0].style.width).toBe('100%');
-      expect(canvases[0].style.height).toBe('100%');
-    });
-
-    it('should create canvas with correct dimensions from settings', async () => {
-      await adapter.initialize();
-      
-      const stateManager = new StateManager();
-      const context: RenderContext = {
-        state: stateManager,
-        container: mockContainer,
-        settings: mockSettings,
-        layerInstances: new Map(),
-      };
-
-      adapter.render(mockLayer, mockContainer, context);
-
-      const canvas = mockContainer.querySelector('canvas') as HTMLCanvasElement;
-      expect(canvas.width).toBe(800);
-      expect(canvas.height).toBe(600);
-    });
-
-    it('should use default dimensions when settings not provided', async () => {
-      await adapter.initialize();
-      adapter.render(mockLayer, mockContainer);
-
-      const canvas = mockContainer.querySelector('canvas') as HTMLCanvasElement;
-      expect(canvas.width).toBe(800);
-      expect(canvas.height).toBe(600);
-    });
-
-    it('should initialize Hydra with correct options', async () => {
-      await adapter.initialize();
-      
-      const context: RenderContext = {
-        state: new StateManager(),
-        container: mockContainer,
-        settings: mockSettings,
-        layerInstances: new Map(),
-      };
-
-      const instance = adapter.render(mockLayer, mockContainer, context) as unknown as MockHydraSynth;
-
-      // The mock Hydra keeps the options it was constructed with.
-      expect(instance.canvas).toBe(mockContainer.querySelector('canvas'));
-      expect(instance.width).toBe(800);
-      expect(instance.height).toBe(600);
-    });
-
-    it('should store instance for later retrieval', async () => {
-      await adapter.initialize();
-      const instance = adapter.render(mockLayer, mockContainer);
-
-      // Instance should be returned
-      expect(instance).toBeInstanceOf(MockHydraSynth);
-      expect(instance.canvas).toBe(mockContainer.querySelector('canvas'));
-      expect(adapter.getExports(mockLayer).find(e => e.name === 'canvas')?.getter()).toBe(instance.canvas);
-    });
-
-    it('should execute user code in a function context', async () => {
-      await adapter.initialize();
-      
-      const codeWithLog = 'console.log("test"); osc(10).out()';
-      const layerWithLog = { ...mockLayer, code: codeWithLog };
-      
-      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-      
-      adapter.render(layerWithLog, mockContainer);
-      
-      consoleSpy.mockRestore();
-    });
-
-    it('should handle errors in user code gracefully', async () => {
-      await adapter.initialize();
-      
-      const layerWithError = { ...mockLayer, code: 'invalid syntax {{' };
-      
-      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-      
-      // Should not throw, just log error
-      expect(() => adapter.render(layerWithError, mockContainer)).not.toThrow();
-      
-      expect(consoleSpy).toHaveBeenCalledTimes(1);
-      expect(consoleSpy.mock.calls[0][0]).toContain('Error executing Hydra code:');
-      consoleSpy.mockRestore();
-    });
-
-    it('should set up imports from context if available', async () => {
-      await adapter.initialize();
-      
-      const stateManager = new StateManager();
-      const importProxy = { mouseX: 100 };
-      stateManager.register(`__imports_${mockLayer.id}`, () => importProxy);
-      
-      const context: RenderContext = {
-        state: stateManager,
-        container: mockContainer,
-        settings: mockSettings,
-        layerInstances: new Map(),
-      };
-
-      // Should not throw when setting up imports
-      expect(() => adapter.render(mockLayer, mockContainer, context)).not.toThrow();
+      expect(loadSandboxLib).toHaveBeenCalledTimes(1);
+      expect(loadSandboxLib).toHaveBeenCalledWith(expect.stringContaining('/vendor/hydra-synth/'));
     });
   });
 
   describe('getExports()', () => {
     it('should return empty array if layer not rendered', () => {
-      const exports = adapter.getExports(mockLayer);
-      expect(exports).toEqual([]);
-    });
-
-    it('should return canvas export', async () => {
-      await adapter.initialize();
-      adapter.render(mockLayer, mockContainer);
-
-      const exports = adapter.getExports(mockLayer);
-      const canvasExport = exports.find(e => e.name === 'canvas');
-      
-      expect(canvasExport?.type).toBe('canvas');
-      expect(canvasExport?.getter()).toBe(mockContainer.querySelector('canvas'));
-    });
-
-    it('should return width export', async () => {
-      await adapter.initialize();
-      adapter.render(mockLayer, mockContainer);
-
-      const exports = adapter.getExports(mockLayer);
-      const widthExport = exports.find(e => e.name === 'width');
-      
-      expect(widthExport?.type).toBe('number');
-      expect(widthExport?.getter()).toBe(800);
-    });
-
-    it('should return height export', async () => {
-      await adapter.initialize();
-      adapter.render(mockLayer, mockContainer);
-
-      const exports = adapter.getExports(mockLayer);
-      const heightExport = exports.find(e => e.name === 'height');
-      
-      expect(heightExport?.type).toBe('number');
-      expect(heightExport?.getter()).toBe(600);
-    });
-
-    it('should return output references (o0, o1, o2, o3)', async () => {
-      await adapter.initialize();
-      const instance = adapter.render(mockLayer, mockContainer) as unknown as MockHydraSynth;
-
-      const exports = adapter.getExports(mockLayer);
-
-      expect(exports.map(e => e.name)).toEqual(['canvas', 'width', 'height', 'o0', 'o1', 'o2', 'o3']);
-      const outputs = exports.filter(e => /^o[0-3]$/.test(e.name));
-      expect(outputs.map(e => e.type)).toEqual(['object', 'object', 'object', 'object']);
-      expect(outputs.map(e => e.getter())).toEqual([instance.o0, instance.o1, instance.o2, instance.o3]);
+      expect(adapter.getExports(mockLayer)).toEqual([]);
     });
 
     it('should have descriptions for all exports', async () => {
       await adapter.initialize();
-      adapter.render(mockLayer, mockContainer);
-
-      const exports = adapter.getExports(mockLayer);
-      
-      for (const exp of exports) {
-        expect(exp.description).toMatch(/^(Hydra canvas element|Canvas (width|height)|Output [0-3] reference)$/);
+      adapter.render(mockLayer, attachedContainer());
+      for (const exp of adapter.getExports(mockLayer)) {
+        expect(exp.description.length).toBeGreaterThan(0);
       }
     });
   });
@@ -544,42 +267,25 @@ src(s0).modulate(osc(5, 0.1)).out()
     });
   });
 
-  describe('destroy()', () => {
-    it('should stop the Hydra instance', async () => {
-      await adapter.initialize();
-      const instance = adapter.render(mockLayer, mockContainer);
-      
-      adapter.destroy(mockLayer, instance);
-      
-      expect((instance as MockHydraSynth).stopped).toBe(true);
-    });
 
-    it('should remove canvas from DOM', async () => {
+  describe('destroy()', () => {
+    it('should remove the sandbox frame from the DOM', async () => {
       await adapter.initialize();
-      const instance = adapter.render(mockLayer, mockContainer);
-      
-      expect(mockContainer.querySelector('canvas')).toBe((instance as MockHydraSynth).canvas);
-      
-      adapter.destroy(mockLayer, instance);
-      
-      expect(mockContainer.querySelector('canvas')).toBeNull();
+      const container = attachedContainer();
+      adapter.render(mockLayer, container);
+      expect(container.querySelectorAll('iframe')).toHaveLength(1);
+      adapter.destroy(mockLayer, undefined);
+      expect(container.querySelector('iframe')).toBeNull();
     });
 
     it('should handle destroying non-existent layer gracefully', () => {
-      // Should not throw when destroying layer that was never rendered
-      expect(() => adapter.destroy(mockLayer, null)).not.toThrow();
+      expect(() => adapter.destroy(mockLayer, undefined)).not.toThrow();
     });
 
     it('should remove instance from internal tracking', async () => {
       await adapter.initialize();
-      const instance = adapter.render(mockLayer, mockContainer);
-      
-      // First verify instance is tracked
-      expect(adapter.getExports(mockLayer).length).toBeGreaterThan(0);
-      
-      adapter.destroy(mockLayer, instance);
-      
-      // After destroy, exports should be empty
+      adapter.render(mockLayer, attachedContainer());
+      adapter.destroy(mockLayer, undefined);
       expect(adapter.getExports(mockLayer)).toEqual([]);
     });
   });

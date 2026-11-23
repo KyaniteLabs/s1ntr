@@ -79,6 +79,11 @@ describe('CapabilityRegistry', () => {
     });
   });
 
+  it('pins gpt-6 temperature to 1, the only value api.openai.com accepts', () => {
+    expect(CapabilityRegistry.getCapabilities('gpt-6.2-sol').temperatureFixed).toBe(1);
+    expect(CapabilityRegistry.getCapabilities('gpt-4o').temperatureFixed).toBeUndefined();
+  });
+
   describe('glob pattern matching', () => {
     it('claude-sonnet-4-* matches claude-sonnet-4-20250514', () => {
       const caps = CapabilityRegistry.getCapabilities('claude-sonnet-4-20250514');

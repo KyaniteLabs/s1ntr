@@ -85,7 +85,8 @@ describe('per-seat effort', () => {
     expect(seatEffort('codex', 'cli://codex/chat/completions')._unsafeUnwrap()).toBeUndefined();
     expect(seatEffort('claude', 'cli://claude/max')._unsafeUnwrap()).toBe('max');
     expect(seatEffort('codex', 'cli://codex/max')._unsafeUnwrap()).toBeUndefined();
-    expect(seatEffort('agy', 'cli://agy/high')._unsafeUnwrap()).toBeUndefined();
+    expect(seatEffort('agy', 'cli://agy/high')._unsafeUnwrap()).toBe('high');
+    expect(seatEffort('hermes', 'cli://hermes/high')._unsafeUnwrap()).toBeUndefined();
     process.env.SINTER_CLAUDE_EFFORT = 'turbo';
     expect(seatEffort('claude', 'cli://claude').isErr()).toBe(true);
   });

@@ -103,7 +103,13 @@ export function readCurrentGitCommit(repoRoot: string): string | null {
 
   const refPrefix = 'ref: ';
   if (!head.startsWith(refPrefix)) return null;
-  const refName = head.slice(refPrefix.length).trim();
+  return readRefFile(gitDir, head.slice(refPrefix.length).trim());
+}
+
+// Reads a ref from the git directory itself (loose ref, then packed-refs), never through the
+// git CLI: the CLI refuses a checkout owned by another uid ("dubious ownership") and the
+// refusal used to surface only as LIMINAL_PRODUCTION_SOURCE_REFS_UNRESOLVED.
+function readRefFile(gitDir: string, refName: string): string | null {
   const directRef = readText(path.join(gitDir, refName))?.trim();
   if (directRef && /^[0-9a-f]{40}$/i.test(directRef)) return directRef;
 
@@ -123,8 +129,8 @@ export function readCurrentGitCommit(repoRoot: string): string | null {
 /** Resolve one exact git ref for release/admission binding. */
 export function readGitRef(repoRoot: string, ref: string): string | null {
   if (!/^refs\/(heads|remotes)\/[A-Za-z0-9._/-]+$/.test(ref)) return null;
-  const value = gitOutput(repoRoot, ['rev-parse', '--verify', ref])?.trim();
-  return value && /^[0-9a-f]{40}$/i.test(value) ? value : null;
+  const gitDir = resolveGitDir(repoRoot);
+  return gitDir ? readRefFile(gitDir, ref) : null;
 }
 
 export function computeProofSourceFingerprint(

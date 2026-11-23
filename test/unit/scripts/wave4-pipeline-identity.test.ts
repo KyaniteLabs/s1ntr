@@ -1,6 +1,10 @@
 /**
  * Wave 4 observed identity helper (no live LLM).
  */
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import { resolveObservedIdentity } from '../../../scripts/rotation/wave4-full-pipeline-dogfood.mjs';
 
@@ -65,4 +69,28 @@ describe('resolveObservedIdentity', () => {
     expect(r.cosplay).toBeNull();
     expect(r.model).toBe('grok-4.5');
   });
+});
+
+it('binds contract stages to the requested wave and refuses incompatible live transports before bootstrap', async () => {
+  const { resolvePipelineRoster } = await import('../../../scripts/rotation/wave4-full-pipeline-dogfood.mjs');
+  const seats = { generator: 'visual', evaluator: 'visual', harness: 'text', chat: 'text' };
+  const freeze = { wave11: seats, brains: { visual: { model: 'model-v' }, text: { model: 'model-t' } } };
+  const roster = resolvePipelineRoster(freeze, 11, false);
+  expect(roster.expected.evaluator).toEqual({ brain: 'visual', modelIncludes: ['model-v'] });
+  expect(roster.expected.chat.modelIncludes).toEqual(['model-t']);
+  expect(() => resolvePipelineRoster(freeze, 11, true)).toThrow(/live transports/);
+  expect(() => resolvePipelineRoster(freeze, 12, false)).toThrow(/wave12/);
+  const temp = mkdtempSync(path.join(tmpdir(), 'wave-contract-'));
+  try {
+    const file = path.join(temp, 'freeze.json');
+    writeFileSync(file, JSON.stringify(freeze));
+    const run = spawnSync(process.execPath, ['scripts/rotation/wave4-full-pipeline-dogfood.mjs',
+      '--dry-run', '--wave', '11', '--freeze', file, '--out', temp], { encoding: 'utf8' });
+    expect(run.status, run.stderr).toBe(0);
+    const receipt = JSON.parse(readFileSync(path.join(temp, 'pipeline-receipt.json'), 'utf8'));
+    expect(receipt).toMatchObject({ wave: 11, seats, dryPass: true, livePass: false });
+    expect(receipt.stages).toContainEqual(expect.objectContaining({ id: 'chat', model: 'model-t', observed: false }));
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
 });

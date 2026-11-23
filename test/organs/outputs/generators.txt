@@ -1,0 +1,28 @@
+## run4.log
+piece v16-crucible-ascii GPT-6.1 Sol 0.81
+
+🎨 Sinter: Creative Coding Agent
+📝 Prompt: "ASCII art of a crucible sitting in a kiln, cut away so you can see the molten material inside and the heat rising around it."
+🔄 Governed candidates: 1
+📁 Output: <out>/generate/run4
+
+Generating: ASCII art of a crucible sitting in a kiln, cut away so you can see the molten material inside and the heat rising around it.
+
+🎯 Domain (forced via --domain): ascii
+
+[LLMClient] [attestation] non-harness generator attempt completes unattested: EXECUTOR_AUTHORITY_UNAVAILABLE: metered funding evidence missing for unknown
+[07:00:41.742] LLMClient llm:response <email>:34985 local/gpt-5.4 397ms ok
+[SandboxConfig] Chromium has no usable OS sandbox on this host, so it runs unsandboxed. Give Chromium an AppArmor profile that allows userns, or set LIMINAL_DISABLE_SANDBOX=true to choose this on purp
+[LLMClient] [attestation] non-harness evaluator attempt completes unattested: EXECUTOR_AUTHORITY_UNAVAILABLE: metered funding evidence missing for unknown
+[07:00:57.477] LLMClient llm:response <email>:34985 local/gpt-5.4 53ms ok
+
+✅ Generation complete!
+🎯 Reason: governed production Create completed
+⭐ Quality score: 0.81
+🤖 Model: openai/gpt-5.4
+🧾 Provider calls: 2/2
+✅ Saved: <out>/generate/run4/artifacts/d56ef768f008ad798747fb855771870b3383de7f8262a485e854e59210b9eee7/source.txt
+✅ HTML: <out>/generate/run4/artifacts/d56ef768f008ad798747fb855771870b3383de7f8262a485e854e59210b9eee7/playable.html
+🧾 Authority receipt: 9ba9393166dc01b39793bcaaf730bddb7b3a7cb7bd12d67c693f4278b835b26a
+
+

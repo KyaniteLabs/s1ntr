@@ -4,6 +4,7 @@ import path from 'path';
 import { promisify } from 'util';
 import { fileURLToPath } from 'url';
 import { describe, expect, it } from 'vitest';
+import { isolatedCliEnv } from '../../helpers/isolatedCli.js';
 
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -15,7 +16,7 @@ const TRACE_PREFIX = 'SINTER_TRACE_MODULE_LOADS=';
 // bin/sinter — if the help text changes, this test must be updated in lockstep.
 const REQUIRED_HELP_LINES = [
   '  preferences <subcommand>  Preferences: export, stats, train, model',
-  '  taste <train|eval>          Train or evaluate the taste model from preferences',
+  '  taste <train|eval|ingest>   Train or evaluate the taste model, or import observations and signed owner likes',
   '  dream run <command.json>    Run canonical admitted-evidence research',
   '  garden <subcommand>         Autonomous gardener: status, rebalance, start, stop, tend [budget]',
   '  emergence <score|probe>     Score or probe emergence for a text or file output',
@@ -35,7 +36,7 @@ describe('liminal CLI provider setup help', () => {
     const { stdout } = await execFileAsync(process.execPath, [binPath, '--help'], {
       cwd: repoRoot,
       env: {
-        ...process.env,
+        ...isolatedCliEnv().env,
         NODE_ENV: 'test',
         DOTENV_CONFIG_QUIET: 'true',
       },
@@ -61,7 +62,7 @@ describe('liminal CLI provider setup help', () => {
     const { stderr } = await execFileAsync(process.execPath, [binPath, ...args], {
       cwd: repoRoot,
       env: {
-        ...process.env,
+        ...isolatedCliEnv().env,
         NODE_ENV: 'test',
         DOTENV_CONFIG_QUIET: 'true',
         SINTER_TRACE_MODULE_LOADS: '1',
@@ -91,7 +92,7 @@ describe('sinter CLI --help completeness', () => {
     const { stdout } = await execFileAsync(process.execPath, [binPath, '--help'], {
       cwd: repoRoot,
       env: {
-        ...process.env,
+        ...isolatedCliEnv().env,
         NODE_ENV: 'test',
         DOTENV_CONFIG_QUIET: 'true',
       },

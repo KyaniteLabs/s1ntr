@@ -49,11 +49,11 @@ describe('TuiBridgeService creative domain routing', () => {
     expect(buildCreativeDomainPlan(prompt)).toEqual([Domain.THREE, Domain.P5, Domain.HYDRA, Domain.GLSL]);
   });
 
-  it('routes SVG prompts to a visual fallback plan without pretending p5 is the requested domain', () => {
+  it('routes SVG prompts to the SVG medium, not a Three/p5 visual fallback (Sol G12)', () => {
     const prompt = 'single line svg of a flower';
 
-    expect(inferCreativeDomain(prompt)).toBe(Domain.GENERIC);
-    expect(buildCreativeDomainPlan(prompt)).toContain(Domain.THREE);
+    expect(inferCreativeDomain(prompt)).toBe(Domain.SVG);
+    expect(buildCreativeDomainPlan(prompt)).toEqual([Domain.SVG]);
   });
 
   it('treats ASCII and text-art prompts as explicit ASCII requests', () => {
@@ -110,25 +110,14 @@ describe('TuiBridgeService creative domain routing', () => {
 
 
 
-  it('honors explicit Revideo even when broad video words look HyperFrames-like', () => {
-    const prompt = 'Create a Revideo composition: a 4-second cinematic title card saying LIMINAL REVIDEO.';
-
-    expect(inferCreativeDomain(prompt)).toBe(Domain.REVIDEO);
-    expect(buildCreativeDomainPlan(prompt)).toEqual([Domain.REVIDEO]);
-  });
-
-  it('routes explicit Revideo prompts to the Revideo composition domain', () => {
-    const prompt = 'Create a Revideo title-card composition with layered animated captions.';
-
-    expect(inferCreativeDomain(prompt)).toBe(Domain.REVIDEO);
-    expect(buildCreativeDomainPlan(prompt)).toEqual([Domain.REVIDEO]);
-  });
-
-  it('routes explicit @revideo package prompts to the Revideo composition domain', () => {
-    const prompt = 'Create an @revideo title-card composition with layered animated captions.';
-
-    expect(inferCreativeDomain(prompt)).toBe(Domain.REVIDEO);
-    expect(buildCreativeDomainPlan(prompt)).toEqual([Domain.REVIDEO]);
+  it('no longer routes Revideo prompts to a revideo domain (export engine, not an art domain)', () => {
+    for (const prompt of [
+      'Create a Revideo composition: a 4-second cinematic title card saying LIMINAL REVIDEO.',
+      'Create an @revideo title-card composition with layered animated captions.',
+    ]) {
+      expect(inferCreativeDomain(prompt) as string).not.toBe('revideo');
+      expect(buildCreativeDomainPlan(prompt).map(String)).not.toContain('revideo');
+    }
   });
 
   it('rejects generated Three.js when the prompt locked the route to p5', () => {
@@ -146,20 +135,6 @@ describe('TuiBridgeService creative domain routing', () => {
     expect(validateGeneratedDomainForRequest(p5Code, Domain.P5)).toMatchObject({ ok: true, detected: 'p5' });
   });
 
-
-  it('honors explicit HyperFrames even when the prompt forbids Revideo', () => {
-    const prompt = 'Create a HyperFrames composition with data-composition-id. Do not use Revideo.';
-
-    expect(inferCreativeDomain(prompt)).toBe(Domain.HYPERFRAMES);
-    expect(buildCreativeDomainPlan(prompt)).toEqual([Domain.HYPERFRAMES]);
-  });
-
-  it('routes explicit HyperFrames prompts to the HyperFrames video composition domain', () => {
-    const prompt = 'Create a HyperFrames promo slideshow with image clips and GSAP timeline.';
-
-    expect(inferCreativeDomain(prompt)).toBe(Domain.HYPERFRAMES);
-    expect(buildCreativeDomainPlan(prompt)[0]).toBe(Domain.HYPERFRAMES);
-  });
 
   it('routes explicit Kinetic typography prompts away from the p5-only instruction path', () => {
     const prompt = 'Create CSS kinetic typography as a complete animated HTML artifact.';
@@ -182,7 +157,7 @@ describe('TuiBridgeService creative domain routing', () => {
     expect(buildCreativeDomainPlan(prompt)[0]).toBe(Domain.THREE);
   });
 
-  it('chooses HyperFrames preview shell for generated HyperFrames HTML', () => {
+  it('still previews HyperFrames HTML (export engine) by detected code', () => {
     const hyperframesCode = '<!doctype html><html><body><div data-composition-id="demo"><h1 class="clip" data-start="0" data-duration="3" data-track-index="0">Title</h1></div><script>const tl = gsap.timeline({ paused: true }); window.__timelines = { demo: tl };</script></body></html>';
 
     expect(previewDomainForCode(hyperframesCode, Domain.P5)).toBe('hyperframes');
@@ -215,5 +190,22 @@ describe('TuiBridgeService creative domain routing', () => {
     const shaderCode = 'precision mediump float; uniform vec2 u_resolution; void main() { gl_FragColor = vec4(1.0); }';
 
     expect(previewDomainForCode(shaderCode, Domain.GLSL)).toBe('shader');
+  });
+
+  // Sol G12: the conversational route must agree with the direct --domain route on the medium.
+  it.each([
+    ['an SVG logo with a blue bird', Domain.SVG],
+    ['a vector icon of a lighthouse', Domain.SVG],
+    ['a blender render of a glass cube', Domain.BLENDER],
+    ['a d3 chart of tide heights', Domain.DATAVIZ],
+    ['an nbe neural bloom of coral', Domain.NBE],
+  ])('routes "%s" to %s and locks it', (prompt, domain) => {
+    const route = buildCreativeDomainRouteTruth(prompt);
+    expect(route.selectedDomain).toBe(domain);
+    expect(route.promptDomainLocked).toBe(true);
+    expect(route.domains).toEqual([domain]);
+  });
+  it('a named framework still beats a loose vector/logo word', () => {
+    expect(inferCreativeDomain('a three.js scene with a logo on the wall')).toBe(Domain.THREE);
   });
 });

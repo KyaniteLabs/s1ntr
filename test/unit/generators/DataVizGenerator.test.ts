@@ -151,6 +151,21 @@ describe('DataVizGenerator behavior', () => {
     expect(html).toContain('d3.scaleLinear');
   });
 
+  it('tells the retry which d3 name does not exist', async () => {
+    process.env.LIMINAL_LLM_BASE_URL = 'http://localhost:1234/v1';
+    const llm = new LLMClient({ baseUrl: 'http://localhost:1234/v1', model: 'dataviz-test-model' });
+    const bad = D3_PAGE.replace('d3.scaleLinear()', 'd3.scaleLinear().interpolate(d3.interpolateOklch)');
+    const complete = vi.spyOn(llm, 'complete')
+      .mockResolvedValueOnce({ text: bad, success: true })
+      .mockResolvedValueOnce({ text: D3_PAGE, success: true });
+    vi.spyOn(llm, 'generateWithToolLoop').mockResolvedValue({ content: '', iterations: 1, toolCallsMade: 0, success: false });
+
+    await new DataVizGenerator(llm).generate('temperature bands');
+
+    expect(complete).toHaveBeenCalledTimes(2);
+    expect(complete.mock.calls[1]?.[0].prompt).toMatch(/What was wrong: .*d3\.interpolateOklch/);
+  });
+
   it('fails clearly when bounded attempts never return a valid D3 page', async () => {
     process.env.LIMINAL_LLM_BASE_URL = 'http://localhost:1234/v1';
     const llm = new LLMClient({ baseUrl: 'http://localhost:1234/v1', model: 'dataviz-test-model' });

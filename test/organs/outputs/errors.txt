@@ -1,0 +1,4 @@
+# organ: errors | GenerationError + ConfigError | data: real, in-process call
+GenerationError: model returned empty code
+domain=p5 context={"attempt":2,"domain":"p5","cause":"upstream 502"}
+ConfigError

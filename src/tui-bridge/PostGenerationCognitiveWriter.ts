@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
-import os from 'node:os';
+import { resolveDreamQueuePath } from '../dreaming/dreamQueuePath.js';
 import path from 'node:path';
 import { Logger } from '../utils/Logger.js';
 import { harnessMemory } from '../harness/HarnessMemory.js';
@@ -261,8 +261,7 @@ export class PostGenerationCognitiveWriter {
     // An injected dreamQueue (tests, custom sinks) always wins; construction
     // is read-only — the file is only written when a dream is enqueued.
     this.dreamQueue = options.dreamQueue ?? new DreamQueue({
-      persistPath: process.env.SINTER_DREAM_QUEUE_PATH
-        ?? path.join(os.homedir(), '.sinter', 'dreams', 'queue.json'),
+      persistPath: resolveDreamQueuePath(),
     });
     this.dreamTaskConsumer = options.dreamTaskConsumer;
     this.compost = options.compost;

@@ -24,7 +24,7 @@ describe('compareRenderedJudgment', () => {
     expect(generateWithImages.mock.calls[0][2].map((image: { label: string }) => image.label))
       .toEqual(['candidate-A-early', 'candidate-A-late', 'candidate-B-early',
         'candidate-B-late', 'candidate-C-early', 'candidate-C-late']);
-    expect(generateWithImages.mock.calls[0][5]).toEqual({ jsonMode: true });
+    expect(generateWithImages.mock.calls[0][5]).toEqual({ jsonMode: true, requireVision: true });
   });
 
   it('rejects incomplete rankings', async () => {

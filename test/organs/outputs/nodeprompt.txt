@@ -1,0 +1,20 @@
+# organ: nodeprompt | synthesizePrompt | data: real, in-process call
+# Structured Generation Prompt
+
+## Original Prompt
+
+a seascape
+
+## Concept Graph
+
+
+
+### Cross-Branch Relationships
+
+
+## Generation Instructions
+
+### Hierarchical Guidance
+
+
+

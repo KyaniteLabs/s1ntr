@@ -9,6 +9,16 @@ import { mintNonce, sha256Hex } from './hostAdapterRegistry.js';
 
 export const GLM_CODING_PLAN_ENDPOINT = 'https://api.z.ai/api/anthropic';
 export const GLM_CODING_PLAN_MODEL = 'glm-5.3';
+/** Models the Z.ai coding plan serves on the same flat subscription. Each one
+ *  still needs its own host-signed seat binding: a binding names exactly one
+ *  model, and a client rides the plan only on the model its binding names.
+ *  The owner's provenance attests the plan credential and keeps naming
+ *  GLM_CODING_PLAN_MODEL as the plan's reference model. */
+export const GLM_CODING_PLAN_MODELS = [GLM_CODING_PLAN_MODEL, 'glm-5.3-flash'] as const;
+export type GLMCodingPlanModel = typeof GLM_CODING_PLAN_MODELS[number];
+export function isGLMCodingPlanModel(model: unknown): model is GLMCodingPlanModel {
+  return (GLM_CODING_PLAN_MODELS as readonly unknown[]).includes(model);
+}
 export const GLM_CODING_PLAN_KEYCHAIN_SERVICE = 'pushing-dispatch';
 export const GLM_CODING_PLAN_KEYCHAIN_ACCOUNT = 'zai_coding_plan_subscription';
 
@@ -38,7 +48,7 @@ export interface GLMCodingPlanSeatSubject {
   readonly bindingId: string;
   readonly seatId: string;
   readonly provider: 'glm';
-  readonly model: typeof GLM_CODING_PLAN_MODEL;
+  readonly model: GLMCodingPlanModel;
   readonly surface: 'glm-coding-plan-seat';
   readonly endpointDigest: string;
   readonly credentialDigest: string;
@@ -81,8 +91,9 @@ export function currentGLMCodingPlanTransportTestTrust(): GLMCodingPlanTransport
   return testTransportTrust;
 }
 
-export function pinnedGLMCodingPlanSeatPath(): string {
-  return join(homedir(), '.sinter', 'glm-coding-plan', 'seat-binding.json');
+export function pinnedGLMCodingPlanSeatPath(model: GLMCodingPlanModel = GLM_CODING_PLAN_MODEL): string {
+  return join(homedir(), '.sinter', 'glm-coding-plan',
+    model === GLM_CODING_PLAN_MODEL ? 'seat-binding.json' : `seat-binding.${model}.json`);
 }
 
 export function pinnedGLMCodingPlanOwnerProvenancePath(): string {
@@ -211,7 +222,7 @@ export function loadGLMCodingPlanOwnerProvenance(input: {
 function assertCurrent(subject: GLMCodingPlanSeatSubject, now: Date): void {
   const issuedAt = Date.parse(subject.issuedAt);
   const expiresAt = Date.parse(subject.expiresAt);
-  if (subject.provider !== 'glm' || subject.model !== GLM_CODING_PLAN_MODEL
+  if (subject.provider !== 'glm' || !isGLMCodingPlanModel(subject.model)
     || subject.surface !== 'glm-coding-plan-seat'
     || subject.endpointDigest !== endpointDigest()
     || subject.quotaSurface !== 'glm-coding-plan-seat'
@@ -231,7 +242,10 @@ export function provisionGLMCodingPlanSeat(input: {
   readonly outputPath?: string;
   readonly provenancePath?: string;
   readonly ownerPublicKeyPath?: string;
+  readonly model?: GLMCodingPlanModel;
 }): GLMCodingPlanSeatBinding {
+  const model = input.model ?? GLM_CODING_PLAN_MODEL;
+  if (!isGLMCodingPlanModel(model)) throw new Error('GLM_CODING_PLAN_MODEL_NOT_ON_PLAN');
   const now = input.now ?? new Date();
   const credential = (input.credentialResolver ?? resolveDedicatedGLMCodingPlanCredential)();
   const expiresAt = Date.parse(input.expiresAt);
@@ -242,8 +256,10 @@ export function provisionGLMCodingPlanSeat(input: {
     credentialResolver: () => credential, provenancePath: input.provenancePath,
     ownerPublicKeyPath: input.ownerPublicKeyPath });
   const subject: GLMCodingPlanSeatSubject = Object.freeze({
-    schemaVersion: 'glm-coding-plan-seat.v1', bindingId: `glm-coding-plan:${input.seatId}`,
-    seatId: input.seatId, provider: 'glm', model: GLM_CODING_PLAN_MODEL,
+    schemaVersion: 'glm-coding-plan-seat.v1',
+    bindingId: model === GLM_CODING_PLAN_MODEL ? `glm-coding-plan:${input.seatId}`
+      : `glm-coding-plan:${input.seatId}:${model}`,
+    seatId: input.seatId, provider: 'glm', model,
     surface: 'glm-coding-plan-seat', endpointDigest: endpointDigest(),
     credentialDigest: sha256Hex(credential),
     ownerProvenanceDigest: sha256Hex(JSON.stringify(provenance)),
@@ -253,7 +269,7 @@ export function provisionGLMCodingPlanSeat(input: {
   });
   const binding = Object.freeze({ subject,
     signature: input.registry.issueGLMCodingPlanSeatSignature(subject) });
-  const outputPath = input.outputPath ?? pinnedGLMCodingPlanSeatPath();
+  const outputPath = input.outputPath ?? pinnedGLMCodingPlanSeatPath(model);
   writePrivateAtomic(outputPath, JSON.stringify(binding));
   return binding;
 }
@@ -265,8 +281,10 @@ export function loadGLMCodingPlanSeat(input: {
   readonly bindingPath?: string;
   readonly provenancePath?: string;
   readonly ownerPublicKeyPath?: string;
+  /** The model the caller will ride; its binding must name exactly it. */
+  readonly model?: GLMCodingPlanModel;
 }): { readonly binding: GLMCodingPlanSeatBinding; readonly credential: string } {
-  const bindingPath = input.bindingPath ?? pinnedGLMCodingPlanSeatPath();
+  const bindingPath = input.bindingPath ?? pinnedGLMCodingPlanSeatPath(input.model);
   assertPrivateRegularFile(bindingPath);
   const binding = JSON.parse(readFileSync(bindingPath, 'utf8')) as GLMCodingPlanSeatBinding;
   if (!binding?.subject || binding.subject.schemaVersion !== 'glm-coding-plan-seat.v1'
@@ -275,6 +293,9 @@ export function loadGLMCodingPlanSeat(input: {
     throw new Error('GLM_CODING_PLAN_BINDING_SIGNATURE_INVALID');
   }
   assertCurrent(binding.subject, input.now ?? new Date());
+  if (input.model !== undefined && binding.subject.model !== input.model) {
+    throw new Error('GLM_CODING_PLAN_BINDING_MODEL_MISMATCH');
+  }
   const credential = (input.credentialResolver ?? resolveDedicatedGLMCodingPlanCredential)();
   if (sha256Hex(credential) !== binding.subject.credentialDigest) {
     throw new Error('GLM_CODING_PLAN_BINDING_CREDENTIAL_MISMATCH');
@@ -302,7 +323,10 @@ export function assertGLMCodingPlanCapacity(
     return;
   }
   if (capacity.surface !== 'glm-coding-plan-seat') return;
-  const { binding } = loadGLMCodingPlanSeat({ registry, ...options });
+  if (!isGLMCodingPlanModel(capacity.identity.model)) {
+    throw new Error('GLM_CODING_PLAN_CAPACITY_BINDING_MISMATCH');
+  }
+  const { binding } = loadGLMCodingPlanSeat({ registry, ...options, model: capacity.identity.model });
   const subject = binding.subject;
   if (capacity.identity.provider !== 'glm' || capacity.identity.model !== subject.model
     || capacity.seat.seatId !== subject.seatId
@@ -328,7 +352,8 @@ export function assertGLMCodingPlanTransport(input: {
   readonly ownerPublicKeyPath?: string;
   readonly credentialResolver?: GLMCodingPlanCredentialResolver;
 }): 'glm-coding-plan-seat' {
-  const { binding } = loadGLMCodingPlanSeat(input);
+  if (!isGLMCodingPlanModel(input.model)) throw new Error('GLM_CODING_PLAN_TRANSPORT_BINDING_MISMATCH');
+  const { binding } = loadGLMCodingPlanSeat({ ...input, model: input.model });
   const subject = binding.subject;
   if (input.provider !== subject.provider || input.model !== subject.model
     || input.baseUrl.replace(/\/+$/, '') !== GLM_CODING_PLAN_ENDPOINT

@@ -153,6 +153,42 @@ export async function createLLMHttpError(args: {
   return new LLMError(message, args.provider, status, retryable, details);
 }
 
+/** Fast-fail raised while a provider's circuit breaker is open (#1736). */
+export class LLMCircuitOpenError extends LLMError {
+  constructor(provider: string) {
+    super(`Circuit breaker open for provider: ${provider}. Too many recent failures.`, provider, undefined, false);
+    this.name = 'LLMCircuitOpenError';
+  }
+}
+
+/**
+ * The model spent its whole output budget on reasoning (finish_reason=length,
+ * empty visible content), even after one lower-effort recovery attempt. A
+ * model-side budget failure, not a provider fault: never retryable as-is and
+ * never counted against the circuit breaker.
+ */
+export class LLMReasoningExhaustedError extends LLMError {
+  readonly failureClass = 'reasoning-exhausted' as const;
+  constructor(provider: string, message: string, details: LLMErrorDetails = {}) {
+    super(message, provider, undefined, false, details);
+    this.name = 'LLMReasoningExhaustedError';
+  }
+}
+
+/**
+ * A request that cannot be answered without pixels reached a model with no vision. Raised by
+ * LLMClient.generate when the caller sets requireVision, before any provider call, so a blind
+ * pixel evaluator can never answer from text alone (RCA 2026-11-18, Dream keeper).
+ */
+export class LLMVisionRequiredError extends LLMError {
+  readonly failureClass = 'vision-required' as const;
+  constructor(provider: string, readonly role: string | undefined, model: string, readonly imageCount: number) {
+    super(`Vision required: model ${model} (role ${role ?? 'unset'}) is not vision-capable but the request carries ${imageCount} image input(s)`,
+      provider, undefined, false, { model });
+    this.name = 'LLMVisionRequiredError';
+  }
+}
+
 export class LLMTimeoutError extends LLMError {
   constructor(provider: string, detail?: string) {
     super(detail ? `Timeout calling ${provider} API: ${detail}` : `Timeout calling ${provider} API`, provider, undefined, true);

@@ -1,0 +1,13 @@
+## 02-rejects.txt
+# organ: rescue | step: rejects | data: real
+$ node <repo>/bin/sinter rescue <out>/generate
+# cwd: <out>/_proj (repo: <repo>)
+# --- stdout
+
+pool=0  false-kill=0  recovered=0  llm-salvage=0  dead=0  no-code=0
+FALSE-KILL RATE (salvageable share of rejects): 0% — genuinely-dead share 0%
+
+salvaged code + full report: <out>/generate/rescue/rescue-report.json
+# --- stderr
+# exit: 0
+

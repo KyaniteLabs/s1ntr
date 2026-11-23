@@ -638,7 +638,7 @@ describe('workbenchTelemetry', () => {
   });
 
   // ADV-MISO-001 GUI: qualityState 'degraded' must never look like a real score.
-  it('renders generation.complete qualityState degraded as "degraded (no real score)"', () => {
+  it('renders generation.complete qualityState degraded as "unscored (judge could not score)"', () => {
     const summary = summarizeWorkbenchBridge([
       { type: 'generation.domain_plan', domains: ['p5'], startedAt: '2026-04-22T12:00:00.000Z', timeoutMinutes: 1, candidateCount: 1, executionMode: 'prove' },
       { type: 'generation.attempt.started', domain: 'p5', attempt: 1, attemptTotal: 1, startedAt: '2026-04-22T12:00:01.000Z', timeoutMinutes: 1, candidateCount: 1, executionMode: 'prove' },
@@ -657,10 +657,10 @@ describe('workbenchTelemetry', () => {
       },
     ]);
 
-    const completeActivity = summary.recentActivity.find(item => item.label === 'Complete (degraded)');
+    const completeActivity = summary.recentActivity.find(item => item.label === 'Complete (unscored)');
     expect(completeActivity).toEqual({
-      label: 'Complete (degraded)',
-      detail: 'degraded (no real score)',
+      label: 'Complete (unscored)',
+      detail: 'unscored (judge could not score)',
       status: 'warning',
     });
     // Must not present the fallback numeric score as a real fitness result.

@@ -1,0 +1,3 @@
+# organ: agent | IntentRouter.classify | data: real, in-process call
+"paint a calm generative shader" -> {"intent":"creative","confidence":"high","topic":"shader","input":"paint a calm generative shader"}
+"fix the failing unit test" -> {"intent":"engineering","confidence":"high","topic":"failing","input":"fix the failing unit test"}

@@ -37,6 +37,13 @@ DO NOT:
 - Use high light intensities (≥ 3.0) or Math.PI ambient — they blow the frame to white.
 - Output an empty demo scene.
 
+OPTIONAL HOLOFOILS (holospot):
+- To add holographic foils to a mesh, request libraries: ["holospot", "three-webgpu"] so the piece's bare three remaps to the three 0.185.1 WebGL build (holospot needs three >=0.170; use THREE.WebGLRenderer, WebGPURenderer lives on "three/webgpu").
+- In the scene code: import { Holo } from "holospot"; const holo = new Holo(renderer, { assets: "/vendor/holospot/0.1.0/assets/" }); holo.apply(mesh, { material: "nebula", sizeMm: 120 });
+- Then render with renderer.setAnimationLoop(() => holo.render(scene, camera)) instead of renderer.render(scene, camera).
+- Seven foil materials: prism, shatter, nebula, sparkle, vortex, volume, emboss (every foil, emboss included, works with holo.apply(mesh, { material }) or holo.card).
+- Credit line: end the piece with foils: holospot (MIT).
+
 QUALITY BAR:
 - Create visual depth with foreground, midground, and background interest.
 - Use color intentionally; HSL palettes are encouraged.

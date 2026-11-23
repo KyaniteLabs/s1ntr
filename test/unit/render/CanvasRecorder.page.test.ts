@@ -1,10 +1,13 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
-const { mockLaunch, framesToVideo } = vi.hoisted(() => ({ mockLaunch: vi.fn(), framesToVideo: vi.fn() }));
+const { mockLaunch, framesToVideo, probe } = vi.hoisted(() => ({ mockLaunch: vi.fn(), framesToVideo: vi.fn(), probe: vi.fn() }));
 vi.mock('puppeteer', () => ({ default: { launch: mockLaunch } }));
 vi.mock('../../../src/export/VideoExporter.js', () => ({
-  VideoExporter: class { framesToVideo = framesToVideo; },
+  VideoExporter: class { framesToVideo = framesToVideo; probe = probe; },
 }));
 
 const mockResolve = vi.hoisted(() => vi.fn(() => '/opt/chromium' as string | null));
@@ -56,8 +59,10 @@ async function request(page: ReturnType<typeof fakePage>, url: string) {
   return answer;
 }
 
+let outputDir: string;
+const outputPath = () => path.join(outputDir, 'out.mp4');
 const record = (code: string, domain = 'p5') =>
-  new CanvasRecorder({ fps: 2, duration: 1, width: 64, height: 64 }).record(code, domain as never, '/tmp/sinter-recorder-test/out.mp4');
+  new CanvasRecorder({ fps: 2, duration: 1, width: 64, height: 64 }).record(code, domain as never, outputPath());
 const P5 = 'function setup(){createCanvas(64,64)} function draw(){background(frameCount%255)}';
 const THREE = "import * as THREE from 'three'; const r = new THREE.WebGLRenderer(); document.body.appendChild(r.domElement);";
 
@@ -69,18 +74,34 @@ async function vendoredSlice(path: string) {
 
 let page: ReturnType<typeof fakePage>;
 const usePage = (next: ReturnType<typeof fakePage>) => { page = next; };
-beforeEach(() => {
+beforeEach(async () => {
+  outputDir = await mkdtemp(path.join(os.tmpdir(), 'sinter-recorder-test-'));
   mockResolve.mockReturnValue('/opt/chromium');
   mockLaunch.mockReset();
-  framesToVideo.mockReset().mockResolvedValue(undefined);
+  framesToVideo.mockReset().mockImplementation(async (_frames, output: string) => writeFile(output, 'new video'));
+  probe.mockReset().mockResolvedValue({ width: 1, height: 1, durationSec: 1 });
   usePage(fakePage());
   mockLaunch.mockImplementation(async () => ({ newPage: async () => page, close: vi.fn() }));
 });
 
+afterEach(() => rm(outputDir, { force: true, recursive: true }));
+
 describe('CanvasRecorder hands the browser a page that can run', () => {
   it('records a working p5 sketch to video', async () => {
-    await expect(record(P5)).resolves.toBe('/tmp/sinter-recorder-test/out.mp4');
+    await expect(record(P5)).resolves.toBe(outputPath());
     expect(framesToVideo).toHaveBeenCalledTimes(1);
+    const stagedOutput = framesToVideo.mock.calls[0]![1];
+    expect(stagedOutput).not.toBe(outputPath());
+    expect(probe).toHaveBeenCalledWith(stagedOutput);
+    expect(await readFile(outputPath(), 'utf8')).toBe('new video');
+  });
+
+  it('preserves the existing output when ffprobe rejects the staged recording', async () => {
+    await writeFile(outputPath(), 'existing video');
+    probe.mockRejectedValueOnce(new Error('invalid video'));
+    await expect(record(P5)).rejects.toThrow('invalid video');
+    expect(await readFile(outputPath(), 'utf8')).toBe('existing video');
+    expect(await readdir(outputDir)).toEqual(['out.mp4']);
   });
 
   it('inlines p5, which a /vendor/ link would never load at about:blank', async () => {
@@ -129,6 +150,23 @@ describe('CanvasRecorder launches the resolved Chromium', () => {
     mockResolve.mockReturnValue(null);
     await expect(record(P5)).rejects.toThrow(/Chromium executable not found/);
     expect(mockLaunch).not.toHaveBeenCalled();
+  });
+});
+
+describe('CanvasRecorder export deadline', () => {
+  it('terminates the launched browser when the browser drive hangs and never starts encoding', async () => {
+    const close = vi.fn();
+    const kill = vi.fn();
+    mockLaunch.mockResolvedValue({
+      newPage: () => new Promise(() => undefined),
+      process: () => ({ kill }),
+      close,
+    });
+    const recorder = new CanvasRecorder({ fps: 2, duration: 1, width: 64, height: 64, timeoutMs: 300 });
+    await expect(recorder.record(P5, 'p5', '/tmp/sinter-recorder-test/out.mp4'))
+      .rejects.toThrow(/Canvas recording exceeded the export deadline/);
+    expect(kill).toHaveBeenCalledWith('SIGKILL');
+    expect(framesToVideo).not.toHaveBeenCalled();
   });
 });
 

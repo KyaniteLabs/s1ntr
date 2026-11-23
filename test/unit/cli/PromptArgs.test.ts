@@ -40,6 +40,7 @@ describe('PromptArgs', () => {
       expect(inferNaturalLanguagePrompt('mece', ['manifest'])).toBeNull();
       expect(inferNaturalLanguagePrompt('image', ['validate', 'x.png'])).toBeNull();
       expect(inferNaturalLanguagePrompt('image:validate', ['x.png'])).toBeNull();
+      expect(inferNaturalLanguagePrompt('gallery', ['delete', 'last'])).toBeNull();
     });
 
     it('normalizeCliCommand rewrites image:validate alias', () => {
@@ -172,7 +173,6 @@ describe('PromptArgs', () => {
       ['cache', ['clear']],
       ['auth', ['login']],
       ['delete', ['all']],
-      ['gallery', ['delete', 'last']],
       ['show', ['me', 'the', 'config']],
       ['cosmic', ['jellyfish']],
     ])('refuses the unquoted words "%s %s" instead of spending a generation on them', (first, rest) => {

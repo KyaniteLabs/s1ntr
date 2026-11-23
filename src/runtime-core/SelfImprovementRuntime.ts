@@ -128,8 +128,8 @@ export interface SelfImprovementRuntime {
   run(input: SelfImprovementRuntimeInput): Promise<SelfImprovementRuntimeResult>;
 }
 
-function buildTaskPacket(description: string): TaskPacket {
-  const context = localizeBoundedSelfImprovement(description);
+function buildTaskPacket(request: string, description: string): TaskPacket {
+  const context = localizeBoundedSelfImprovement(request);
 
   return {
     fileHint: context.fileHint,
@@ -160,10 +160,7 @@ export class LLMModeSelfImprovementRuntime implements SelfImprovementRuntime {
     // Diagnose: do NOT inject the mutation task packet — it trains the model to
     // "edit focus files" and burned K3 recon without ever delivering params.plan.
     // Localize the request before adding learned guidance to the prompt.
-    const taskPacket = diagnose ? null : buildTaskPacket(input.description);
-    if (taskPacket) {
-      taskPacket.description = description + taskPacket.description.slice(input.description.length);
-    }
+    const taskPacket = diagnose ? null : buildTaskPacket(input.description, description);
     // Best-effort sync name; run()/CLI resolveEffectiveModel for seat truth (F1).
     const modelName = llm.getConfig().model || 'unknown';
     const _maxStepsEnv = parseInt(process.env.LIMINAL_TUI_AGENT_MAX_STEPS ?? '', 10);

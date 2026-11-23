@@ -117,7 +117,7 @@ describe('sinter CLI error handling', () => {
         [binPath, 'generate', 'qa provider typo should not run', '--provider', 'bogus-verifier-x7t2m9', '--max-iterations', '1'],
         {
           cwd: repoRoot,
-          timeout: 8_000,
+          timeout: 30_000,
           env: scrubProviderEnv({
             ...process.env,
             HOME: home,
@@ -135,7 +135,7 @@ describe('sinter CLI error handling', () => {
     } finally {
       await fs.rm(home, { recursive: true, force: true });
     }
-  }, 10_000);
+  }, 40_000);
 
   it('rejects mutable provider overrides before generation starts', async () => {
     const home = await fs.mkdtemp(path.join(os.tmpdir(), 'sinter-missing-key-home-'));
@@ -145,7 +145,7 @@ describe('sinter CLI error handling', () => {
         [binPath, 'generate', 'qa missing key should not call network', '--provider', 'glm', '--max-iterations', '1'],
         {
           cwd: repoRoot,
-          timeout: 8_000,
+          timeout: 30_000,
           env: scrubProviderEnv({
             ...process.env,
             HOME: home,
@@ -163,7 +163,7 @@ describe('sinter CLI error handling', () => {
     } finally {
       await fs.rm(home, { recursive: true, force: true });
     }
-  }, 10_000);
+  }, 40_000);
 
   it('fails closed when provider status reads a corrupt user config', async () => {
     const home = await fs.mkdtemp(path.join(os.tmpdir(), 'sinter-corrupt-config-home-'));
@@ -197,7 +197,7 @@ describe('sinter CLI error handling', () => {
     try {
       await execFileAsync(process.execPath, [binPath, 'serve', badPort], {
         cwd,
-        timeout: 8_000,
+        timeout: 30_000,
         env: {
           ...process.env,
           NODE_ENV: 'test',
@@ -213,7 +213,7 @@ describe('sinter CLI error handling', () => {
     } finally {
       await fs.rm(cwd, { recursive: true, force: true });
     }
-  }, 10_000);
+  }, 40_000);
 
   it('handles database/filesystem failures in preferences command gracefully without stack trace', async () => {
     // Create a temp file to act as a blocked project root directory

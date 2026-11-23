@@ -16,7 +16,13 @@ import { ThreeAdapter } from '../../../src/composition/adapters/ThreeAdapter.js'
 import { HydraAdapter } from '../../../src/composition/adapters/HydraAdapter.js';
 import { P5Adapter } from '../../../src/composition/adapters/P5Adapter.js';
 import { findGeneratedCodeViolations, GeneratedCodeViolation, compileGeneratedCode, createGeneratedCodeScope } from '../../../src/guardrails/GeneratedCodeGuard.js';
+import type { SandboxedInstance } from '../../../src/composition/adapters/sandboxFrame.js';
 import type { Layer } from '../../../src/composition/types.js';
+
+vi.mock('../../../src/composition/adapters/sandboxFrame.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../src/composition/adapters/sandboxFrame.js')>()),
+  loadSandboxLib: async () => '/* stub vendored library */',
+}));
 
 interface Payload { id: string; code: string }
 
@@ -174,72 +180,29 @@ describe('generated-code bypass corpus', () => {
     return [...effects];
   }
 
-  const runners: Record<string, () => Runner> = {
-    tone: () => {
-      Object.defineProperty(window, 'Tone', {
-        configurable: true,
-        value: {
-          Synth: function Synth() { return { toDestination() { return this; }, dispose() {} }; },
-          Transport: { state: 'stopped', bpm: { value: 120 }, start() {}, stop() {} },
-          start: () => Promise.resolve(),
-          Destination: { volume: { value: 0 } },
-          getContext: () => ({ currentTime: 0 }),
-        },
-      });
+  // The vendored libraries are replaced by a stub: these tests are about what
+  // the guard lets through, not about p5/three/etc. themselves.
+  const runners: Record<string, () => Promise<Runner>> = {
+    tone: async () => {
       const adapter = new ToneAdapter();
-      adapter.initialize();
+      await adapter.initialize();
       return (code) => { adapter.render(layerOf('tone', code), document.createElement('div')); };
     },
-    three: () => {
-      class Mesh { rotation = { x: 0, y: 0, z: 0 }; constructor(public g: unknown, public m: unknown) {} }
-      Object.defineProperty(window, 'THREE', {
-        configurable: true,
-        value: {
-          Scene: class { children: unknown[] = []; add() {} remove() {} },
-          PerspectiveCamera: class { position = { x: 0, y: 0, z: 0 }; lookAt() {} },
-          WebGLRenderer: class { domElement = document.createElement('canvas'); setSize() {} render() {} dispose() {} setClearColor() {} },
-          BoxGeometry: class {},
-          MeshBasicMaterial: class {},
-          Mesh,
-          Color: class {},
-        },
-      });
+    three: async () => {
       const adapter = new ThreeAdapter();
-      adapter.initialize();
+      await adapter.initialize();
       return (code) => { adapter.render(layerOf('three', code), document.createElement('div')); };
     },
-    hydra: () => {
-      Object.defineProperty(window, 'Hydra', {
-        configurable: true,
-        value: class { constructor(public options: { canvas: HTMLCanvasElement }) {} },
-      });
+    hydra: async () => {
       const adapter = new HydraAdapter();
-      adapter.initialize();
+      await adapter.initialize();
       return (code) => { adapter.render(layerOf('hydra', code), document.createElement('div')); };
     },
-    p5: () => {
-      class MockP5 {
-        setup = () => {};
-        draw = () => {};
-        canvas?: HTMLCanvasElement;
-        createCanvas = (w: number, h: number) => {
-          this.canvas = document.createElement('canvas');
-          this.canvas.width = w;
-          this.canvas.height = h;
-          return { elt: this.canvas };
-        };
-        constructor(sketch: (p: MockP5) => void, container: HTMLElement) {
-          sketch(this);
-          container.appendChild(document.createElement('canvas'));
-        }
-      }
-      Object.defineProperty(window, 'p5', { configurable: true, value: MockP5 });
+    p5: async () => {
       const adapter = new P5Adapter();
-      adapter.initialize();
+      await adapter.initialize();
       return (code) => {
-        const instance = adapter.render(layerOf('p5', `function setup() { ${code} }\nfunction draw() {}`), document.createElement('div')) as unknown as MockP5;
-        instance.setup();
-        instance.draw();
+        adapter.render(layerOf('p5', `function setup() { ${code} }\nfunction draw() {}`), document.createElement('div'));
       };
     },
   };
@@ -250,38 +213,48 @@ describe('generated-code bypass corpus', () => {
         // The p5 adapter extracts the body with a non-greedy `{...}` match, so
         // a payload containing a closing brace cannot be hosted in it.
         if (adapterName === 'p5' && payload.code.includes('}')) continue;
-        it(`rejects ${payload.id}`, () => {
-          const run = makeRunner();
+        it(`rejects ${payload.id}`, async () => {
+          const run = await makeRunner();
           expect(collect(() => run(payload.code))).toEqual([]);
         });
       }
     });
   }
 
-  describe('legitimate art code still runs', () => {
-    it('hydra chain with a probe call', () => {
-      const run = runners.hydra();
-      expect(() => run(`__pwn('hydra:' + [1, 2][1])`)).not.toThrow();
-      expect(effects).toEqual(['hydra:2']);
+  describe('legitimate art code is mounted in a sandbox frame, never run in the host', () => {
+    const mountLegit = async (type: Layer['type'], code: string) => {
+      const adapters = { hydra: new HydraAdapter(), p5: new P5Adapter(), tone: new ToneAdapter(), three: new ThreeAdapter() } as const;
+      const adapter = adapters[type as keyof typeof adapters];
+      await adapter.initialize();
+      return adapter.render(layerOf(type, code), document.createElement('div')) as unknown as SandboxedInstance;
+    };
+
+    it('hydra chain with a probe call', async () => {
+      const inst = await mountLegit('hydra', `__pwn('hydra:' + [1, 2][1])`);
+      expect(inst.blocked).toEqual([]);
+      expect(inst.iframe?.getAttribute('sandbox')).toBe('allow-scripts');
+      expect(effects).toEqual([]);
     });
 
-    it('p5 sketch with array indexing, objects and this', () => {
-      const run = runners.p5();
-      // No braces: the p5 adapter's body extraction stops at the first `}`.
-      run(`const a = [1,2,3]; for (let i = 0; i < a.length; i++) a[i] *= 2; const k = a.map(v => v + 1)[a.length - 1]; __pwn('p5:' + a.join() + ':' + k);`);
-      expect(effects).toEqual(['p5:2,4,6:7']);
+    it('p5 sketch with array indexing, objects and this', async () => {
+      const inst = await mountLegit('p5', `function setup() { const a = [1,2,3]; for (let i = 0; i < a.length; i++) a[i] *= 2; __pwn('p5:' + a.join()); }\nfunction draw() {}`);
+      expect(inst.blocked).toEqual([]);
+      expect(inst.iframe?.getAttribute('sandbox')).toBe('allow-scripts');
+      expect(effects).toEqual([]);
     });
 
-    it('tone synth tracking, constructor functions with this, computed numeric keys', () => {
-      const run = runners.tone();
-      run(`const s = new Tone.Synth().toDestination(); const parent = 3; function Part(n) { this.v = n; } const o = new Part(4); const key = 'v'; o[key] += parent; __pwn('legit:' + o.v);`);
-      expect(effects).toEqual(['legit:7']);
+    it('tone synth tracking, constructor functions with this, computed numeric keys', async () => {
+      const inst = await mountLegit('tone', `const s = new Tone.Synth().toDestination(); const parent = 3; function Part(n) { this.v = n; } const o = new Part(4); const key = 'v'; o[key] += parent; __pwn('legit:' + o.v);`);
+      expect(inst.blocked).toEqual([]);
+      expect(inst.iframe?.getAttribute('sandbox')).toBe('allow-scripts');
+      expect(effects).toEqual([]);
     });
 
-    it('three code may redeclare names and shadow reserved-looking ones', () => {
-      const run = runners.three();
-      run(`const scene2 = new THREE.Scene(); const top = 1; const open = (n) => n + top; __pwn('three:' + open(1));`);
-      expect(effects).toEqual(['three:2']);
+    it('three code may redeclare names and shadow reserved-looking ones', async () => {
+      const inst = await mountLegit('three', `const scene2 = new THREE.Scene(); const top = 1; const open = (n) => n + top; __pwn('three:' + open(1));`);
+      expect(inst.blocked).toEqual([]);
+      expect(inst.iframe?.getAttribute('sandbox')).toBe('allow-scripts');
+      expect(effects).toEqual([]);
     });
   });
 });

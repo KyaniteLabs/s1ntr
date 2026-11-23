@@ -36,7 +36,7 @@ export const BLENDER_DEFAULT_BINARY = 'blender';
 export const BLENDER_BINARY_ENV = 'SINTER_BLENDER_BIN';
 export const BLENDER_MAX_RESOLUTION = 640;
 export const BLENDER_MAX_SAMPLES = 32;
-export const BLENDER_DEFAULT_TIMEOUT_MS = 90_000;
+export const BLENDER_DEFAULT_TIMEOUT_MS = 240_000; // measured renders took 36, 71 and 91 s on 4 niced cores (90 s was too tight)
 export const BLENDER_INSTALL_HINT =
   'Install Blender 4.x (Debian/Ubuntu: `sudo apt install blender`, macOS: `brew install --cask blender`, or https://www.blender.org/download/) and make sure `blender` is on PATH';
 

@@ -175,7 +175,9 @@ describe('GenericWrapper', () => {
       const result = GenericWrapper.wrap(code, { domain: 'strudel' });
 
       expect(result).toContain('id="sinter-strudel-play"');
-      expect(result).toContain('strudel.initStrudel');
+      // Boot (initStrudel + sample banks) lives in the shared music runtime (#1732).
+      expect(result).toContain('sd.initStrudel()');
+      expect(result).toContain('window.__sinterStrudelBoot');
       expect(result).toContain('strudel.evaluate');
       expect(result).toContain('strudel.hush');
       expect(result).not.toContain('<strudel-editor>');
@@ -249,7 +251,8 @@ describe('GenericWrapper', () => {
       const result = GenericWrapper.wrap('const synth = new Tone.Synth();', { domain: 'tone' });
 
       expect(result).toContain('worker-src blob:');
-      expect(result).toContain("connect-src 'none'");
+      expect(result).toContain("script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline' blob:;");
+      expect(result).toContain('connect-src blob:;');
     });
 
     it('wraps Tone.js code', () => {

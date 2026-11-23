@@ -45,11 +45,3 @@ export { detectBPM, detectKey } from './BPMKeyDetector.js';
 export type { TempoResult, KeyResult } from './BPMKeyDetector.js';
 export { analyzeVoiceFrame } from './VoiceFeatureStream.js';
 export type { VoiceFeatureFrame, VoiceFeatureInput } from './VoiceFeatureStream.js';
-export { createSingPreset, validateSingPreset } from './PresetSchema.js';
-export type {
-  SingMappingCurve,
-  SingPresetArtifact,
-  SingPresetMapping,
-  SingPresetValidation,
-  SingVoiceFeature,
-} from './PresetSchema.js';

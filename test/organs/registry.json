@@ -1,0 +1,1693 @@
+{
+ "_doc": "Every top-level src/ directory must appear here. status INTEGRATED needs an existing organ test; any other status needs a reason and an owner-dated review. scripts/check-organs.mjs fails the build on an unlisted directory or a missing test.",
+ "modules": {
+  "aesthetic": {
+   "kind": "unaudited",
+   "status": "WIRED-UNTESTED",
+   "reason": "group A audit 2026-11-19: proofs below are what exists; gaps are exact",
+   "review": "2026-12-19",
+   "triage": "generation-path",
+   "does": "Gives a finished piece a quality score for colour, balance and polish, and holds the minimum score a piece must reach before it is accepted.",
+   "helps": "The minimum-score line decides acceptance: the same piece is accepted at judge score 0.8 and refused at 0.05 (spawned-cli-organs test). Whether the colour and balance critic itself improves the look needs real seats.",
+   "gaps": [
+    "used: the colour/balance critic's own score changing a finished piece is not shown (only the shared floor is)",
+    "wired: ColorExtractor.ts is imported by nothing reachable from a CLI entry"
+   ],
+   "test": "test/organs/group-a-organs.test.ts",
+   "proof": {
+    "tested": "test/organs/group-a-organs.test.ts (floor admits above, refuses below); test/integration/ralph-loop-aesthetic.test.ts",
+    "ran": "spawned-cli: bin/sinter generate --domain html (fake HTTP provider, real renderer) under NODE_V8_COVERAGE executed 2 aesthetic functions (test/organs/spawned-coverage.test.ts)",
+    "used": "test/organs/spawned-cli-organs.test.ts: a weak judge score (0.05) makes the spawned generate refuse the piece; 0.8 accepts it (floor read by LiminalCommandService admission)",
+    "wired": "quality floor: default create path (LiminalCommandService admission, LLMJudgeCritic)"
+   },
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Colour extraction gives different palettes for a warm and a cool page; the quality floor accepts 0.8 and refuses 0.05."
+   },
+   "output": "test/organs/outputs/aesthetic.txt"
+  },
+  "agent": {
+   "kind": "unaudited",
+   "status": "WIRED-UNTESTED",
+   "reason": "wired and run through the spawned bridge; used proof (downstream effect) not shown",
+   "review": "2026-12-19",
+   "triage": "operator-path",
+   "does": "The studio assistant's plumbing: reads what the owner means, picks a mode, runs skills, resumes sessions, shows diffs and writes reports (the old agent class is retired; its prompt and types remain).",
+   "helps": "Operator gets the answer in the studio (spawned test): the bridge answers /mode and /skills for a session. No effect on a finished piece is shown; needs real seats.",
+   "gaps": [
+    "used: the replies are shown, but no test shows an answer changing a piece or a later decision"
+   ],
+   "test": "test/organs/spawned-operator-paths.test.ts",
+   "proof": {
+    "tested": "test/organs/spawned-operator-paths.test.ts (spawned `bin/sinter bridge`)",
+    "ran": "spawned bin/sinter (fake HTTP provider, no real seat): bridge started on a free port, session created, slash commands sent over HTTP, replies read from the SSE stream",
+    "wired": "bin/sinter bridge -> TuiBridgeServer -> CommandDispatcher"
+   },
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Intent router classifies a paint request and a fix request differently."
+   },
+   "output": "test/organs/outputs/agent.txt"
+  },
+  "analytics": {
+   "kind": "operator",
+   "status": "INTEGRATED",
+   "triage": "not-wired-yet",
+   "test": "test/organs/groupb-wiring.test.ts",
+   "does": "Sends the living-site daemon's events (challenger generated, promoted, rejected) to a PostHog host when a key is set.",
+   "helps": "Operator tooling: it does not change a piece; it records which site variant won. Events go to the configured host under the anonymous id sinter-daemon, carry no prompt text, email or home path, and nothing is sent without a key.",
+   "proof": {
+    "tested": "test/unit/analytics/PostHogClient.test.ts; test/unit/daemon/LivingSiteDaemon.test.ts",
+    "ran": "groupb-wiring spawns the built CLI: `site seed --slots 2` then `site evolve --once` on the fake provider with LIMINAL_POSTHOG_HOST pointed at a local fake endpoint",
+    "used": "groupb-wiring: the spawned cycle posts liminal_* events under sinter-daemon to the fake host; bodies contain no prompt, email or home path; with the key unset a second spawned cycle sends zero requests",
+    "wired": "`sinter site evolve` runs LivingSiteDaemon, which calls the client"
+   },
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Without a key the client reports unconfigured and sends nothing; lists the engagement event names."
+   },
+   "output": "test/organs/outputs/analytics.txt"
+  },
+  "atelier": {
+   "kind": "learning",
+   "status": "INTEGRATED",
+   "test": "test/organs/prompt-organ.test.ts",
+   "does": "Keeps the lessons and best examples S1NTR has learned and adds them to the next brief.",
+   "helps": "Taught lessons and exemplars appear in the generation brief and change it (prompt-organ test). Effect on score/look: needs real seats.",
+   "proof": {
+    "tested": "test/organs/prompt-organ.test.ts (perturbation test: organ state changes, recorded brief/score/route moves)",
+    "ran": "in-process real run through runProductionCliGenerate (test/organs/harness.ts); spawned-CLI + fake HTTP provider is blocked by design: provider transport needs host-owned completion authority (protected host key) that tests must not forge",
+    "used": "test/organs/prompt-organ.test.ts: changing the organ's state changes the recorded generator brief, score or route; test fails if the organ is bypassed",
+    "wired": "reachable from the default create path (runProductionCliGenerate -> production runtime); no flag"
+   },
+   "output": "test/organs/outputs/atelier.txt",
+   "dogfood": {
+    "verdict": "fixed",
+    "data": "real",
+    "line": "`sinter gbg` prints bead counts after a governed generate instead of nothing."
+   }
+  },
+  "audio": {
+   "kind": "input-organ",
+   "status": "INTEGRATED",
+   "test": "test/organs/groupb-audio.test.ts",
+   "does": "Listens to a recording (a voice, a hum, any sound) and turns it into colours, motion and shape numbers for the brief.",
+   "helps": "With --voice-file the generator's brief gains an 'Audio-derived visual parameters' block; two recordings (low tone vs noise) give two different briefs and no flag gives none (groupb-audio, spawned CLI + fake provider). Whether the piece scores higher: needs real seats.",
+   "proof": {
+    "tested": "test/organs/groupb-audio.test.ts + test/unit/audio/* (extractor, analyzer, mapper, pitch)",
+    "ran": "spawned built `bin/sinter generate --voice-file` against the fake HTTP provider (groupb-audio.test.ts)",
+    "used": "groupb-audio.test.ts: low-tone and noise recordings give different generator briefs; without the flag the brief has no audio block",
+    "wired": "named flag `sinter generate --voice-file <file>` (opt-in; previously refused on the governed path, wired in this PR)"
+   },
+   "output": "test/organs/outputs/audio.txt",
+   "dogfood": {
+    "verdict": "fixed",
+    "data": "real",
+    "line": "A 220 Hz recording becomes a palette/motion/form/dynamics block that is added to the generator brief."
+   }
+  },
+  "autonomy": {
+   "kind": "organ",
+   "status": "INTEGRATED",
+   "triage": "operator-path",
+   "does": "The garden's caretaker: decides how often to tend the archive, spots when the work has stagnated, sets budgets and quotas, and plans which old pieces to revisit.",
+   "helps": "The caretaker reports garden health and runs a policy experiment from a file (spawned tests). Whether it improves a piece needs real seats.",
+   "test": "test/organs/spawned-wiring.test.ts",
+   "proof": {
+    "tested": "test/organs/spawned-wiring.test.ts (spawned `garden experiment`) and test/organs/spawned-operator-paths.test.ts (spawned `garden status`)",
+    "ran": "spawned bin/sinter (fake HTTP provider, no real seat): garden status and garden experiment",
+    "used": "test/organs/spawned-wiring.test.ts: the experiment file decides the outcome the command prints; bypass fails",
+    "wired": "operator commands `sinter garden status|experiment` (bin/sinter); the bridge /autonomy command reads the level"
+   },
+   "output": "test/organs/outputs/autonomy.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Garden is 75.4% thriving, 100% niche occupancy, lists next actions. Rebalance on an empty project is a wall of empty niches."
+   }
+  },
+  "brain": {
+   "kind": "organ",
+   "status": "INTEGRATED",
+   "triage": "generation-path",
+   "does": "A small encyclopedia of art (movements, techniques, artists, colour and composition ideas) and an invented shorthand the artists use to combine them.",
+   "helps": "The generator brief names a technique and style drawn from the art knowledge (spawned test). Whether it improves a finished piece needs real seats.",
+   "test": "test/organs/spawned-operator-paths.test.ts",
+   "proof": {
+    "tested": "test/organs/spawned-operator-paths.test.ts (spawned generate: p5 brief names a technique and style, html brief does not)",
+    "ran": "spawned bin/sinter (fake HTTP provider, no real seat): generate runs the brief builder",
+    "used": "test/organs/spawned-operator-paths.test.ts: the generator system brief carries \"Artistic technique: ... Style reference: ...\" for p5 and not for html",
+    "wired": "LiminalProductionEffects.brainHint -> every governed `sinter generate` for domains in ARTISTIC_TECHNIQUES (p5, shader, three, strudel, hydra, tone)"
+   },
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Concept graph loads seed data: technique, p5 and hydra concept lists come back non-empty."
+   },
+   "output": "test/organs/outputs/brain.txt"
+  },
+  "chat": {
+   "kind": "unaudited",
+   "status": "WIRED-UNTESTED",
+   "triage": "operator-path",
+   "does": "Reflects saved Studio sessions. Only the explicit `chat reflect` command reads and sends saved sessions.",
+   "helps": "Distills saved session feedback into taste signals through the role-bound Studio provider.",
+   "reason": "Studio owns interactive chat. The explicit CLI subcommand invokes the shared reflection runner.",
+   "review": "2026-12-19",
+   "gaps": [
+    "used: chat reflect effect on a piece not measured"
+   ],
+   "test": "test/organs/closeout-group-c.test.ts",
+   "proof": {
+    "tested": "Spawned chat reflect against a loopback Studio provider with saved turns",
+    "wired": "Explicit chat reflect reaches the role-bound Studio transport"
+   },
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Interview answers become two different creative briefs (calm flock vs tense noise)."
+   },
+   "output": "test/organs/outputs/chat.txt"
+  },
+  "cli": {
+   "kind": "unaudited",
+   "status": "INTEGRATED",
+   "triage": "operator-path",
+   "does": "The command-line commands: create, list, studio, git, fix, learn and the rest.",
+   "helps": "The way a person starts a piece; command-registration-parity pins that every command in bin/sinter exists. LiminalRerenderReevaluate has no test.",
+   "test": "test/organs/spawned-cli-group-c.test.ts",
+   "proof": {
+    "tested": "test/unit/cli + test/organs/live-group-c.test.ts (rerender-reevaluate gates)",
+    "ran": "spawned bin/sinter: generate, fix, site seed, site evolve --once (spawned-cli-group-c)",
+    "used": "--domain, --error and site flags change what the fake provider receives or whether the cycle runs",
+    "wired": "default: bin/sinter dispatches every command to src/cli. Full rerender-reevaluate on a real product run is not run (needs a real run root and grant); only its refusal gates are"
+   },
+   "output": "test/organs/outputs/cli.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "fake",
+    "line": "A governed generate end to end: prompt, domain, candidates, render, quality line. Readable."
+   }
+  },
+  "collab": {
+   "kind": "learning",
+   "status": "INTEGRATED",
+   "triage": "operator-path",
+   "test": "test/organs/groupb-wiring.test.ts",
+   "does": "Turns a reviewer's verdict, score and sections into a critique memo file that can be fed back to the generator.",
+   "helps": "A critique memo's sections and reviewer name are added to the next generate brief (`--memo`), so a roast note reaches the next attempt; without it the brief has none. Whether the revision scores higher: needs real seats.",
+   "proof": {
+    "tested": "test/unit/collab/EvaluationMemo.test.ts; test/collab/types.test.ts",
+    "ran": "groupb-wiring spawns `sinter memo` and `generate --memo` against the fake provider",
+    "used": "groupb-wiring: the brief contains the memo text and reviewer with --memo and not without",
+    "wired": "`sinter memo` and `generate --memo <file>` in bin/sinter"
+   },
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "quickScore rates an animated canvas piece above the plain text 'hello'."
+   },
+   "output": "test/organs/outputs/collab.txt"
+  },
+  "composite": {
+   "kind": "operator",
+   "status": "INTEGRATED",
+   "triage": "operator-path",
+   "test": "test/organs/groupb-wiring.test.ts",
+   "does": "Validates a layer-by-layer plan (video, image, audio, blend, opacity) and, with --render, builds one layered page from the real media files.",
+   "helps": "With --render each layer's own file (video, picture or sound) is embedded in its layer with the spec's blend and opacity, so the plan becomes a playable composition; a missing or unsupported source, or an invalid spec, renders nothing. Files over 24 MB are refused (embedded inline).",
+   "proof": {
+    "tested": "test/unit/composite/Compositor.test.ts",
+    "ran": "groupb-cli spawns `composite --spec`; groupb-wiring spawns `composite --render` with ffmpeg-made media, and `compose --spec` with prompt-only p5 and html layers on the fake provider",
+    "used": "groupb-wiring: the decoded layer pages contain the exact bytes of a unique-colour png, mp4 and wav; composition.html carries mix-blend-mode:screen and opacity 0.6; a missing source or width-0 spec exits 1 with no output; media layers make no provider call; prompt layers (spawned compose --spec) make one provider call each and render into composition.html with the spec's blend and opacity",
+    "wired": "`sinter composite --spec <file> --render` in bin/sinter, routed through `compose` with real-media layers"
+   },
+   "output": "test/organs/outputs/composite.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Analysed a real png + music.wav spec layer by layer and wrote a plan; the image layer shows confidence n/a, which is thin."
+   }
+  },
+  "composition": {
+   "kind": "organ",
+   "status": "INTEGRATED",
+   "test": "test/integration/hybrid-compose-cli.test.ts",
+   "reason": "sinter compose --hybrid (spawned CLI, fake provider) runs the parts below end to end; per-part status in `parts`",
+   "parts": {
+    "CompositionEngine": {
+     "status": "INTEGRATED",
+     "used_by": "src/composition/hybrid/HybridProject.ts buildHybridProject: holds every hybrid layer"
+    },
+    "LayerManager": {
+     "status": "INTEGRATED",
+     "used_by": "HybridProject.ts: createAnimation per beat signal"
+    },
+    "LayerMask": {
+     "status": "INTEGRATED",
+     "used_by": "HybridProject.ts: createMask + generateCSSMask for every mask layer"
+    },
+    "KeyframeAnimation": {
+     "status": "INTEGRATED",
+     "used_by": "HybridProject.ts: generateCSS writes the beat grid (one loop per beat at plan.bpm)"
+    },
+    "ProjectSerializer": {
+     "status": "INTEGRATED",
+     "used_by": "HybridProject.ts: exportProject + validateProject -> composition.project.json"
+    },
+    "CompositionAnalyzer": {
+     "status": "INTEGRATED",
+     "used_by": "HybridProject.ts: keyword cross-check of the planner's domains; HybridComposition.ts judgeHybrid folds it into the named criterion 'seam/coherence between layers' (verdict + composition.hybrid.json judge.coherence)"
+    },
+    "adapters/*": {
+     "status": "INTEGRATED",
+     "used_by": "HybridProject.ts: registerAllAdapters, adapter.validate per p5/three/shader/hydra/tone/strudel layer (loud, names the layer). html/ascii adapters are not run: they judge fragments, hybrid layers are full pages (HTMLAdapter.ts:317 rejects script tags)"
+    },
+    "LayerSequencer": {
+     "status": "INTEGRATED",
+     "used_by": "src/composition/hybrid/HybridGeneration.ts generateHybridLayers: generateLayers makes every planned layer from its own prompt, one after another, through CompositionOrchestrator.generateGovernedLayer (generator registry, provider-call ledger, seam guard); compose() then assembles that code (vendor inlining, render gate). orderDomains stays in HybridProject.ts. Closes issue 1951.",
+     "does": "Makes the layers of a layered piece one at a time, each from its own prompt, and stops at the first layer that fails.",
+     "effect": "Same prompt, three layers, first layer broken: through the sequencer the fake provider was asked 2 times (the broken layer and its one retry) and the piece failed naming layer 0; bypassed, compose() asks all layers at once (Promise.all, CompositionOrchestrator.ts), so the later layers are paid for before the failure shows. Guard: test/integration/hybrid-compose-cli.test.ts fails if manifest composition.generation.via is not LayerSequencer.generateLayers."
+    },
+    "CompositionControlRuntime": {
+     "status": "INTEGRATED",
+     "used_by": "src/composition/hybrid/HybridControl.ts: the plan's beat signals compile to a ControlRecipe, validated by CompositionEngine.loadControlRecipe and rehearsed on CompositionControlRuntime (CompositionEngine.createControlRuntime) at build time; the page runs the recipe on ControlArtifact's embedded runtime (same logic, in-page) with postMessage bindings; the judge checks every mapping wrote its target",
+     "note": "the page cannot import the host class (self-contained html), so the embedded twin in ControlArtifact.ts runs there",
+     "does": "Turns the layers' shared beat into a validated control recipe that drives the overlay's scale while the page plays.",
+     "effect": "Same page, control script on vs stripped, now with a kinetic layer that reads the beat (glsl background + kinetic overlay, headless render): on, mapping beat-0 wrote its target (0.296) and the judge passed; stripped, the target was never written and the judge failed the piece ('the in-page control loop never wrote its target'). Whole-frame change over 3.5 s is about the same either way (0.070 on vs 0.066 off) because the stage keeps posting the beat to the layer itself; the pixel proof is per layer: holding the beat at 1 versus 0 moves the wired layer by 0.047 against 0.039 of its own motion, and a layer that ignores the beat (earlier fixture) fails the coherence check naming the layer. The earlier near-identical frames were a deaf fixture plus a bridge that let control values overwrite the beat; both fixed, and wired layers are now told to make the beat visible. Fake-provider fixture only: needs real seats to prove a real model obeys the brief."
+    }
+   },
+   "review": "2026-12-19",
+   "does": "Plans how layers fit together in a layered piece, then builds and checks every layer of it.",
+   "helps": "Layer sequencing and the beat control recipe are measured on/off in the hybrid compose test: Same prompt, three layers, first layer broken: through the sequencer the fake provider was asked 2 times (the broken layer and its one retry) and the piece failed naming layer 0; bypassed, compose() a Whether the finished piece is better: needs real seats.",
+   "proof": {
+    "tested": "test/integration/hybrid-compose-cli.test.ts",
+    "ran": "spawned CLI `sinter compose --hybrid` with the fake provider (test/integration/hybrid-compose-cli.test.ts)",
+    "used": "CompositionEngine: src/composition/hybrid/HybridProject.ts buildHybridProject: holds every hybrid layer; LayerManager: HybridProject.ts: createAnimation per beat signal; LayerMask: HybridProject.ts: createMask + generateCSSMask for every mask layer",
+    "wired": "reachable from `sinter compose --hybrid` (bin/sinter -> HybridProject.buildHybridProject)"
+   },
+   "output": "test/organs/outputs/composition.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Same layered-spec analysis without writing the plan file; works, thin detail."
+   }
+  },
+  "compost": {
+   "kind": "learning",
+   "status": "INTEGRATED",
+   "test": "test/organs/prompt-organ.test.ts",
+   "does": "Keeps rejected or leftover pieces as raw material for new ideas (now called motifs).",
+   "helps": "Motif material changes the brief (prompt-organ test). Effect on score/look: needs real seats.",
+   "proof": {
+    "tested": "test/organs/prompt-organ.test.ts (perturbation test: organ state changes, recorded brief/score/route moves)",
+    "ran": "in-process real run through runProductionCliGenerate (test/organs/harness.ts); spawned-CLI + fake HTTP provider is blocked by design: provider transport needs host-owned completion authority (protected host key) that tests must not forge",
+    "used": "test/organs/prompt-organ.test.ts: changing the organ's state changes the recorded generator brief, score or route; test fails if the organ is bypassed",
+    "wired": "reachable from the default create path (runProductionCliGenerate -> production runtime); no flag"
+   },
+   "output": "test/organs/outputs/compost.txt",
+   "dogfood": {
+    "verdict": "fixed",
+    "data": "fake",
+    "line": "`compost status` reads real heap state (heap fills from rejected pieces; an accepted piece leaves it empty)."
+   }
+  },
+  "config": {
+   "kind": "unaudited",
+   "status": "INTEGRATED",
+   "triage": "operator-path",
+   "does": "Reads settings, keys and the model-to-job map that decide which model does which job.",
+   "helps": "Decides which model generates and which judges (RoleConfig, ProviderKeyResolver); the effect is real but only the routing bandit is covered by an organ test. The old hard-coded model-routing.ts table (zero importers, six retired model ids) is deleted: min size lives in CodeValidator.getMinSize, prompt hints in the live production brief, best seat in `sinter report fitness` from the operator's own runs; the operator's seat config alone chooses models.",
+   "test": "test/organs/spawned-cli-group-c.test.ts",
+   "proof": {
+    "tested": "test/unit/config + test/organs/spawned-cli-group-c.test.ts",
+    "ran": "spawned bin/sinter against the fake provider (spawned-cli-group-c: config test)",
+    "used": "test changes the LLM base URL and the other fake provider receives the calls, this one none",
+    "wired": "default: every command resolves the provider and seats through src/config"
+   },
+   "output": "test/organs/outputs/config.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "provider status lists each provider as missing key or unreachable. Plain and correct."
+   }
+  },
+  "constants": {
+   "kind": "unaudited",
+   "status": "WIRED-UNTESTED",
+   "triage": "operator-path",
+   "does": "Fixed numbers and names shared across the code.",
+   "helps": "Plumbing: defaults such as iteration and timeout limits; no benefit of its own.",
+   "reason": "plain constants; no behaviour to test beyond use",
+   "review": "2026-12-19",
+   "gaps": [
+    "tested: no direct test",
+    "used: n/a"
+   ],
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Prints the numeric limits the CLI enforces."
+   },
+   "output": "test/organs/outputs/constants.txt"
+  },
+  "core": {
+   "kind": "organ",
+   "organ": "scoring engine / two-stage judge",
+   "status": "INTEGRATED",
+   "test": "test/organs/score-organs.test.ts",
+   "does": "The main loop: write a piece, look at it, score it, learn from it, and try again.",
+   "helps": "Loop carry-over proven: attempt 1's code and judge critique appear in attempt 2's brief and change when attempt 1 changes (loop-carry-organ test). Whether attempt 2 is better: needs real seats.",
+   "proof": {
+    "tested": "test/organs/score-organs.test.ts (perturbation test: organ state changes, recorded brief/score/route moves)",
+    "ran": "in-process real run through runProductionCliGenerate (test/organs/harness.ts); spawned-CLI + fake HTTP provider is blocked by design: provider transport needs host-owned completion authority (protected host key) that tests must not forge",
+    "used": "test/organs/score-organs.test.ts: changing the organ's state changes the recorded generator brief, score or route; test fails if the organ is bypassed; loop carry-over: test/organs/loop-carry-organ.test.ts (attempt 1 code + judge critique reach attempt 2, fails if attempt 2 starts fresh)",
+    "wired": "reachable from the default create path (runProductionCliGenerate -> production runtime); no flag"
+   },
+   "output": "test/organs/outputs/core.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "fake",
+    "line": "A governed generate that was rejected: score 0.29 below-quality-floor because the real render was static (early frame == late frame). Real, useful rejection."
+   }
+  },
+  "cortex": {
+   "kind": "unaudited",
+   "status": "WIRED-UNTESTED",
+   "reason": "wired and run through the spawned bridge; used proof (downstream effect) not shown",
+   "review": "2026-12-19",
+   "triage": "generation-path",
+   "does": "The studio's planner for living sessions: tracks goals, notices when work is stuck, proposes next actions within a budget, and explains its choices.",
+   "helps": "Operator gets the answer in the studio (spawned test): the bridge answers /cortex with the dashboard and /autonomy with the level. No effect on a finished piece is shown; needs real seats.",
+   "gaps": [
+    "used: the replies are shown, but no test shows an answer changing a piece or a later decision"
+   ],
+   "test": "test/organs/spawned-operator-paths.test.ts",
+   "proof": {
+    "tested": "test/organs/spawned-operator-paths.test.ts (spawned `bin/sinter bridge`)",
+    "ran": "spawned bin/sinter (fake HTTP provider, no real seat): bridge started on a free port, session created, slash commands sent over HTTP, replies read from the SSE stream",
+    "wired": "bin/sinter bridge -> TuiBridgeServer -> CommandDispatcher"
+   },
+   "note": "StudioLivingLoopExecutor: only the operator script `pnpm wave7:prove-no-spend` and its contract test drive it; no sinter command does.",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Budget tracker affords two actions then refuses the third; usage reported."
+   },
+   "output": "test/organs/outputs/cortex.txt"
+  },
+  "creative-intelligence": {
+   "kind": "organ",
+   "status": "INTEGRATED",
+   "triage": "generation-path",
+   "does": "Turns the brief into a short creative plan (idea, form, type), can re-cast a piece as music or as an interactive version, and revises a piece a bounded number of times from what the judge blamed.",
+   "helps": "The brief carries a plan compiled from the request and a revision carries the judge blame forward (spawned tests). Effect on the finished piece needs real seats.",
+   "test": "test/organs/spawned-wiring.test.ts",
+   "proof": {
+    "tested": "test/organs/spawned-wiring.test.ts (spawned generate: plan in the user brief, SINTER_BRIEF_CRAFT=off removes it)",
+    "ran": "spawned bin/sinter (fake HTTP provider, no real seat): generate runs the thesis compiler",
+    "used": "test/organs/spawned-wiring.test.ts: the provider request contains the plan and the revision brief carries tier lines; bypass fails",
+    "wired": "BriefCraftSection.creativePlanSection -> LiminalProductionEffects user brief; revision via generate --revise-from"
+   },
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Principle manifest loads with its schema and keys."
+   },
+   "output": "test/organs/outputs/creative-intelligence.txt"
+  },
+  "creative-run": {
+   "kind": "unaudited",
+   "status": "WIRED-UNTESTED",
+   "reason": "group A audit 2026-11-19: proofs below are what exists; gaps are exact",
+   "review": "2026-12-19",
+   "triage": "generation-path",
+   "does": "Runs a creative campaign under the owner's sealed approval: keeps blind comparisons between versions, records the owner's verdicts, and decides when a campaign may close or learn from them.",
+   "helps": "Keeps owner approval and blind review honest so learning only comes from verdicts the owner actually gave. Effect on how a piece looks: UNKNOWN, needs real seats.",
+   "gaps": [
+    "used: no test shows owner verdicts changing what the next piece looks like",
+    "wired: CreativeQualityRubric.ts is reached only through OwnerQualityReview (owner-review path); no spawned proof yet"
+   ],
+   "test": "test/unit/creative-run/CreativeRunCoordinator.test.ts",
+   "proof": {
+    "tested": "test/unit/creative-run/CreativeRunCoordinator.test.ts (42 test files import the module)",
+    "ran": "spawned-cli: bin/sinter generate --domain html (fake HTTP provider, real renderer) under NODE_V8_COVERAGE executed 3 creative-run functions (test/organs/spawned-coverage.test.ts)"
+   },
+   "note": "w9Briefs is wired and proven through `sinter compose --w9-brief` (spawned-wiring test).",
+   "output": "test/organs/outputs/creative-run.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "fake",
+    "line": "Same governed generate log: one governed candidate, one output directory."
+   }
+  },
+  "creative-vocabulary": {
+   "kind": "unaudited",
+   "status": "WIRED-UNTESTED",
+   "reason": "group A audit 2026-11-19: proofs below are what exists; gaps are exact",
+   "review": "2026-12-19",
+   "triage": "generation-path",
+   "does": "Holds the art vocabulary (colour, motion, camera, music and writing terms) and the library cards that tell the artist which tools it may reach for.",
+   "helps": "The library cards are written into the generator brief (test/organs/spawned-cli-organs.test.ts reads 'OPTIONAL LIBRARY CAPABILITIES' and d3-delaunay in the request the fake provider received). Effect on the look: needs real seats.",
+   "gaps": [
+    "used: only the library cards are shown reaching the brief; the colour, motion, cinematic, music and writing engines are not"
+   ],
+   "test": "test/organs/spawned-cli-organs.test.ts",
+   "proof": {
+    "tested": "test/unit/creative-vocabulary/LibraryCards.test.ts; test/unit/creative-vocabulary/engines.test.ts",
+    "ran": "spawned-cli: bin/sinter generate --domain html (fake HTTP provider, real renderer) under NODE_V8_COVERAGE executed 5 creative-vocabulary functions (test/organs/spawned-coverage.test.ts)",
+    "used": "test/organs/spawned-cli-organs.test.ts: library cards reach the generator brief; test/organs/prompt-organ.test.ts: strudel is offered tonaljs",
+    "wired": "default create path (LibraryPromptSection -> generator brief)"
+   },
+   "output": "test/organs/outputs/creative-vocabulary.txt",
+   "dogfood": {
+    "verdict": "broken",
+    "data": "real",
+    "line": "name says \"nothing to name\" and taxonomy is all zeros: nothing feeds the name log from the governed path."
+   }
+  },
+  "daemon": {
+   "kind": "unaudited",
+   "status": "WIRED-UNTESTED",
+   "triage": "not-wired-yet",
+   "does": "Runs the living-website loop that keeps changing a site.",
+   "helps": "Plumbing for the site feature only: reachable via `sinter site evolve` and needs LIMINAL_POSTHOG_KEY. Does not touch pieces made by create.",
+   "reason": "cycle runs with a fake key but cannot finish a challenger",
+   "review": "2026-12-19",
+   "gaps": [
+    "used: the cycle reaches RalphLoop then the provider refuses (no host-owned product-command authority in `site evolve`); a promoted challenger is not shown",
+    "wired: only via `site evolve` with LIMINAL_POSTHOG_KEY"
+   ],
+   "test": "test/organs/spawned-cli-group-c.test.ts",
+   "proof": {
+    "tested": "test/organs/spawned-cli-group-c.test.ts",
+    "ran": "spawned `site seed` + `site evolve --once --dry-run` with a fake LIMINAL_POSTHOG_KEY: no key skips the cycle, fake key starts generation"
+   },
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Default living-site config printed; `sinter site evolve` runs this daemon."
+   },
+   "output": "test/organs/outputs/daemon.txt"
+  },
+  "dreaming": {
+   "kind": "learning",
+   "status": "INTEGRATED",
+   "test": "test/organs/dream-organ.test.ts",
+   "does": "Studies finished pieces offline and turns what it finds into lessons (now called learn).",
+   "helps": "Learned lessons change the brief (dream-organ test). Effect on score/look: needs real seats.",
+   "proof": {
+    "tested": "test/organs/dream-organ.test.ts (perturbation test: organ state changes, recorded brief/score/route moves)",
+    "ran": "in-process real run through runProductionCliGenerate (test/organs/harness.ts); spawned-CLI + fake HTTP provider is blocked by design: provider transport needs host-owned completion authority (protected host key) that tests must not forge",
+    "used": "test/organs/dream-organ.test.ts: changing the organ's state changes the recorded generator brief, score or route; test fails if the organ is bypassed",
+    "wired": "reachable from the default create path (runProductionCliGenerate -> production runtime); no flag"
+   },
+   "output": "test/organs/outputs/dreaming.txt",
+   "dogfood": {
+    "verdict": "fixed",
+    "data": "real",
+    "line": "`dream guard` printed promote (exit 0) for a clear gain and keep-incumbent (exit 4) for a regression."
+   }
+  },
+  "embeddings": {
+   "kind": "unaudited",
+   "status": "UNAUDITED",
+   "reason": "group A audit 2026-11-19: proofs below are what exists; gaps are exact",
+   "review": "2026-12-19",
+   "triage": "generation-path",
+   "does": "Turns text into number lists so pieces and ideas can be compared by meaning.",
+   "helps": "UNKNOWN: used by the search and diversity code; no on/off comparison on a finished piece. Needs real seats.",
+   "gaps": [
+    "used: no test shows meaning-based similarity changing which piece or brief is chosen on the create path",
+    "wired: only 1 embeddings function ran in the spawned generate run; no embed call on the create path is shown"
+   ],
+   "test": "test/embeddings/semantic-search.test.ts",
+   "proof": {
+    "tested": "test/embeddings/semantic-search.test.ts",
+    "ran": "spawned-cli: bin/sinter generate --domain html (fake HTTP provider, real renderer) under NODE_V8_COVERAGE executed 1 embeddings functions (test/organs/spawned-coverage.test.ts)"
+   },
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Service reports dimension and cache stats without loading weights; real vectors need the model download."
+   },
+   "output": "test/organs/outputs/embeddings.txt"
+  },
+  "emergence": {
+   "kind": "organ",
+   "status": "INTEGRATED",
+   "triage": "generation-path",
+   "does": "Measures how surprising a piece is (new compared with everything kept, rich over time, steady under small edits) and tracks where each piece came from.",
+   "helps": "The operator gets a surprise scorecard that moves with the text (spawned test). Whether surprise-guided work looks better needs real seats.",
+   "test": "test/organs/spawned-operator-paths.test.ts",
+   "proof": {
+    "tested": "test/organs/spawned-operator-paths.test.ts (spawned `sinter emergence score`: different text gives a different scorecard; no text is refused)",
+    "ran": "spawned bin/sinter (fake HTTP provider, no real seat): `emergence score` runs the scorer",
+    "used": "test/organs/spawned-operator-paths.test.ts: scorecard differs with the input text",
+    "wired": "operator command `sinter emergence score <text>` (bin/sinter -> EmergenceCli); not on the generate path"
+   },
+   "output": "test/organs/outputs/emergence.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Scored a real wall piece: overall 0.50 [C], perturbation resilience 0.941; says \"static output, add temporal evolution\". Readable and actionable."
+   }
+  },
+  "entropy": {
+   "kind": "generation",
+   "organ": "metabolic entropy seed",
+   "status": "INTEGRATED",
+   "test": "test/organs/generation-organs-1.test.ts",
+   "note": "RalphLoop/compost draw seeds from it; test proves seed follows harvested inputs. Fixed: EntropyCompressor decimation dropped 84% of single-char input changes (hash now binds full input)",
+   "does": "Adds a controlled amount of randomness so repeated tries do not come out the same.",
+   "helps": "Same prompt + seed: without the fix, 84% of one-character prompt changes gave an identical random seed; with it, every change moves the seed (generation-organs-1 test). Effect on final look: needs real seats.",
+   "proof": {
+    "tested": "test/organs/generation-organs-1.test.ts (perturbation test: organ state changes, recorded brief/score/route moves)",
+    "ran": "in-process real run through runProductionCliGenerate (test/organs/harness.ts); spawned-CLI + fake HTTP provider is blocked by design: provider transport needs host-owned completion authority (protected host key) that tests must not forge",
+    "used": "test/organs/generation-organs-1.test.ts: changing the organ's state changes the recorded generator brief, score or route; test fails if the organ is bypassed",
+    "wired": "reachable from the default create path (runProductionCliGenerate -> production runtime); no flag"
+   },
+   "output": "test/organs/outputs/entropy.txt",
+   "dogfood": {
+    "verdict": "fixed",
+    "data": "real",
+    "line": "`sinter entropy` now harvests the project's trend rows and compost heap into a seed and phrase; empty project says so; best-of appends the phrase."
+   }
+  },
+  "errors": {
+   "kind": "unaudited",
+   "status": "WIRED-UNTESTED",
+   "triage": "operator-path",
+   "does": "Named error types so failures say what went wrong.",
+   "helps": "Plumbing: clearer failure messages; no effect on a successful piece.",
+   "reason": "tested by unit tests only",
+   "review": "2026-12-19",
+   "gaps": [
+    "used: ConfigError proven typed through validateLLMConfig (live-group-c); a spawned run that surfaces each error class is not shown"
+   ],
+   "test": "test/errors/base.test.ts",
+   "proof": {
+    "tested": "test/errors + test/organs/live-group-c.test.ts"
+   },
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Typed generation error carries domain, context and upstream cause."
+   },
+   "output": "test/organs/outputs/errors.txt"
+  },
+  "evaluation": {
+   "kind": "unaudited",
+   "status": "WIRED-UNTESTED",
+   "reason": "ConfidenceSynthesizer feeds RalphLoop behind LIMINAL_CRITIC_AGREEMENT=1 (default off, adds a critics-diverge issue); synthesizer is tested standalone but the RalphLoop path is not yet exercised end to end; HybridJudge class itself stays public API",
+   "review": "2026-12-19",
+   "triage": "generation-path",
+   "test": "test/organs/generation-organs-1.test.ts",
+   "does": "Combines the code check and the visual check, and flags when they disagree.",
+   "helps": "With LIMINAL_CRITIC_AGREEMENT=1 the loop adds a warning to the next attempt when the code score and the visual score disagree sharply (RalphLoop path). Whether this raises final quality: needs real seats.",
+   "gaps": [
+    "ran: RalphLoop path with LIMINAL_CRITIC_AGREEMENT=1 not yet exercised by loop-carry-organ test",
+    "wired: default off (flag LIMINAL_CRITIC_AGREEMENT=1)"
+   ],
+   "proof": {
+    "tested": "test/organs/generation-organs-1.test.ts (synthesizer verdicts)"
+   },
+   "output": "test/organs/outputs/evaluation.txt",
+   "dogfood": {
+    "verdict": "fixed",
+    "data": "fake",
+    "line": "sss-score used to crash with a raw ENOENT on a fresh home; it now says which config is missing and how to fix it. The real scorecard needs real judge seats, which the run hold forbids."
+   }
+  },
+  "evolution": {
+   "kind": "organ",
+   "status": "INTEGRATED",
+   "triage": "generation-path",
+   "does": "Keeps a map of past pieces by how they behave, favours the fittest in each corner of the map, and measures how novel a new piece is so the loop can aim for fresh directions.",
+   "helps": "The operator is told when scores shift regime, and in isolation a fitter piece replaces the elite in its cell (group-a-organs test). Whether this improves a finished piece needs real seats.",
+   "test": "test/organs/spawned-operator-paths.test.ts",
+   "proof": {
+    "tested": "test/organs/spawned-operator-paths.test.ts (spawned `sinter phases --trend` flags a jump and not a flat history; `islands` groups pieces by medium)",
+    "ran": "spawned bin/sinter (fake HTTP provider, no real seat): phases and islands read a seeded score history",
+    "used": "test/organs/spawned-operator-paths.test.ts: a regime change appears only when the history jumps; test/organs/group-a-organs.test.ts covers the elite map and novelty",
+    "wired": "operator commands `sinter phases` and `sinter islands` (bin/sinter -> PopulationCli); bin/sinter now passes --trend/--window/--k-sigma/--epochs/--k through (they were rejected as unknown options)"
+   },
+   "output": "test/organs/outputs/evolution.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Archive of 10 elites (avg quality 0.613) built from the real corpus; report ranks the top five. Archive URIs are random uuids with no prompt or domain, which limits use."
+   }
+  },
+  "export": {
+   "kind": "operator",
+   "status": "INTEGRATED",
+   "triage": "operator-path",
+   "test": "test/organs/groupb-fast.test.ts",
+   "does": "Checks a finished piece's code, then writes it out as a standalone page, a script or a zip.",
+   "helps": "Operator tooling: it does not change the piece, it packages it to share. A too-small or invalid file is refused and nothing is written.",
+   "proof": {
+    "tested": "test/unit/exporter.test.ts; test/unit/export/*",
+    "ran": "groupb-fast spawns built `sinter export html|js|zip`",
+    "used": "groupb-fast: html, js and zip are written from a good file; a too-small file exits non-zero and writes nothing, so validation gates the output",
+    "wired": "`sinter export <html|js|zip> <file> -o <out>` in bin/sinter"
+   },
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Exporter wrote a standalone html file from p5 code (needs at least 120 bytes of p5 code, else a clear ValidationError)."
+   },
+   "output": "test/organs/outputs/export.txt"
+  },
+  "fix": {
+   "kind": "unaudited",
+   "status": "INTEGRATED",
+   "triage": "operator-path",
+   "does": "Reads a failing file or test and asks a model to repair it with your confirmation.",
+   "helps": "Plumbing for developers: `sinter fix` repairs code or failing tests. It does not run inside piece creation.",
+   "test": "test/organs/spawned-cli-group-c.test.ts",
+   "proof": {
+    "tested": "test/unit/fix + test/organs/spawned-cli-group-c.test.ts",
+    "ran": "spawned `sinter fix --confirm never` against the fake provider",
+    "used": "two different --error strings produce two different provider requests; the second never contains the first",
+    "wired": "default: `sinter fix` runs AutoFixOrchestrator"
+   },
+   "output": "test/organs/outputs/fix.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Runs end to end and fails readably when the model returns no repair (fake provider); path restriction to src/ is explained."
+   }
+  },
+  "footage": {
+   "kind": "unaudited",
+   "status": "UNAUDITED",
+   "does": "Checks the rights for video clips and carries their credits with the footage.",
+   "helps": "UNKNOWN: The footage workflow still needs an end-to-end test from clip selection to a credited finished piece.",
+   "reason": "organ audit 2026-11-19: not yet proven by an E2E test; each must become INTEGRATED, WRITE-ONLY (with fix PR) or be removed",
+   "review": "2026-12-19"
+  },
+  "fs": {
+   "kind": "unaudited",
+   "status": "INTEGRATED",
+   "triage": "operator-path",
+   "does": "The content store: saves pieces, notes and runs by fingerprint under ~/.sinter.",
+   "helps": "Plumbing: where finished pieces and their records live (`fs artifacts`, bridge, gallery). Pieces are kept, not changed.",
+   "proof": {
+    "tested": "test/fs + test/unit/atelier + test/organs/spawned-cli-group-c.test.ts",
+    "ran": "spawned generate twice in one state root, then in a fresh one (spawned-cli-group-c: fs test)",
+    "used": "same state root replay spends zero provider calls; fresh root calls the provider again",
+    "wired": "default: generate reads and writes the store on every run"
+   },
+   "test": "test/organs/spawned-cli-group-c.test.ts",
+   "output": "test/organs/outputs/fs.txt",
+   "dogfood": {
+    "verdict": "fixed",
+    "data": "fake",
+    "line": "`fs artifacts` lists the accepted generate instead of 'No artifacts found'."
+   }
+  },
+  "gallery": {
+   "kind": "learning",
+   "status": "INTEGRATED",
+   "triage": "operator-path",
+   "test": "test/organs/groupb-wiring.test.ts",
+   "does": "Saves a finished piece as a named seed (prompt, domain, note) and lists, shows or reloads it so a later run can start from it.",
+   "helps": "A saved seed's prompt and note are added to the next generate brief (`--seed`), so a good earlier piece steers a new one; the same generate without it has none of that text. Effect on score: needs real seats.",
+   "proof": {
+    "tested": "test/unit/seed-archive.test.ts; test/unit/gallery*.test.ts",
+    "ran": "groupb-wiring spawns built `sinter seed save|list` and `generate --seed` against the fake provider",
+    "used": "groupb-wiring: the generator brief contains the seed prompt and note with --seed and not without; an unknown seed name exits 1",
+    "wired": "`sinter seed save|show|list` and `generate --seed <name>` in bin/sinter"
+   },
+   "output": "test/organs/outputs/gallery.txt",
+   "dogfood": {
+    "verdict": "fixed",
+    "data": "fake",
+    "line": "`gallery list` shows the project and version count after an accepted generate."
+   }
+  },
+  "generators": {
+   "kind": "organ",
+   "organ": "lessons hints + best-per-domain anchor",
+   "status": "INTEGRATED",
+   "test": "test/organs/brief-organs.test.ts",
+   "does": "Builds the instructions that tell the model what to make in each medium.",
+   "helps": "Medium-specific instructions change the brief (brief-organs test). Effect on score/look: needs real seats.",
+   "proof": {
+    "tested": "test/organs/brief-organs.test.ts (perturbation test: organ state changes, recorded brief/score/route moves)",
+    "ran": "in-process real run through runProductionCliGenerate (test/organs/harness.ts); spawned-CLI + fake HTTP provider is blocked by design: provider transport needs host-owned completion authority (protected host key) that tests must not forge",
+    "used": "test/organs/brief-organs.test.ts: changing the organ's state changes the recorded generator brief, score or route; test fails if the organ is bypassed",
+    "wired": "reachable from the default create path (runProductionCliGenerate -> production runtime); no flag"
+   },
+   "output": "test/organs/outputs/generators.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "fake",
+    "line": "crucible-ascii generate accepted at 0.81; the domain generator ran through the real pipeline."
+   }
+  },
+  "git": {
+   "kind": "plumbing",
+   "status": "INTEGRATED",
+   "triage": "operator-path",
+   "test": "test/organs/git-per-run-organ.test.ts",
+   "does": "Saves each attempt of a run on its own branch of the project history so any attempt can be found again.",
+   "helps": "Plumbing: keeps a history of attempts, does not change the piece or its score. Off unless SINTER_GIT_PER_RUN=1 because it switches the caller's branch; before this change nothing could turn it on (git-per-run-organ test).",
+   "proof": {
+    "tested": "test/organs/git-per-run-organ.test.ts + test/git/GitIntegration.test.ts",
+    "ran": "in-process real run through runProductionCliGenerate (test/organs/harness.ts); spawned-CLI + fake HTTP provider is blocked by design (host-owned completion authority); real RalphLoop in a real temp git repo creates a liminal/ branch",
+    "used": "git-per-run-organ test fails when gitConfigFromEnv is bypassed (mutation run 2026-11-18: branch list empty)",
+    "wired": "named flag SINTER_GIT_PER_RUN=1 (LIMINAL_ alias) via src/core/LoopConfig.ts gitConfigFromEnv; default off because it changes the caller's checked-out branch"
+   },
+   "output": "test/organs/outputs/git.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Reports branch and clean tree. Trivial but correct."
+   }
+  },
+  "guardrails": {
+   "kind": "generation",
+   "organ": "photosensitivity + generated-code guard",
+   "status": "INTEGRATED",
+   "test": "test/organs/generation-organs-1.test.ts",
+   "note": "FlashMeasure via AccessibilityGuardrails; GeneratedCodeGuard on the generator path; strobe/calm/empty-capture and escape perturbations",
+   "does": "Blocks pieces that flash dangerously or contain unsafe code.",
+   "helps": "Strobing and unsafe code are blocked before a piece is accepted (generation-organs-1 test shows a flashing piece judged unsafe). Effect on taste: none claimed.",
+   "proof": {
+    "tested": "test/organs/generation-organs-1.test.ts (perturbation test: organ state changes, recorded brief/score/route moves)",
+    "ran": "in-process real run through runProductionCliGenerate (test/organs/harness.ts); spawned-CLI + fake HTTP provider is blocked by design: provider transport needs host-owned completion authority (protected host key) that tests must not forge",
+    "used": "test/organs/generation-organs-1.test.ts: changing the organ's state changes the recorded generator brief, score or route; test fails if the organ is bypassed",
+    "wired": "reachable from the default create path (runProductionCliGenerate -> production runtime); no flag"
+   },
+   "output": "test/organs/outputs/guardrails.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Mud-camo check on a real reel frame: lightP98 0.99, chromaP95 0.043, muddyHueShare 0.18, overmixed=false. Clear verdict."
+   }
+  },
+  "harness": {
+   "kind": "memory",
+   "status": "INTEGRATED",
+   "test": "test/organs/memory-organ.test.ts",
+   "does": "Remembers past runs and feeds relevant memory into the next brief.",
+   "helps": "Stored memory changes the brief (memory-organ test). Effect on score/look: needs real seats.",
+   "proof": {
+    "tested": "test/organs/memory-organ.test.ts (perturbation test: organ state changes, recorded brief/score/route moves)",
+    "ran": "in-process real run through runProductionCliGenerate (test/organs/harness.ts); spawned-CLI + fake HTTP provider is blocked by design: provider transport needs host-owned completion authority (protected host key) that tests must not forge",
+    "used": "test/organs/memory-organ.test.ts: changing the organ's state changes the recorded generator brief, score or route; test fails if the organ is bypassed",
+    "wired": "reachable from the default create path (runProductionCliGenerate -> production runtime); no flag"
+   },
+   "output": "test/organs/outputs/harness.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "fake",
+    "line": "d9-html generate accepted at 0.80 through the real harness and renderer."
+   }
+  },
+  "identity": {
+   "kind": "unaudited",
+   "status": "UNAUDITED",
+   "reason": "group A audit 2026-11-19: proofs below are what exists; gaps are exact",
+   "review": "2026-12-19",
+   "triage": "generation-path",
+   "does": "Decides who is allowed to do what: names each model seat, checks it may take a role, issues and verifies signed reservations and funding proofs, and blocks any model call that lacks them.",
+   "helps": "It does not shape the picture; it decides whether a model call may happen at all. The spawned run needed it to reach the fake provider (46 functions ran), and without host authority the call is refused (the block seen earlier). Effect on the look: not applicable.",
+   "gaps": [
+    "used: no test shows a different role decision changing which seat runs"
+   ],
+   "test": "test/integration/cli-provider-effect-authority.test.ts",
+   "proof": {
+    "tested": "test/integration/cli-provider-effect-authority.test.ts; test/unit/creative-run/CreativeRunCoordinator.test.ts",
+    "ran": "spawned-cli: bin/sinter generate --domain html (fake HTTP provider, real renderer) under NODE_V8_COVERAGE executed 46 identity functions (test/organs/spawned-coverage.test.ts)",
+    "used": "a call without host authority is refused (spawned ledger run: \"Provider transport requires Liminal product command authority\", no request reaches the provider)"
+   },
+   "note": "capabilityProbe is wired and proven through `sinter capabilities <probes.json>` (spawned-wiring test).",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Known model alias resolves; an invented one fails closed."
+   },
+   "output": "test/organs/outputs/identity.txt"
+  },
+  "improvement": {
+   "kind": "organ",
+   "status": "INTEGRATED",
+   "triage": "operator-path",
+   "does": "Watches the score history for a plateau, a decline or a weak domain and writes a plain suggestion for what to try next; can also ask a model to improve a sketch.",
+   "helps": "A flat score history gives a plateau suggestion with an action and a climbing one does not (group-a-organs test); the command prints the report spawned. Whether acting on it improves a piece needs real seats.",
+   "test": "test/organs/spawned-operator-paths.test.ts",
+   "proof": {
+    "tested": "test/organs/spawned-operator-paths.test.ts (spawned `sinter improve` writes the harden report with proposals)",
+    "ran": "spawned bin/sinter (fake HTTP provider, no real seat): `improve` runs",
+    "used": "test/organs/spawned-operator-paths.test.ts: report lists proposals; unit coverage in test/organs/group-a-organs.test.ts shows a flat history gives a plateau suggestion and a climbing one does not",
+    "wired": "operator command `sinter improve` (bin/sinter)"
+   },
+   "output": "test/organs/outputs/improvement.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Self-heal scan lists a ranked proposal (prove or hide ML feature value) and which ML labels lack passing proofs. Useful to-do list."
+   }
+  },
+  "intuition": {
+   "kind": "unaudited",
+   "status": "NOT-WIRED",
+   "reason": "Quarantine RCA 2026-11-19. src/runtime-core/authority/control.ts:63 marks src/intuition/MemoryConsolidator.ts:activation as legacy-semantic-history/quarantined-history; it was migration-pending (#799) until commit 309e51529 (feat(knowledge): separate doctrine from empirical learning) which moved activation authority to DreamKnowledgeActivation (sealed policy, repetitions + independent studies, signed snapshots). The file is flagged because it constructs EvidenceConsolidationCoordinator, and IntuitionEngine (which builds it) is only reachable from legacy RalphLoop, which ALSO writes learned state (recordOutcome + save to ~/.sinter/intuition) and emits a hint that names a model ('model=X, strategy=Y'). What it guards: learned semantic patterns entering a governed decision without admission through the knowledge-activation authority. The provider grant (runProductionCliCycleEffect/EvaluatorScope) authorises provider calls, not knowledge activation, so it does not cover this; wiring intuition into the generate brief needs an owner decision (route its outcomes through CreativeKnowledgeConsolidator/DreamKnowledgeActivation, or retire it). Quarantine NOT bypassed.",
+   "review": "2026-12-19",
+   "triage": "generation-path",
+   "does": "Keeps a gut feeling for quality: remembers past pieces, compares a new one to known-good patterns, predicts its score from how its code behaves, and forgets old memories on a schedule.",
+   "helps": "UNKNOWN: quarantined, so it cannot help a piece today. Its only hint format also ranks models by name, which the seat-config rule forbids.",
+   "gaps": [
+    "wired: quarantined by src/runtime-core/authority/control.ts; no operator command or governed path may reach it",
+    "ran: no spawned command executes it",
+    "used: legacy RalphLoop useIntuition only"
+   ],
+   "test": null,
+   "proof": {},
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Forgetting curve: a 90-day-old memory retains less than a 1-day-old one."
+   },
+   "output": "test/organs/outputs/intuition.txt"
+  },
+  "learning": {
+   "kind": "organ",
+   "organ": "retrieval exemplars (SINTER_EXEMPLARS_FILE)",
+   "status": "INTEGRATED",
+   "test": "test/organs/brief-organs.test.ts",
+   "note": "art-batch strip fixed in run_batch.py; test/art-batch/test_run_batch_exemplars.py",
+   "does": "Learns what the owner likes and does not like from their picks.",
+   "helps": "Owner likes change what exemplars the next batch sees (brief-organs test). Effect on score/look: needs real seats.",
+   "proof": {
+    "tested": "test/organs/brief-organs.test.ts (perturbation test: organ state changes, recorded brief/score/route moves)",
+    "ran": "in-process real run through runProductionCliGenerate (test/organs/harness.ts); spawned-CLI + fake HTTP provider is blocked by design: provider transport needs host-owned completion authority (protected host key) that tests must not forge",
+    "used": "test/organs/brief-organs.test.ts: changing the organ's state changes the recorded generator brief, score or route; test fails if the organ is bypassed",
+    "wired": "reachable from the default create path (runProductionCliGenerate -> production runtime); no flag"
+   },
+   "output": "test/organs/outputs/learning.txt",
+   "dogfood": {
+    "verdict": "fixed",
+    "data": "real",
+    "line": "taste eval on 217 real wall votes: grouped CV AUC 0.866; judge prompt-fit AUC vs votes only 0.563."
+   }
+  },
+  "ledger": {
+   "kind": "unaudited",
+   "status": "INTEGRATED",
+   "triage": "operator-path",
+   "does": "Tracks build tasks one by one (intake, run, verify) so self-hosted work has a history.",
+   "helps": "Does not change a piece; it keeps the history of tasks that improve S1NTR itself (what was tried, verified, accepted).",
+   "test": "test/integration/ledger-cli.test.ts",
+   "proof": {
+    "tested": "test/integration/ledger-cli.test.ts: load, list, show, accept, status against a real store",
+    "ran": "test/organs/groupb-more.test.ts spawns bin/sinter ledger list/load/status on a temp project",
+    "used": "test/organs/groupb-more.test.ts: the same list command says \"No tasks found\" before `ledger load` and shows ORG-001 after",
+    "wired": "sinter ledger <list|load|status|run|verify|accept|...> (the task ledger; telemetry events are a different module)"
+   },
+   "output": "test/organs/outputs/ledger.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Loaded a real task, listed it, counted it. Clear."
+   }
+  },
+  "llm": {
+   "kind": "unaudited",
+   "status": "WIRED-UNTESTED",
+   "triage": "generation-path",
+   "does": "Talks to the model providers, counts spend, caches repeat answers and builds prompts.",
+   "helps": "Every piece goes through it (LLMClient, ProviderFactory, budget ledger); caching skips repeat calls. Effect on quality is not measured. ModelConfig.ts is public-index only. src/llm is owned by the LFM3 work (#1423): no edits here.",
+   "reason": "owned by #1423; organ proof for cache and budget needs fake provider (PR #1933 helper)",
+   "review": "2026-12-19",
+   "gaps": [
+    "used: cache hit through LLMClient not shown (CacheManager and ActionProviderBudget proven as classes in live-group-c; budget through RalphLoop in test/integration/wave8-r1-action-budget.test.js); an LLMClient seam would need src/llm edits, owned by #1423"
+   ],
+   "test": "test/unit/llm/provider-adapters.test.ts",
+   "proof": {
+    "tested": "test/unit/llm + test/llm/provider-budget-all-adapters.test.ts + test/organs/live-group-c.test.ts",
+    "ran": "spawned bin/sinter against the fake provider (spawned-cli-group-c)"
+   },
+   "output": "test/organs/outputs/llm.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "fake",
+    "line": "Generator and evaluator calls logged with timing against the fake provider."
+   }
+  },
+  "market": {
+   "kind": "operator",
+   "status": "INTEGRATED",
+   "triage": "operator-path",
+   "test": "test/organs/groupb-fast.test.ts",
+   "does": "Runs one real generation through the provider path and writes a smoke receipt saying whether usable code came back.",
+   "helps": "Operator tooling: it does not change a piece; it tells the owner whether a provider can still produce usable code. A non-code answer fails with a blocker and exit 1.",
+   "proof": {
+    "tested": "test/unit/market/*; groupb-fast",
+    "ran": "groupb-fast spawns built `sinter market smoke` against the fake provider",
+    "used": "groupb-fast: usable p5 code writes a passing receipt and exits 0; a non-code answer writes a failing receipt and exits 1",
+    "wired": "`sinter market smoke` in bin/sinter; readiness also reaches the release gate"
+   },
+   "output": "test/organs/outputs/market.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Readiness JSON says ownerReleaseReady=false because product-campaign-origin-invalid; exit code 2 follows. Honest and specific."
+   }
+  },
+  "media": {
+   "kind": "operator",
+   "status": "INTEGRATED",
+   "triage": "operator-path",
+   "test": "test/organs/groupb-wiring.test.ts",
+   "does": "Loads a reference picture, checks it is a real image, stages a copy and writes a receipt with its hash.",
+   "helps": "A reference image is checked before it reaches the brief and leaves a receipt (type, hash, role); a fake image is refused. The reference's effect on the brief comes from src/reverse (groupb-more).",
+   "proof": {
+    "tested": "test/unit/media/*",
+    "ran": "groupb-wiring spawns `generate --ref` with a real png and a fake one",
+    "used": "groupb-wiring: reference.receipt.json is written for the real image and absent without --ref; the fake image exits 1",
+    "wired": "`generate --ref <image>` in bin/sinter writes the receipt"
+   },
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Image bytes sniffed as png/jpeg; plain text rejected; sha256 stable."
+   },
+   "output": "test/organs/outputs/media.txt"
+  },
+  "music": {
+   "kind": "generation",
+   "status": "INTEGRATED",
+   "triage": "generation-path",
+   "test": "test/organs/groupb-wiring.test.ts",
+   "does": "Writes strudel music code from a prompt; the model goes first, and a built-in pattern is used only when the caller allows the fallback.",
+   "helps": "With `--theory` the brief carries a key, scale, rhythm and chord plan, so the model is told how to write the music; without it none of that is sent. The fallback pattern's key follows the mood. Prompt-to-music quality with a real model: needs real seats.",
+   "proof": {
+    "tested": "test/unit/music/*; test/unit/generate-music.test.ts",
+    "ran": "groupb-wiring spawns `live-music` against the fake provider, with and without --theory",
+    "used": "groupb-wiring: theory text is present in the model brief only with --theory; with the model failing, the fallback runs only when allowed and follows the mood",
+    "wired": "`sinter live-music --theory` in bin/sinter (off by default)"
+   },
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Euclidean rhythm (16,5) and its rotation give two different patterns."
+   },
+   "output": "test/organs/outputs/music.txt"
+  },
+  "musicToVisual": {
+   "kind": "layered-organ",
+   "status": "INTEGRATED",
+   "test": "test/organs/groupb-cli.test.ts",
+   "does": "Makes music first, measures its tempo and spectrum, then asks for visuals that follow that music.",
+   "helps": "With `live-music --music-to-visual` the visual request carries the measured tempo and a 16-band spectrum; without the flag it carries none (groupb-cli, spawned CLI + fake provider). Whether the picture looks better: needs real seats.",
+   "proof": {
+    "tested": "test/unit/generateMusicToVisual.test.ts + groupb-cli.test.ts",
+    "ran": "spawned built `bin/sinter live-music --music-to-visual` against the fake HTTP provider",
+    "used": "groupb-cli.test.ts: the visual request contains 'Audio context: BPM=.., FFT length=16' only with the flag",
+    "wired": "named flag `sinter live-music --music-to-visual` (opt-in, added in this PR); also the organism loop (`--mode organism`)"
+   },
+   "output": "test/organs/outputs/musicToVisual.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "fake",
+    "line": "live-music --music-to-visual measured 96 BPM and fed it to the visual request; wrote strudel.js and hydra.js (fake model, so content is a stand-in)."
+   }
+  },
+  "nodeprompt": {
+   "kind": "organ",
+   "status": "INTEGRATED",
+   "triage": "operator-path",
+   "does": "Turns a set of connected concepts into one written prompt (the only part left after the spatial editor was removed).",
+   "helps": "Connected concepts become part of the written brief (spawned test). Effect on a finished piece needs real seats.",
+   "test": "test/organs/spawned-wiring.test.ts",
+   "proof": {
+    "tested": "test/organs/spawned-wiring.test.ts (spawned `generate --concept-graph`)",
+    "ran": "spawned bin/sinter (fake HTTP provider, no real seat): generate with a concept graph",
+    "used": "test/organs/spawned-wiring.test.ts: the graph changes the provider request and a bypass removes it",
+    "wired": "bin/sinter generate --concept-graph -> src/nodeprompt enrichPromptFromGraphFile"
+   },
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "A two-node graph becomes one readable prompt."
+   },
+   "output": "test/organs/outputs/nodeprompt.txt"
+  },
+  "perception": {
+   "kind": "organ",
+   "organ": "render evidence perception",
+   "status": "INTEGRATED",
+   "test": "test/organs/score-organs.test.ts",
+   "does": "Looks at the rendered piece and measures what is actually on screen.",
+   "helps": "Measurements of the rendered frame feed the score (score-organs test). On/off effect on final art: needs real seats.",
+   "proof": {
+    "tested": "test/organs/score-organs.test.ts (perturbation test: organ state changes, recorded brief/score/route moves)",
+    "ran": "in-process real run through runProductionCliGenerate (test/organs/harness.ts); spawned-CLI + fake HTTP provider is blocked by design: provider transport needs host-owned completion authority (protected host key) that tests must not forge",
+    "used": "test/organs/score-organs.test.ts: changing the organ's state changes the recorded generator brief, score or route; test fails if the organ is bypassed",
+    "wired": "reachable from the default create path (runProductionCliGenerate -> production runtime); no flag"
+   },
+   "output": "test/organs/outputs/perception.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Exports the human-perception thresholds (min contrast, flicker limit, line length) other organs enforce. Constants, not a run."
+   }
+  },
+  "plugins": {
+   "kind": "unaudited",
+   "status": "UNAUDITED",
+   "does": "Discovers plugin manifests and refuses production host imports.",
+   "helps": "The production loader refuses host module execution, including for an entry with a matching sidecar.",
+   "reason": "Production plugin execution remains unwired.",
+   "review": "2026-12-19",
+   "test": "test/organs/plugins-governed-organ.test.ts",
+   "output": "test/organs/outputs/plugins.txt",
+   "dogfood": {
+    "verdict": "fixed",
+    "data": "real",
+    "line": "`sinter plugins status|pin` lists plugins, shows execution is refused by default, and writes a sidecar by hash. The production loader still refuses host imports."
+   }
+  },
+  "product": {
+   "kind": "operator",
+   "status": "INTEGRATED",
+   "triage": "operator-path",
+   "test": "test/organs/groupb-fast.test.ts",
+   "does": "Builds the public gallery summary from archive cells (ranked, grouped by provenance) and walks the demo scenarios.",
+   "helps": "Operator and visitor tooling: it does not change a piece. The gallery ranks by quality and groups by provenance; `sinter demo` shows the loop in eight steps.",
+   "proof": {
+    "tested": "groupb-fast; groupb-more",
+    "ran": "groupb-fast spawns `report garden`; groupb-more spawns `sinter demo creative-codex`",
+    "used": "groupb-fast: cells are ranked by quality and grouped by provenance, and the garden report prints the gallery line",
+    "wired": "`sinter report garden` and `sinter demo` in bin/sinter"
+   },
+   "output": "test/organs/outputs/product.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Creative-codex demo ran 8 steps, passed; shows the archive, garden and taste-steer flow without a model."
+   }
+  },
+  "prompts": {
+   "kind": "unaudited",
+   "status": "UNAUDITED",
+   "reason": "group A audit 2026-11-19: proofs below are what exists; gaps are exact",
+   "review": "2026-12-19",
+   "triage": "generation-path",
+   "does": "Keeps every prompt template in one library, picks the wording for the model in use, and holds the generation-side craft contract that mirrors the judge's rubric.",
+   "helps": "The judge's score-band wording reaches the judge request (spawned-cli-organs test). The craft contract is NOT in the generator brief the fake provider received, so its benefit to a piece is not shown. Needs real seats.",
+   "gaps": [
+    "used: CraftContract text is absent from the governed generate brief (captured from the fake provider); no test shows it changing a piece",
+    "wired: CRAFT_CONTRACT is imported by RalphLoop and PromptBuilder, but the governed generate brief does not contain it"
+   ],
+   "test": "test/organs/spawned-cli-organs.test.ts",
+   "proof": {
+    "tested": "test/prompts/prompt-library.test.ts; test/prompts/prompt-validation.test.ts",
+    "ran": "spawned-cli: bin/sinter generate --domain html (fake HTTP provider, real renderer) under NODE_V8_COVERAGE executed 6 prompts functions (test/organs/spawned-coverage.test.ts)",
+    "used": "test/organs/spawned-cli-organs.test.ts: judge request carries the score bands"
+   },
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Evaluation prompt embeds the code and domain; p5 and shader prompts differ."
+   },
+   "output": "test/organs/outputs/prompts.txt"
+  },
+  "quality": {
+   "kind": "generation",
+   "organ": "creative proof gate",
+   "status": "INTEGRATED",
+   "test": "test/organs/generation-organs-1.test.ts",
+   "note": "owner-review capture (cli/OwnerReviewCapture) runs it over the captured frames with bytes re-hashed; only the technical claim is requested",
+   "does": "Checks the evidence for a piece (real frames, real files) before it is called good.",
+   "helps": "A piece captured for owner review now carries a checked proof of its frames (generation-organs-1 test). Effect on the look of the art: none; it protects against claiming quality without evidence.",
+   "proof": {
+    "tested": "test/organs/generation-organs-1.test.ts (perturbation test: organ state changes, recorded brief/score/route moves)",
+    "ran": "in-process real run through runProductionCliGenerate (test/organs/harness.ts); spawned-CLI + fake HTTP provider is blocked by design: provider transport needs host-owned completion authority (protected host key) that tests must not forge",
+    "used": "test/organs/generation-organs-1.test.ts: changing the organ's state changes the recorded generator brief, score or route; test fails if the organ is bypassed",
+    "wired": "reachable from the default create path (runProductionCliGenerate -> production runtime); no flag"
+   },
+   "output": "test/organs/outputs/quality.txt",
+   "dogfood": {
+    "verdict": "fixed",
+    "data": "real",
+    "line": "`quality run` judged a real candidate and printed PASS with the suite verdict."
+   }
+  },
+  "release": {
+   "kind": "unaudited",
+   "status": "INTEGRATED",
+   "triage": "operator-path",
+   "does": "Decides whether a candidate build or a changed garden policy is safe to promote, and rolls a promoted change back.",
+   "helps": "Does not change a piece directly; it stops a policy change that makes quality worse from being promoted and lets the owner undo one. Garden promotion gate, rollback controller and candidate builder are now reached by `ship` (stacked from #1914).",
+   "proof": {
+    "tested": "test/integration/cli-ship-garden.test.ts and test/unit/release/*: stage, gated promote, rollback, unique ids",
+    "ran": "cli-ship-garden spawns bin/sinter ship garden/rollback; test/organs/groupb-more.test.ts spawns release gate --dry-run",
+    "used": "cli-ship-garden: a promotion that regresses a metric is blocked and the change stays staged; rollback flips promoted to rolled-back on disk; groupb-fast: deleting a domain implementation file makes `release gate --dry-run --repo-root` fail and exit 1",
+    "wired": "sinter ship <garden|rollback> (manifest at .sinter/garden/policy-manifest.json) and sinter release gate [--dry-run]"
+   },
+   "test": "test/integration/cli-ship-garden.test.ts",
+   "output": "test/organs/outputs/release.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Release gate dry-run returns ready=true at level-6-candidate with per-check evidence (6/6 self-improvement, 13/13 domains)."
+   }
+  },
+  "render": {
+   "kind": "organ",
+   "organ": "renderer + render-measure gate",
+   "status": "INTEGRATED",
+   "test": "test/organs/score-organs.test.ts",
+   "does": "Draws the piece in a real browser so it can be looked at and measured.",
+   "helps": "Mud-camo frames are capped at 0.29 and alive glitch is lifted to the 0.4 floor by the real render path (score-organs test): this changes which pieces are accepted.",
+   "proof": {
+    "tested": "test/organs/score-organs.test.ts (perturbation test: organ state changes, recorded brief/score/route moves)",
+    "ran": "in-process real run through runProductionCliGenerate (test/organs/harness.ts); spawned-CLI + fake HTTP provider is blocked by design: provider transport needs host-owned completion authority (protected host key) that tests must not forge",
+    "used": "test/organs/score-organs.test.ts: changing the organ's state changes the recorded generator brief, score or route; test fails if the organ is bypassed",
+    "wired": "reachable from the default create path (runProductionCliGenerate -> production runtime); no flag"
+   },
+   "output": "test/organs/outputs/render.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "fake",
+    "line": "Real Chromium render of the trace-router svg: static, 0.29 rejected although the wall judge gave it 0.76. A true disagreement worth knowing."
+   }
+  },
+  "reporting": {
+   "kind": "operator",
+   "status": "INTEGRATED",
+   "triage": "operator-path",
+   "test": "test/organs/groupb-fast.test.ts",
+   "does": "Prints plain-language reports (cognition, garden, provenance, readiness) read from the live registries and the garden policy manifest.",
+   "helps": "Operator tooling: it does not change a piece; it tells the owner what changed in the system and whether it is ready. The provenance and readiness reports show a staged garden change only after it exists.",
+   "proof": {
+    "tested": "test/unit/reporting/CognitiveArchitectureAtlas.test.ts",
+    "ran": "groupb-cli spawns `report cognition`; groupb-fast spawns `report garden|provenance|readiness`",
+    "used": "groupb-fast: a report prints no policy change before one is staged and lists it after; the garden report prints the gallery line",
+    "wired": "`sinter report <cognition|garden|provenance|readiness>` in bin/sinter (the last three read the garden policy manifest)"
+   },
+   "output": "test/organs/outputs/reporting.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Readiness 83% and fails only on taste alignment 0%; cognition report lists the organs; provenance says stable. fitness report is empty (0 observations) because the governed path never writes them."
+   }
+  },
+  "reverse": {
+   "kind": "organ",
+   "status": "INTEGRATED",
+   "triage": "generation-path",
+   "does": "Lets the owner hand S1NTR reference music, pictures or a drawn energy shape and writes what it found into the brief, then checks the finished piece fits the length and shape.",
+   "helps": "Different reference shapes write different instructions into the brief (spawned test). Effect on the finished music needs real seats.",
+   "test": "test/organs/spawned-operator-paths.test.ts",
+   "proof": {
+    "tested": "test/organs/spawned-operator-paths.test.ts (spawned `generate --arc --duration`)",
+    "ran": "spawned bin/sinter (fake HTTP provider, no real seat): generate with an arc",
+    "used": "test/organs/spawned-operator-paths.test.ts: the provider request carries the Reverse-mode brief, a different arc changes it, and no flag leaves it out",
+    "wired": "bin/sinter generate --arc/--duration -> brief"
+   },
+   "output": "test/organs/outputs/reverse.txt",
+   "dogfood": {
+    "verdict": "broken",
+    "data": "real",
+    "line": "rescue found pool=0 in the generate output dir (governed rejects are not in the layout it scans); reverse itself was not run on audio in this pass."
+   }
+  },
+  "routing": {
+   "kind": "learning",
+   "organ": "generator bandit",
+   "status": "INTEGRATED",
+   "test": "test/organs/routing-organ.test.ts",
+   "note": "writer: owner-accepted review -> routing/OwnerRoutingOutcome (persisted + rehydrated); reader: GeneratorRegistry.route behind LIMINAL_ROUTING_BANDIT=1 (default off)",
+   "does": "Chooses which model gets which job, using how past jobs went.",
+   "helps": "Owner-accepted outcomes persist and change which model is routed next (routing-organ test). Effect on the art: needs real seats.",
+   "proof": {
+    "tested": "test/organs/routing-organ.test.ts (perturbation test: organ state changes, recorded brief/score/route moves)",
+    "ran": "in-process real run through runProductionCliGenerate (test/organs/harness.ts); spawned-CLI + fake HTTP provider is blocked by design: provider transport needs host-owned completion authority (protected host key) that tests must not forge",
+    "used": "test/organs/routing-organ.test.ts: changing the organ's state changes the recorded generator brief, score or route; test fails if the organ is bypassed",
+    "wired": "reachable from the default create path (runProductionCliGenerate -> production runtime); no flag"
+   },
+   "output": "test/organs/outputs/routing.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "fake",
+    "line": "Model audition dry-run says UNVERIFIED, not a real promotion pass: honest, but not a real result."
+   }
+  },
+  "runtime-core": {
+   "kind": "spine",
+   "status": "INTEGRATED",
+   "test": "test/organs/brief-organs.test.ts",
+   "does": "The signed, checked path every real run goes through from request to saved piece.",
+   "helps": "Every run passes through it; the organ harness runs one real generation through it. Direct effect on look: none; it makes results signed and checkable.",
+   "proof": {
+    "tested": "test/organs/brief-organs.test.ts (perturbation test: organ state changes, recorded brief/score/route moves)",
+    "ran": "in-process real run through runProductionCliGenerate (test/organs/harness.ts); spawned-CLI + fake HTTP provider is blocked by design: provider transport needs host-owned completion authority (protected host key) that tests must not forge",
+    "used": "test/organs/brief-organs.test.ts: changing the organ's state changes the recorded generator brief, score or route; test fails if the organ is bypassed",
+    "wired": "reachable from the default create path (runProductionCliGenerate -> production runtime); no flag"
+   },
+   "output": "test/organs/outputs/runtime-core.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "fake",
+    "line": "mainframe-boot: governed request-to-saved-piece path ran; rejected 0.29 as static."
+   }
+  },
+  "sandbox": {
+   "kind": "unaudited",
+   "status": "INTEGRATED",
+   "triage": "operator-path",
+   "does": "Opens suspicious art code in a locked room with no network before it is shown or scored.",
+   "helps": "Plumbing for safety: when LIMINAL_NETWORK_ISOLATED_RENDER=true, p5 code that cannot run without network is rejected before scoring (plumbing-group-c test, sandbox mocked). Does not change a normal piece.",
+   "test": "test/organs/live-group-c.test.ts",
+   "proof": {
+    "tested": "test/unit/sandbox.test.ts + test/organs/live-group-c.test.ts",
+    "ran": "real runInSandbox with headless Chromium (live-group-c); this host blocks unprivileged user namespaces so the documented disableSandbox opt-out was used, Chromium OS sandbox itself not exercised here",
+    "used": "clean sketch completes, throwing sketch reports its error; plumbing-group-c shows the render gate calls it",
+    "wired": "flag LIMINAL_NETWORK_ISOLATED_RENDER=true, p5 only (default off)"
+   },
+   "output": "test/organs/outputs/sandbox.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "fake",
+    "line": "Generate log shows the sandbox decision: Chromium has no usable OS sandbox on this host and runs unsandboxed unless chosen on purpose."
+   }
+  },
+  "scavenger": {
+   "kind": "organ",
+   "status": "INTEGRATED",
+   "triage": "generation-path",
+   "does": "Gathers reusable fragments from earlier projects so new work can borrow them.",
+   "helps": "The operator can browse the archive and draw a constraint or prompt seed (spawned test). Whether seeds improve a piece needs real seats.",
+   "test": "test/organs/spawned-wiring.test.ts",
+   "proof": {
+    "tested": "test/organs/spawned-wiring.test.ts (spawned `sinter fragments categories|constraint|seed|search`)",
+    "ran": "spawned bin/sinter (fake HTTP provider, no real seat): fragments commands load the archive",
+    "used": "test/organs/spawned-wiring.test.ts: search \"mirror\" finds theory-shattered-mirror; a bad subcommand is refused",
+    "wired": "operator command `sinter fragments` (bin/sinter -> FragmentArchive); fragments.json now ships in dist"
+   },
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Fragment archive loads and returns fragments by category."
+   },
+   "output": "test/organs/outputs/scavenger.txt"
+  },
+  "security": {
+   "kind": "unaudited",
+   "status": "INTEGRATED",
+   "triage": "operator-path",
+   "does": "Checks addresses, paths, imports and request limits so art code cannot reach what it should not.",
+   "helps": "Plumbing for safety; blocks bad input, does not change a good piece. RateLimiter.ts has no caller (TuiBridgeServer carries its own copy).",
+   "test": "test/organs/live-group-c.test.ts",
+   "proof": {
+    "tested": "test/security + test/organs/live-group-c.test.ts",
+    "ran": "real TuiBridgeServer over HTTP on an ephemeral port (live-group-c)",
+    "used": "rate limit env 2 returns 429 on the third request; 50 returns none, so bypassing the shared limiter fails the test",
+    "wired": "default: TuiBridgeServer imports security/RateLimiter (private copy removed)"
+   },
+   "output": "test/organs/outputs/security.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Import validator allows project-relative paths and denies ../../etc/passwd and /etc/shadow. Correct."
+   }
+  },
+  "shared": {
+   "kind": "unaudited",
+   "status": "NOT-WIRED",
+   "triage": "not-wired-yet",
+   "does": "Tiny shared helpers: an atomic file write and a microphone error message.",
+   "helps": "Plumbing. fsAtomic duplicates utils/atomicWrite; micPermission serves the voice feature only.",
+   "reason": "duplicate and voice-only helpers; propose merge, do not delete silently",
+   "review": "2026-12-19",
+   "gaps": [
+    "ran: fsAtomic now re-exports utils/atomicWrite (one implementation, 8 importers); micPermission only voice; no spawned run per helper"
+   ],
+   "test": "test/unit/shared/micPermission.test.ts",
+   "proof": {
+    "tested": "test/unit/shared + test/unit/atelier/atomic-writes.test.ts"
+   },
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Atomic write twice, read back the second content, no temp file left."
+   },
+   "output": "test/organs/outputs/shared.txt"
+  },
+  "site": {
+   "kind": "unaudited",
+   "status": "WIRED-UNTESTED",
+   "reason": "dry-run evolve spawned (groupb-cli); a live evolve needs a provider",
+   "review": "2026-12-19",
+   "triage": "not-wired-yet",
+   "does": "Keeps a living web page whose regions are re-made over time.",
+   "helps": "Changes the website, not a single piece. Seed plus a dry-run evolve pass run end to end; whether evolved regions look better: needs real seats.",
+   "gaps": [
+    "used: dry-run only; the evolved region changing needs a provider"
+   ],
+   "test": "test/organs/groupb-cli.test.ts",
+   "proof": {
+    "tested": "test/unit/site/SlotManager.test.ts, test/unit/cli/SiteCommand.test.ts",
+    "ran": "spawned `site seed` then `site evolve --once --dry-run` (groupb-cli.test.ts)"
+   },
+   "output": "test/organs/outputs/site.txt",
+   "dogfood": {
+    "verdict": "fixed",
+    "data": "real",
+    "line": "`site seed` prints each seeded slot and the state file; a repeat says nothing to seed."
+   }
+  },
+  "swarm": {
+   "kind": "unaudited",
+   "status": "WIRED-UNTESTED",
+   "reason": "group A audit 2026-11-19: proofs below are what exists; gaps are exact",
+   "review": "2026-12-19",
+   "triage": "generation-path",
+   "does": "Several expert personas make candidate pieces, vote on them, and a router learns which persona or model tends to win; also holds the shorthand the personas speak.",
+   "helps": "UNKNOWN: the governed generate run does not form a swarm (2 functions ran), so no on/off comparison on a piece exists. Needs real seats.",
+   "gaps": [
+    "wired: ModelRouter.ts has no honest feed: its admission needs rendered, owner-accepted evidence signed by the authority, and `swarm run` is refused without product command authority (#1970); it also duplicates the production GeneratorBanditRouter",
+    "used: no test shows the vote or the router changing the chosen piece"
+   ],
+   "test": null,
+   "proof": {
+    "tested": "test/unit/NotationTranslator.test.ts; test/unit/ralph-loop.test.ts",
+    "ran": "spawned-cli: bin/sinter generate --domain html (fake HTTP provider, real renderer) under NODE_V8_COVERAGE executed 2 swarm functions (test/organs/spawned-coverage.test.ts)",
+    "wired": "NotationTranslator: bin/sinter notation -> src/swarm/NotationTranslator"
+   },
+   "note": "NotationTranslator is wired and proven through `sinter notation encode|decode` (spawned-wiring test).",
+   "output": "test/organs/outputs/swarm.txt",
+   "dogfood": {
+    "verdict": "fixed",
+    "data": "real",
+    "line": "`swarm sessions` names the directory it searched when there are none."
+   }
+  },
+  "telemetry": {
+   "kind": "diagnostic-organ",
+   "status": "INTEGRATED",
+   "test": "test/organs/groupb-cli.test.ts",
+   "does": "Writes a dated record of every model call and its outcome so a run can be explained afterwards.",
+   "helps": "Does not change the piece. A real generate leaves events that `ledger query` reads back; a fresh home has none (groupb-cli). Serves the diagnosis and learning organs; no direct score effect.",
+   "proof": {
+    "tested": "test/unit/telemetry/* + groupb-cli.test.ts",
+    "ran": "spawned built `bin/sinter generate` then `ledger query` against the fake HTTP provider",
+    "used": "groupb-cli.test.ts: the run's events appear in the query; an unused home returns none",
+    "wired": "default path: LLMClient writes events on every model call; `sinter ledger query` reads them"
+   },
+   "output": "test/organs/outputs/telemetry.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Read back real telemetry as JSON lines; only infra.diskPressure rows here because governed generate does not emit model-call events to this store."
+   }
+  },
+  "tui": {
+   "kind": "plumbing",
+   "status": "INTEGRATED",
+   "triage": "operator-path",
+   "test": "test/organs/plumbing-group-c.test.ts",
+   "does": "Strips terminal control codes and hides prompt text from the live progress lines S1NTR prints.",
+   "helps": "Plumbing: protects the operator's terminal and keeps brief text out of logs; does not change the piece. Test: an event with escape codes and a prompt prints neither.",
+   "proof": {
+    "tested": "test/organs/plumbing-group-c.test.ts + test/unit/tui/sanitizeTerminalText.test.ts",
+    "ran": "EventBus.emit under production env writes the real stdout line (plumbing-group-c test)",
+    "used": "test fails if EventBus stops calling sanitizeTerminalText (escape code and prompt appear in the line)",
+    "wired": "default: every EventBus console line (src/core/EventBus.ts) goes through it"
+   },
+   "output": "test/organs/outputs/tui.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "sanitizeTerminalText strips ANSI and OSC sequences from \"hello red world\" correctly."
+   }
+  },
+  "tui-bridge": {
+   "kind": "unaudited",
+   "status": "WIRED-UNTESTED",
+   "triage": "operator-path",
+   "does": "Local server that lets the terminal cockpit and Studio start runs and watch events.",
+   "helps": "Plumbing: carries requests and progress between the screen and the engine; reachable as `sinter bridge` and from studio. Does not change a piece.",
+   "reason": "bridge is exercised by service tests, not by an organ run that produces a piece",
+   "review": "2026-12-19",
+   "gaps": [
+    "ran: bridge to create to piece not run; only the bridge HTTP surface and rate limiter run (live-group-c)"
+   ],
+   "test": "test/tui-bridge/tui-bridge-service.test.ts",
+   "proof": {
+    "tested": "test/tui-bridge + test/organs/live-group-c.test.ts",
+    "used": "rate limit env changes the bridge response (429)"
+   },
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Prompt routes to different creative domains (hydra+drone vs three.js)."
+   },
+   "output": "test/organs/outputs/tui-bridge.txt"
+  },
+  "types": {
+   "kind": "unaudited",
+   "status": "INTEGRATED",
+   "triage": "operator-path",
+   "does": "The list of mediums and the shapes shared across the code, with old names mapped to new ones.",
+   "helps": "Decides which medium a request becomes (normalizeDomain, aliases), so it shapes which generator runs; effect covered only by unit tests.",
+   "test": "test/organs/spawned-cli-group-c.test.ts",
+   "proof": {
+    "tested": "test/unit/types/domains.test.ts + test/organs/spawned-cli-group-c.test.ts",
+    "ran": "spawned generate with --domain html and --domain svg",
+    "used": "changing --domain changes the generator request the provider receives",
+    "wired": "default: every generate resolves its domain through src/types"
+   },
+   "output": "test/organs/outputs/types.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Domain aliases resolve (meta becomes custom). Small, correct."
+   }
+  },
+  "utils": {
+   "kind": "unaudited",
+   "status": "WIRED-UNTESTED",
+   "triage": "operator-path",
+   "does": "Small shared helpers: safe file writes, SINTER_/LIMINAL_ settings, logging, browser checks.",
+   "helps": "Plumbing: atomic writes protect learned state from tearing; env makes both name prefixes work (plumbing-group-c test). Several helpers have no production caller.",
+   "reason": "organ proof only for env; the rest unit-tested",
+   "review": "2026-12-19",
+   "gaps": [
+    "used: Logger and browser preflight have no bypass test; atomicWrite is the single write path (shared/fsAtomic re-exports it)"
+   ],
+   "test": "test/organs/plumbing-group-c.test.ts",
+   "proof": {
+    "tested": "test/organs/plumbing-group-c.test.ts + test/unit/utils"
+   },
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "hashCode is stable for a string and changes on a one-letter change."
+   },
+   "output": "test/organs/outputs/utils.txt"
+  }
+ },
+ "_triage": {
+  "date": "2026-11-19",
+  "method": "import-graph + bin/sinter reference scan plus module purpose; heuristic, owner may reclassify",
+  "counts": {
+   "generation-path": 25,
+   "operator-path": 30,
+   "not-wired-yet": 4
+  },
+  "generation-path": "can change what S1NTR makes or how it is judged: audit these first",
+  "not-wired-yet": "analytics+daemon+site are one chain reachable only from the `site` CLI; shared/fsAtomic duplicates utils/atomicWrite. Candidates only: propose, never delete silently"
+ },
+ "files": {
+  "src/render/ValueStructure.ts": {
+   "kind": "judge-guardrail",
+   "status": "INTEGRATED",
+   "test": "test/organs/score-organs.test.ts",
+   "token": "mud-camo organ",
+   "note": "mud-camo: overmixed frames capped at 0.29 by the real render path",
+   "does": "Stops flat, muddy frames from scoring high.",
+   "helps": "Real render path caps mud-camo at 0.29 / lifts alive glitch to the 0.4 floor (score-organs test); changes which pieces are accepted.",
+   "proof": {
+    "tested": "test/organs/score-organs.test.ts",
+    "ran": "in-process real run through runProductionCliGenerate (test/organs/harness.ts); spawned-CLI + fake HTTP provider is blocked by design: provider transport needs host-owned completion authority (protected host key) that tests must not forge",
+    "used": "score changes when the frame changes (score-organs test)",
+    "wired": "reachable from the default render path"
+   },
+   "output": "test/organs/outputs/ValueStructure.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Mud-camo detector on a real reel frame returns the measured light, chroma and muddy-hue share and overmixed=false."
+   }
+  },
+  "src/render/GlitchLiveness.ts": {
+   "kind": "judge-guardrail",
+   "status": "INTEGRATED",
+   "test": "test/organs/score-organs.test.ts",
+   "token": "glitch-liveness organ",
+   "note": "alive glitch lifted to the 0.4 floor by the real render path",
+   "does": "Rescues deliberately glitchy pieces that are alive so they are not scored as broken.",
+   "helps": "Real render path caps mud-camo at 0.29 / lifts alive glitch to the 0.4 floor (score-organs test); changes which pieces are accepted.",
+   "proof": {
+    "tested": "test/organs/score-organs.test.ts",
+    "ran": "in-process real run through runProductionCliGenerate (test/organs/harness.ts); spawned-CLI + fake HTTP provider is blocked by design: provider transport needs host-owned completion authority (protected host key) that tests must not forge",
+    "used": "score changes when the frame changes (score-organs test)",
+    "wired": "reachable from the default render path"
+   },
+   "output": "test/organs/outputs/GlitchLiveness.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Glitch-liveness on two real reel frames: palette 190, motion 0.17, alive=false (chroma 0.07 below the 0.2 floor). Clear verdict with the numbers."
+   }
+  },
+  "src/chat/commands/chat.ts": {
+   "kind": "plumbing",
+   "status": "NOT-WIRED",
+   "does": "The retired chat panel command.",
+   "helps": "Serves nothing reachable: header says retired 2026-07-25.",
+   "reason": "replaced by `sinter chat reflect` (bin/sinter:3028); retirement notice at bin/sinter:3080",
+   "review": "2026-12-19",
+   "gaps": [
+    "wired: no caller, kept until the retirement is reviewed"
+   ]
+  },
+  "src/security/RateLimiter.ts": {
+   "kind": "plumbing",
+   "status": "INTEGRATED",
+   "does": "A request rate limiter.",
+   "helps": "Serves nothing reachable: TuiBridgeServer carries its own IpRateLimiter.",
+   "reason": "superseded by inline copy",
+   "review": "2026-12-19",
+   "test": "test/organs/live-group-c.test.ts",
+   "token": "LIMINAL_RATE_LIMIT_GENERAL",
+   "proof": {
+    "tested": "test/organs/live-group-c.test.ts",
+    "ran": "real bridge server over HTTP",
+    "used": "limit 2 vs 50 changes 429",
+    "wired": "TuiBridgeServer imports IpRateLimiter from this file"
+   },
+   "output": "test/organs/outputs/RateLimiter.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Limiter allowed 3 requests then blocked the 4th and 5th with remaining=0, and logged the blocked IP. Correct."
+   }
+  },
+  "src/llm/ModelConfig.ts": {
+   "kind": "plumbing",
+   "status": "NOT-WIRED",
+   "does": "Model name and size table.",
+   "helps": "Serves nothing reachable: only the public index (src/index.ts) references it.",
+   "reason": "public API for embedders (src/index.ts:848); live seats resolve through config/RoleConfig",
+   "review": "2026-12-19",
+   "gaps": [
+    "wired: no internal caller by design; src/llm is owned by #1423"
+   ]
+  },
+  "src/shared/fsAtomic.ts": {
+   "kind": "plumbing",
+   "status": "NOT-WIRED",
+   "does": "A second atomic file writer.",
+   "helps": "Plumbing duplicate of utils/atomicWrite.",
+   "reason": "re-export wrapper over utils/atomicWrite, 8 importers",
+   "review": "2026-12-19",
+   "gaps": [
+    "wired: now a re-export of utils/atomicWrite (one implementation); 8 production importers, kept as the public path"
+   ]
+  },
+  "src/plugins/GovernedPluginGate.ts": {
+   "kind": "unaudited",
+   "status": "UNAUDITED",
+   "does": "Binds declarative plugin bytes to a caller-authorized operation.",
+   "helps": "The gate returns pinned bytes to its caller. Production has no governed plugin executor.",
+   "reason": "Production plugin execution remains unwired.",
+   "review": "2026-12-19",
+   "test": "test/organs/plugins-governed-organ.test.ts",
+   "output": "test/organs/outputs/GovernedPluginGate.txt",
+   "dogfood": {
+    "verdict": "useful",
+    "data": "real",
+    "line": "Builds a pinned manifest with a digest and rejects a bad entry digest. Correct."
+   }
+  }
+ },
+ "_proof_doc": "Four proofs per organ (tested/ran/used/wired) plus does/helps. INTEGRATED needs all four. `ran` caveat: spawned-CLI+fake provider cannot pass host-owned completion authority, so `ran` means the in-process production entrypoint; recorded as an open design question, not forged.",
+ "organShapeBaseline": [
+  "src/aesthetic/AestheticCritic.ts",
+  "src/aesthetic/ColorTheoryEngine.ts",
+  "src/aesthetic/critics/ColorHarmonyCritic.ts",
+  "src/aesthetic/critics/LLMJudgeCritic.ts",
+  "src/aesthetic/critics/LayoutCritic.ts",
+  "src/aesthetic/critics/SoundHarmonyCritic.ts",
+  "src/aesthetic/critics/TypographyCritic.ts",
+  "src/atelier/LessonBandit.ts",
+  "src/chat/GuidanceEngine.ts",
+  "src/cli/ScoreScreenshotGate.ts",
+  "src/collab/CollaborationEngine.ts",
+  "src/composition/CompositeRenderGate.ts",
+  "src/composition/CompositionControlRuntime.ts",
+  "src/composition/CompositionEngine.ts",
+  "src/composition/LayerSequencer.ts",
+  "src/compost/CollisionEngine.ts",
+  "src/config/ProofIsolationGuard.ts",
+  "src/config/ProviderRuntime.ts",
+  "src/core/CreativeIterationGate.ts",
+  "src/core/OrganismLoop.ts",
+  "src/core/RalphLoop.ts",
+  "src/core/ScoringEngine.ts",
+  "src/core/SoupLoop.ts",
+  "src/core/TwoStageJudge.ts",
+  "src/core/wrappers/musicRuntime.ts",
+  "src/cortex/CortexLivingLoop.ts",
+  "src/creative-run/TransferPromotionGate.ts",
+  "src/creative-vocabulary/CinematicLanguageEngine.ts",
+  "src/creative-vocabulary/ColorVocabularyEngine.ts",
+  "src/creative-vocabulary/CreativeWritingEngine.ts",
+  "src/creative-vocabulary/MotionVocabularyEngine.ts",
+  "src/creative-vocabulary/MusicVocabularyEngine.ts",
+  "src/dreaming/RecombinationEngine.ts",
+  "src/dreaming/research/DreamResearchRuntime.ts",
+  "src/emergence/EmergenceCritic.ts",
+  "src/entropy/EntropyCompressor.ts",
+  "src/entropy/EntropyHarvester.ts",
+  "src/entropy/MetabolicEntropyEngine.ts",
+  "src/evaluation/ConfidenceSynthesizer.ts",
+  "src/evaluation/HybridJudge.ts",
+  "src/evolution/EvolutionEngine.ts",
+  "src/generators/engine/EngineRuntime.ts",
+  "src/guardrails/GeneratedCodeGuard.ts",
+  "src/harness/SelfImproveCompoundLoop.ts",
+  "src/harness/tools/ValidationGuard.ts",
+  "src/identity/harnessTransportGuard.ts",
+  "src/intuition/DreamEngine.ts",
+  "src/intuition/IntuitionEngine.ts",
+  "src/learning/FreeSeatGuard.ts",
+  "src/learning/HoldoutGuard.ts",
+  "src/learning/TasteModelRuntime.ts",
+  "src/music/RhymeEngine.ts",
+  "src/music/TheoryEngine.ts",
+  "src/nodeprompt/synthesis/PromptSynthesizer.ts",
+  "src/plugins/GovernedPluginGate.ts",
+  "src/quality/CreativeProofGate.ts",
+  "src/release/GardenPromotionGate.ts",
+  "src/release/PromotionGate.ts",
+  "src/runtime-core/Level6ReleaseGate.ts",
+  "src/runtime-core/ProductionLiminalRuntime.ts",
+  "src/runtime-core/SelfImprovementRuntime.ts",
+  "src/security/LocalRequestGuard.ts",
+  "src/swarm/MiningEngine.ts",
+  "src/swarm/VotingEngine.ts",
+  "src/tui-bridge/service/LivingLoop.ts"
+ ]
+}

@@ -169,6 +169,76 @@ describe('KiloGatewayProvider', () => {
     expect(res.value.error).toContain('Kilo gateway provider returned no usable content');
   });
 
+  describe('reasoning exhausted (finish_reason=length, empty content)', () => {
+    const exhausted = (completion = 64000) => ({
+      ok: true,
+      json: () => Promise.resolve({
+        choices: [{ message: { content: '' }, finish_reason: 'length' }],
+        usage: { prompt_tokens: 100, completion_tokens: completion },
+      }),
+    });
+    const good = { ok: true, json: () => Promise.resolve({ choices: [{ message: { content: 'code' }, finish_reason: 'stop' }], usage: { prompt_tokens: 100, completion_tokens: 900 } }) };
+    const req = (effort: 'max' | 'high' | 'medium' | 'low') => ({
+      systemPrompt: 'sys', userPrompt: 'usr', maxTokens: 64000,
+      thinking: { enabled: true, effort },
+    });
+
+    it('retries once one effort level lower and tells the model its budget', async () => {
+      mockFetch.mockResolvedValueOnce(exhausted()).mockResolvedValueOnce(good);
+      const res = await makeProvider().generate(req('max'));
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      const retryBody = JSON.parse(mockFetch.mock.calls[1][1].body);
+      expect(retryBody.reasoning).toEqual({ effort: 'high' });
+      expect(retryBody.messages[0].content).toContain('sys');
+      expect(retryBody.messages[0].content).toContain('64000');
+      expect(res.value.success).toBe(true);
+      expect(res.value.content).toBe('code');
+    });
+
+    it('steps high to medium and medium to low', async () => {
+      mockFetch.mockResolvedValueOnce(exhausted()).mockResolvedValueOnce(good);
+      await makeProvider().generate(req('high'));
+      expect(JSON.parse(mockFetch.mock.calls[1][1].body).reasoning).toEqual({ effort: 'medium' });
+      mockFetch.mockReset();
+      mockFetch.mockResolvedValueOnce(exhausted()).mockResolvedValueOnce(good);
+      await makeProvider().generate(req('medium'));
+      expect(JSON.parse(mockFetch.mock.calls[1][1].body).reasoning).toEqual({ effort: 'low' });
+    });
+
+    it('fails with a reasoning-exhausted class, finish reason and tokens when the retry is also empty', async () => {
+      mockFetch.mockResolvedValueOnce(exhausted(64000)).mockResolvedValueOnce(exhausted(63000));
+      const res = await makeProvider().generate(req('max'));
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(res.value.success).toBe(false);
+      expect(res.value.failureClass).toBe('reasoning-exhausted');
+      expect(res.value.error).toContain('reasoning-exhausted');
+      expect(res.value.error).toContain('finish_reason=length');
+      expect(res.value.error).toContain('64000');
+      expect(res.value.error).toContain('63000');
+    });
+
+    it('does not retry at low effort, but still classifies the failure', async () => {
+      mockFetch.mockResolvedValueOnce(exhausted());
+      const res = await makeProvider().generate(req('low'));
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(res.value.failureClass).toBe('reasoning-exhausted');
+    });
+
+    it('never steps down when thinking is already off', async () => {
+      mockFetch.mockResolvedValueOnce(exhausted());
+      const res = await makeProvider().generate({ systemPrompt: 's', userPrompt: 'u', thinking: { enabled: false } });
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(res.value.success).toBe(false);
+    });
+
+    it('does not retry when content is present or finish reason is not length', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ choices: [{ message: { content: '' }, finish_reason: 'stop' }] }) });
+      const res = await makeProvider().generate(req('max'));
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(res.value.failureClass).toBeUndefined();
+    });
+  });
+
   it('listModels probes the gateway catalog with the bearer token', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
@@ -200,5 +270,38 @@ describe('KiloGatewayProvider', () => {
     if (res.isErr()) {
       expect(res.error.statusCode).toBe(403);
     }
+  });
+
+  it('streams generate() so a long reasoning run gets headers at once, and rebuilds the reply', async () => {
+    const sse = [
+      'data: {"model":"tencent/hy4","choices":[{"delta":{"reasoning":"think "}}]}',
+      'data: {"choices":[{"delta":{"content":"<html>"}}]}',
+      'data: {"choices":[{"delta":{"content":"</html>"},"finish_reason":"stop"}]}',
+      'data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3}}',
+      'data: [DONE]',
+      '',
+    ].join('\n');
+    mockFetch.mockResolvedValueOnce(new Response(sse, { status: 200, headers: { 'content-type': 'text/event-stream' } }));
+    const result = await makeProvider({ model: 'tencent/hy4' }).generate({ systemPrompt: 'sys', userPrompt: 'usr' });
+    const sent = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(sent.stream).toBe(true);
+    expect(sent.stream_options).toEqual({ include_usage: true });
+    expect(result.isOk()).toBe(true);
+    const value = result._unsafeUnwrap();
+    expect(value.success).toBe(true);
+    expect(value.content).toBe('<html></html>');
+    expect(value.model).toBe('tencent/hy4');
+    expect(value.usage).toEqual({ inputTokens: 7, outputTokens: 3 });
+  });
+
+  it('keeps tool calls on the non-streamed path', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ choices: [{ message: { content: 'ok' } }] }),
+    });
+    await makeProvider().generate({ systemPrompt: 'sys', userPrompt: 'usr',
+      tools: [{ name: 't', description: 'd', parameters: { type: 'object', properties: {} } }] });
+    const sent = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(sent.stream).toBeUndefined();
   });
 });

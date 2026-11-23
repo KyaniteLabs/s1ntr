@@ -1,0 +1,5 @@
+# organ: creative-intelligence | CREATIVE_PRINCIPLE_MANIFEST | data: real, in-process call
+schema=sinter.creative-principle-manifest
+keys=schema, schemaVersion, contracts
+exports=73
+sample={"schema":"sinter.creative-principle-manifest","schemaVersion":1,"contracts":{"contrast":{"schema":"sinter.creative-principle-contract","schemaVersion":1,"identity":{"id":"contrast","name":"Contrast","aliases":["juxtaposition","difference","dynamic opposition"]},"domain":{"domain":"cross-domain","category":"perceptual-structure"},"theory":{"claim":"Perceptible difference directs attention and gives change a readable shape.","mechanism":"Separate value, scale, density, motion, or timbre so neighb

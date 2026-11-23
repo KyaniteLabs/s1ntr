@@ -44,6 +44,14 @@ export function anthropicMessagesEndpoint(baseUrl: string): string {
   return `${trimmed}/v1/messages`;
 }
 
+/**
+ * Claude 5.x (opus/sonnet/haiku/fable): the API rejects temperature/top_p/top_k and budget_tokens; thinking is adaptive
+ * (the param is omitted) and depth is output_config.effort. Older models keep the legacy wire.
+ */
+export function isAdaptiveClaude(model: string): boolean {
+  return /^claude-(opus|sonnet|haiku|fable)-5(-|$)/i.test(model);
+}
+
 export class AnthropicProvider extends BaseProvider {
   readonly name = 'anthropic';
 
@@ -76,10 +84,12 @@ export class AnthropicProvider extends BaseProvider {
       }
 
       // Temperature (omit for thinking-enabled requests — Anthropic restriction)
-      const thinkingEnabled = req.thinking?.enabled && this.capabilities.thinking;
-      if (!thinkingEnabled) {
+      const adaptive = isAdaptiveClaude(this.config.model);
+      const thinkingEnabled = !adaptive && req.thinking?.enabled && this.capabilities.thinking;
+      if (!thinkingEnabled && !adaptive) {
         body.temperature = req.temperature ?? this.config.temperature;
       }
+      if (adaptive && req.thinking?.enabled && req.thinking.effort) body.output_config = { effort: req.thinking.effort };
 
       // Tool definitions — Anthropic format
       if (req.tools && req.tools.length > 0) {
@@ -113,12 +123,11 @@ export class AnthropicProvider extends BaseProvider {
       }
 
       // Extended thinking
-      if (thinkingEnabled) {
-        // #1652: max_tokens counts thinking + answer on this wire; keep the answer budget whole.
-        const budget = req.thinking?.budgetTokens || DEFAULT_THINKING_BUDGET;
-        body.max_tokens = anthropicWireMaxTokens(body.max_tokens as number, budget);
-        body.thinking = { type: 'enabled', budget_tokens: budget };
-      }
+      // #1652: max_tokens counts thinking + answer on this wire; keep the answer budget whole.
+      const budget = thinkingEnabled ? req.thinking?.budgetTokens || DEFAULT_THINKING_BUDGET : 0;
+      body.max_tokens = anthropicWireMaxTokens(body.max_tokens as number, budget,
+        CapabilityRegistry.getCapabilities(this.config.model).uncappedThinkingMaxOutput);
+      if (thinkingEnabled) body.thinking = { type: 'enabled', budget_tokens: budget };
 
       const signal = this.withTimeout(req.signal, this.config.timeout || TIMEOUT_DEFAULT_MS);
 
@@ -159,7 +168,8 @@ export class AnthropicProvider extends BaseProvider {
         : (stopReason === 'max_tokens' ? 'length' as const : 'stop' as const);
 
       const usage = data.usage as { input_tokens?: number; output_tokens?: number } | undefined;
-      const success = content.length > 0 || toolCalls.length > 0;
+      const refused = stopReason === 'refusal';
+      const success = !refused && (content.length > 0 || toolCalls.length > 0);
 
       return ok({
         content,
@@ -169,7 +179,7 @@ export class AnthropicProvider extends BaseProvider {
         // An empty reply must say why, or callers can only report "unsuccessful
         // response" (#1597). A thinking model that hits max_tokens mid-thought
         // returns no text block at all.
-        error: success ? undefined : emptyReplyReason(stopReason, usage?.output_tokens,
+        error: success ? undefined : refused ? 'Provider refused the request (stop_reason=refusal); no content was used' : emptyReplyReason(stopReason, usage?.output_tokens,
           contentBlocks?.map(b => b.type) ?? []),
         usage: usage ? {
           inputTokens: usage.input_tokens || 0,
@@ -222,17 +232,18 @@ export class AnthropicProvider extends BaseProvider {
       body.system = req.systemPrompt;
     }
 
-    const thinkingEnabled = req.thinking?.enabled && this.capabilities.thinking;
-    if (!thinkingEnabled) {
+    const adaptive = isAdaptiveClaude(this.config.model);
+    const thinkingEnabled = !adaptive && req.thinking?.enabled && this.capabilities.thinking;
+    if (!thinkingEnabled && !adaptive) {
       body.temperature = req.temperature ?? this.config.temperature;
     }
+    if (adaptive && req.thinking?.enabled && req.thinking.effort) body.output_config = { effort: req.thinking.effort };
 
-    if (thinkingEnabled) {
-      // #1652: max_tokens counts thinking + answer on this wire; keep the answer budget whole.
-      const budget = req.thinking?.budgetTokens || DEFAULT_THINKING_BUDGET;
-      body.max_tokens = anthropicWireMaxTokens(body.max_tokens as number, budget);
-      body.thinking = { type: 'enabled', budget_tokens: budget };
-    }
+    // #1652: max_tokens counts thinking + answer on this wire; keep the answer budget whole.
+    const budget = thinkingEnabled ? req.thinking?.budgetTokens || DEFAULT_THINKING_BUDGET : 0;
+    body.max_tokens = anthropicWireMaxTokens(body.max_tokens as number, budget,
+      CapabilityRegistry.getCapabilities(this.config.model).uncappedThinkingMaxOutput);
+    if (thinkingEnabled) body.thinking = { type: 'enabled', budget_tokens: budget };
 
     const signal = this.withTimeout(req.signal, this.config.timeout || TIMEOUT_DEFAULT_MS);
 
@@ -266,7 +277,11 @@ const DEFAULT_THINKING_BUDGET = 8000;
  * it left no room for text (GLM 5.3 on z.ai spent all 4096 tokens thinking).
  * The wire cap is the answer budget plus the thinking budget.
  */
-export function anthropicWireMaxTokens(answerTokens: number, thinkingBudget: number): number {
+export function anthropicWireMaxTokens(answerTokens: number, thinkingBudget: number,
+  uncappedThinkingMaxOutput?: number): number {
+  // A model that thinks unasked and ignores budget_tokens is bounded only by
+  // max_tokens, so give it its whole output ceiling.
+  if (uncappedThinkingMaxOutput) return uncappedThinkingMaxOutput;
   return answerTokens + thinkingBudget;
 }
 

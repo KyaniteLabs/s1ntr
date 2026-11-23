@@ -91,20 +91,20 @@ describe('registerGenerators honest plugin reporting (C12)', () => {
 
     // The honest outcome message must name the real numbers.
     const honest = messages.find((m) => m.includes('plugins:'));
-    expect(honest).toBe('plugins: 0/9 loaded (9 missing compiled entry); registered 17 static generators');
+    expect(honest).toBe('plugins: 0/9 loaded (9 missing compiled entry); registered 15 static generators');
 
     // It must NOT mask the failures behind a plain static-only success line.
-    expect(messages).not.toContain('Registered 17 static generators');
+    expect(messages).not.toContain('Registered 15 static generators');
   });
 
-  it('still registers all 17 static generators despite every plugin failing', async () => {
+  it('still registers all 15 static generators despite every plugin failing', async () => {
     mockLoadAll.mockResolvedValueOnce(nineFailures());
     mockGetAll.mockReturnValue([]);
     mockGetAllPlugins.mockReturnValue([]);
 
     await registerAllGenerators();
 
-    expect(mockRegister).toHaveBeenCalledTimes(17);
+    expect(mockRegister).toHaveBeenCalledTimes(15);
   });
 
   it('reports honest counts when some plugins load and some fail', async () => {
@@ -127,7 +127,7 @@ describe('registerGenerators honest plugin reporting (C12)', () => {
 
     const messages = mockInfo.mock.calls.map(([, message]) => message as string);
     const honest = messages.find((m) => m.includes('plugins:'));
-    expect(honest).toBe('plugins: 2/5 loaded (3 missing compiled entry); registered 17 static generators');
+    expect(honest).toBe('plugins: 2/5 loaded (3 missing compiled entry); registered 15 static generators');
   });
 
   it('uses the pure static line only when zero plugin manifests are present', async () => {
@@ -138,7 +138,7 @@ describe('registerGenerators honest plugin reporting (C12)', () => {
     await registerAllGenerators();
 
     const messages = mockInfo.mock.calls.map(([, message]) => message as string);
-    expect(messages).toContain('Registered 17 static generators');
+    expect(messages).toContain('Registered 15 static generators');
     expect(messages.some((m) => m.includes('plugins:'))).toBe(false);
   });
 });

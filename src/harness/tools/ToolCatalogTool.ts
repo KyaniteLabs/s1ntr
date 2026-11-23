@@ -186,7 +186,7 @@ const CATALOG: ToolCatalogEntry[] = [
     name: 'renderArtifact',
     purpose: 'Render an artifact headlessly and capture a screenshot for visual inspection by a vision-capable harness model.',
     phases: ['render', 'validate', 'recover'],
-    domains: ['repo', 'general', 'p5', 'three', 'glsl', 'hydra', 'html', 'svg', 'dataviz', 'kinetic'],
+    domains: ['repo', 'general', 'p5', 'three', 'glsl', 'hydra', 'html', 'svg', 'dataviz', 'kinetic', 'nbe'],
     keywords: ['render', 'screenshot', 'artifact', 'visual', 'see', 'eyes', 'preview', 'canvas', 'blank'],
     boostKeywords: ['render', 'screenshot', 'visual', 'blank'],
     args: ['code', 'path', 'domain', 'width', 'height', 'timeout'],

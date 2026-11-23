@@ -9,8 +9,20 @@ import { buildCreativeIntentBrief, emitCreativePreferenceGuidance, emitPriorRunR
 import { emitPreviewArtifacts } from '../PreviewService.js';
 import type { TuiBridgeService } from '../TuiBridgeService.js';
 import type { TuiInputRequest } from '../types.js';
+import { parseLoopsFlag, runGovernedLoops } from '../../cli/LiminalProductionLoops.js';
 
-export async function streamGovernedProductCreate(host: TuiBridgeService, sessionId: string, userText: string, conversation: ConversationManager, options: Pick<TuiInputRequest, 'creativePreferences' | 'guidanceAnswers'> = {}): Promise<void> {
+/**
+ * Studio's quality label (Sol L3-12): a verdict the judge really gave (even a rejection below the admission
+ * floor) is "scored"; only a missing or unusable verdict is "unscored"/"degraded". Rejection is not degradation.
+ */
+export function studioQualityState(evaluation: { scoreState?: 'unscored'; degraded: boolean; identityValid: boolean; admissionEligible: boolean }):
+  'scored' | 'unscored' | 'degraded' {
+  if (evaluation.scoreState === 'unscored') return 'unscored';
+  if (evaluation.degraded || !evaluation.identityValid) return 'degraded';
+  return 'scored';
+}
+
+export async function streamGovernedProductCreate(host: TuiBridgeService, sessionId: string, userText: string, conversation: ConversationManager, options: Pick<TuiInputRequest, 'creativePreferences' | 'guidanceAnswers' | 'loops'> = {}): Promise<void> {
     if (!host.productCreateCommand) throw new Error('LIMINAL_PRODUCT_COMMAND_FACTORY_REQUIRED');
     const route = buildCreativeDomainRouteTruth(userText);
     emitCreativePreferenceGuidance(host.intentCtx, sessionId, userText, route.selectedDomain);
@@ -30,18 +42,44 @@ export async function streamGovernedProductCreate(host: TuiBridgeService, sessio
         : undefined;
       const providerPrompt = promptForCreativeDomain(userText, route.selectedDomain,
         false, buildCreativeIntentBrief(userText), { ...options, priorArtifactExcerpt });
-      const command = await host.productCreateCommand({ prompt: providerPrompt,
-        domain: route.selectedDomain, layers: [`${route.selectedDomain}-composition`],
-        maxTransportAttempts: 2 });
-      host.transitionRun(sessionId, 'generating', { label: 'Executing governed Product Create' });
-      const projection = await host.productCommandPort().submitCreate('studio', command);
-      if (projection.kind !== 'create') throw new Error('LIMINAL_STUDIO_CREATE_INVALID');
-      const artifact = await host.productCommandPort().verifiedArtifact(command.idempotencyKey);
+      const createOnce = async (prompt: string, maximum = 2) => {
+        const command = await host.productCreateCommand!({ prompt,
+          domain: route.selectedDomain, layers: [`${route.selectedDomain}-composition`],
+          maxTransportAttempts: maximum });
+        host.transitionRun(sessionId, 'generating', { label: 'Executing governed Product Create' });
+        const created = await host.productCommandPort().submitCreate('studio', command);
+        if (created.kind !== 'create') throw new Error('LIMINAL_STUDIO_CREATE_INVALID');
+        return { projection: created, artifact: await host.productCommandPort().verifiedArtifact(command.idempotencyKey) };
+      };
+      // Improvement loops (same module as `generate --loops`): each loop is its own governed Create; loop k+1 edits loop k
+      // using its accepted code and the judge's critique. No run folder here, so the carry is in memory.
+      const loopCount = options.loops === undefined ? 1 : parseLoopsFlag(options.loops);
+      let created: Awaited<ReturnType<typeof createOnce>>;
+      if (loopCount > 1) {
+        const run = await runGovernedLoops({ request: providerPrompt, domain: route.selectedDomain, loops: loopCount,
+          providerCallsPerLoop: 2, log: (line) => host.emit(sessionId, { type: 'activity.updated', sessionId, message: line }),
+          generateOne: async ({ prompt, providerCallsMaximum }) => {
+            const one = await createOnce(prompt, providerCallsMaximum);
+            const ev = one.projection.result.evaluation;
+            const real = ev.admissionEligible === true;
+            return { score: real ? ev.score : null, critique: ev.reasoning ?? '',
+              providerCalls: one.projection.result.attempts.consumed, model: one.projection.result.roles.generator, payload: one,
+              prior: { source: one.artifact.source, score: real ? ev.score : null, critique: ev.reasoning ?? '',
+                rejectionReasons: [...(ev.rejectionReasons ?? [])], frames: [], artifactDirectory: '' } };
+          } });
+        if (!run.best) throw new Error('LOOPS_NO_SCORED_ARTIFACT: no loop produced a scored artifact');
+        host.emit(sessionId, { type: 'activity.updated', sessionId,
+          message: `Loops: ${run.manifest.records.map((r) => `r${r.loop}=${r.status === 'failed' ? 'FAILED' : r.score === null ? 'unscored' : r.score.toFixed(2)}${r.best ? '*' : ''}`).join(' ')} (* best)` });
+        created = run.best.payload as typeof created;
+      } else {
+        created = await createOnce(providerPrompt);
+      }
+      const { projection, artifact } = created;
       host.emit(sessionId, { type: 'response.delta', sessionId, delta: artifact.source });
       host.emit(sessionId, { type: 'response.completed', sessionId, content: artifact.source });
       host.emit(sessionId, { type: 'response.committed', sessionId, content: artifact.source });
       const evaluation = projection.result.evaluation;
-      const qualityState = evaluation.admissionEligible ? 'scored' : 'degraded';
+      const qualityState = studioQualityState(evaluation);
       const failureClasses = ['none', 'render', 'validator', 'parse', 'scorer',
         'infra', 'legacy'] as const;
       const failureClass = failureClasses.includes(evaluation.failureClass as never)
@@ -65,10 +103,14 @@ export async function streamGovernedProductCreate(host: TuiBridgeService, sessio
           { organ: 'evaluation', status: evaluation.admissionEligible ? 'observed' : 'unavailable',
             detail: evaluation.admissionEligible
               ? `Verified rendered evaluation admitted from ${evaluation.evaluatorIdentity}.`
-              : `Rendered evaluation unavailable for admission (${failureClass}): ${evaluation.rejectionReasons.join(', ') || 'ineligible'}.` },
+              : qualityState === 'scored'
+                ? `Rendered evaluation scored ${evaluation.score.toFixed(2)} and was not admitted: ${evaluation.rejectionReasons.join(', ') || 'below the admission floor'}.`
+                : `Rendered evaluation unavailable for admission (${failureClass}): ${evaluation.unscoredReason ?? (evaluation.rejectionReasons.join(', ') || 'ineligible')}.` },
           { organ: 'immune-truth', status: 'observed', detail: evaluation.admissionEligible
             ? 'Verified rendered scored output from the governed Product Create projection.'
-            : 'Degraded mode: presenting the artifact without a real fitness score.' },
+            : qualityState === 'scored'
+              ? 'Scored but not admitted: presenting the artifact with its real score and rejection reasons.'
+              : 'Degraded mode: presenting the artifact without a real fitness score.' },
         ] });
       await emitPreviewArtifacts(host.previewCtx, sessionId, artifact.source,
         route.selectedDomain, route);

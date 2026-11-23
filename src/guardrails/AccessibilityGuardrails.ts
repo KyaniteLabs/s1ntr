@@ -17,6 +17,7 @@ import { judgePhotosensitivity, startLuminanceCapture, type PhotosensitivityVerd
 import { inlineVendorAssets } from '../utils/vendorAssets.js';
 import { resolveChromiumExecutablePath } from '../utils/browserAssetFallbacks.js';
 import { missingChromiumError } from '../utils/browserPreflight.js';
+import { prepareBrowserScratch } from '../utils/scratchSpace.js';
 
 export interface AccessibilityResult {
   accessible: boolean;
@@ -75,6 +76,7 @@ export class AccessibilityGuardrails {
     }
     const executablePath = resolveChromiumExecutablePath();
     if (!executablePath) throw missingChromiumError();
+    prepareBrowserScratch();   // profile dir off the data volume + free-space check
     const browser = await puppeteer.launch({
       headless: true,
       executablePath,

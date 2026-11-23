@@ -59,10 +59,10 @@ describe('GardenRollbackController', () => {
 
   it('rollbackSince rolls back all promoted changes after timestamp', () => {
     const manifest = new PolicyChangeManifest();
-    const r1 = manifest.stage('a', 'first', {}, { rollbackTargetId: 'change-0' });
-    manifest.promote(r1.id, { score: 0.8 });
-    const r2 = manifest.stage('b', 'second', {}, { rollbackTargetId: 'change-0' });
-    manifest.promote(r2.id, { score: 0.9 });
+    const r1 = manifest.stage('a', 'first', { score: 0.4 }, { rollbackTargetId: 'change-0' });
+    expect(manifest.promote(r1.id, { score: 0.8 })).toBe(true);
+    const r2 = manifest.stage('b', 'second', { score: 0.5 }, { rollbackTargetId: 'change-0' });
+    expect(manifest.promote(r2.id, { score: 0.9 })).toBe(true);
     const controller = new GardenRollbackController(manifest);
     const results = controller.rollbackSince('2000-01-01T00:00:00Z', 'batch rollback');
     expect(results).toHaveLength(2);
@@ -71,8 +71,8 @@ describe('GardenRollbackController', () => {
 
   it('rollbackSince skips changes before the timestamp', () => {
     const manifest = new PolicyChangeManifest();
-    const r1 = manifest.stage('a', 'first', {});
-    manifest.promote(r1.id, { score: 0.8 });
+    const r1 = manifest.stage('a', 'first', { score: 0.4 });
+    expect(manifest.promote(r1.id, { score: 0.8 })).toBe(true);
     const controller = new GardenRollbackController(manifest);
     const results = controller.rollbackSince('2099-01-01T00:00:00Z', 'future rollback');
     expect(results).toHaveLength(0);
@@ -99,10 +99,10 @@ describe('GardenRollbackController', () => {
 
   it('getHistory returns all rollback results', () => {
     const manifest = new PolicyChangeManifest();
-    const r1 = manifest.stage('a', 'first', {}, { rollbackTargetId: 'c-0' });
-    manifest.promote(r1.id, { score: 0.8 });
-    const r2 = manifest.stage('b', 'second', {}, { rollbackTargetId: 'c-0' });
-    manifest.promote(r2.id, { score: 0.9 });
+    const r1 = manifest.stage('a', 'first', { score: 0.4 }, { rollbackTargetId: 'c-0' });
+    expect(manifest.promote(r1.id, { score: 0.8 })).toBe(true);
+    const r2 = manifest.stage('b', 'second', { score: 0.5 }, { rollbackTargetId: 'c-0' });
+    expect(manifest.promote(r2.id, { score: 0.9 })).toBe(true);
     const controller = new GardenRollbackController(manifest);
     controller.rollback(r1.id, 'reason 1');
     controller.rollback(r2.id, 'reason 2');

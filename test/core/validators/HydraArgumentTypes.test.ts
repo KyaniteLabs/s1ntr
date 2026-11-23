@@ -86,6 +86,18 @@ describe('HydraValidator argument types', () => {
     expect(errors).toContain('Hydra .blend() needs a source as argument 1, like .blend(osc(10)) or .blend(o1): without one hydra cannot build the shader and the frame renders black');
   });
 
+  it.each([
+    ['an empty modulate', 'osc(10).modulate().out()'],
+    ['a number modulate', 'osc(10).modulate(0.5).out()'],
+    ['a function-returning-number modulate', 'osc(10).modulate(() => Math.sin(time) * 0.2).out()'],
+  ])('teaches the modulate shape for %s', (_label, code) => {
+    const message = HydraValidator.validate(code).errors.find((error) => error.includes('.modulate()')) ?? '';
+    // The model treats modulate like a number transform. The message must show
+    // the working form (source, then amount) and name the number-transform to use.
+    expect(message).toContain('.modulate(noise(3), 0.1)');
+    expect(message).toMatch(/\.scale\(|\.rotate\(/);
+  });
+
   it('rejects a source in the number slot after a blend source', () => {
     const errors = HydraValidator.validate(read('7a191045a59330be.js')).errors;
     expect(errors).toContain('Hydra .add() argument 2 is a source (shape(...)), but .add() takes numbers: hydra compiles it into a float slot and the frame renders black. Use a number, an array, or () => ...');

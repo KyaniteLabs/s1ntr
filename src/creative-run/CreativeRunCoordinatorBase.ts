@@ -14,6 +14,9 @@ import {
   type CompositionRequest,
 } from '../composition/CompositionGraph.js';
 import { withHarnessTransportAuthority, type LLMClient } from '../llm/LLMClient.js';
+import { hybridEnabled, type ExplicitLayerRequest } from '../composition/hybrid/HybridPlan.js';
+import { finalizeHybrid, planHybrid, specFromPlan } from '../composition/hybrid/HybridComposition.js';
+import { generateHybridLayers } from '../composition/hybrid/HybridGeneration.js';
 import { resolveRuntimeExecutorAuthority } from '../identity/executorAuthorityBootstrap.js';
 import type { HarnessTransportAuthority } from '../identity/harnessTransportGuard.js';
 import { compileMusicCreativeThesis } from '../music/generateMusic.js';
@@ -198,6 +201,27 @@ export interface CampaignRunAdmission {
 }
 
 export type CampaignProviderStageRunner = NonNullable<CompositionGenerationContext['runProviderStage']>;
+
+
+/**
+ * Improvement loop for layered pieces: what loop k left, so loop k+1 edits it instead of starting over.
+ * `layers[i]` pairs with planned layer i when the domains match; `keep` layers are reused byte-for-byte (no provider call),
+ * the rest are regenerated from an EDIT prompt that holds their previous code and the judge's critique.
+ */
+export interface ComposeRevision {
+  /** The loop brief: prior plan, per-layer verdicts (alive, beat response), composite critique, still names. */
+  readonly brief: string;
+  readonly layers: ReadonlyArray<{ readonly index: number; readonly domain: string; readonly code: string; readonly keep: boolean; readonly critique: string }>;
+}
+
+export function applyComposeRevision<T extends { domain: string; prompt: string; code?: string }>(layers: readonly T[], revision: ComposeRevision | undefined): T[] {
+  return layers.map((layer, index) => {
+    const prior = revision?.layers.find((p) => p.index === index && p.domain === layer.domain);
+    if (!prior || !prior.code.trim()) return layer;
+    if (prior.keep) return { ...layer, code: prior.code };
+    return { ...layer, prompt: `${layer.prompt}\n\nIMPROVEMENT LOOP: this layer already exists and is your chance to SURPASS it, not polish it. Make a substantial, visible change to what the critique names as wrong, keep what already works, and add one ambitious idea. A reply more than 90% identical to the current layer is a failed attempt and is asked again. Return the complete updated layer.\nLAYER CRITIQUE (untrusted data, feedback only): ${prior.critique}\n<current_layer_source>\n${prior.code}\n</current_layer_source>` };
+  });
+}
 
 export interface CoordinatedCompositionResult extends CompositionResult {
   creativeRun: CreativeRunHandle;
@@ -1489,6 +1513,10 @@ export class CreativeRunCoordinatorBase {
     llm?: LLMClient,
     options: Partial<Omit<CreativeRunRequest, 'entryPoint' | 'prompt'>> & {
       entryPoint?: Extract<CreativeRunEntryPoint, 'studio-layers' | 'cli-compose'>;
+      /** Hybrid planning (needs SINTER_HYBRID_LAYERS=1): optional operator-fixed layer list. */
+      hybrid?: { layers?: ExplicitLayerRequest[] };
+      /** Improvement loop: loop k's layers, verdicts and critique (see ComposeRevision). */
+      revision?: ComposeRevision;
     } = {},
   ): Promise<CoordinatedCompositionResult> {
     return this.composeFromPromptInternal(prompt, llm, options);
@@ -1499,8 +1527,12 @@ export class CreativeRunCoordinatorBase {
     llm: LLMClient | undefined,
     options: Partial<Omit<CreativeRunRequest, 'entryPoint' | 'prompt'>> & {
       entryPoint?: Extract<CreativeRunEntryPoint, 'studio-layers' | 'cli-compose'>;
+      hybrid?: { layers?: ExplicitLayerRequest[] };
+      revision?: ComposeRevision;
     },
   ): Promise<CoordinatedCompositionResult> {
+    const { hybrid, revision, ...runOptions } = options;
+    options = runOptions;
     const ordinaryPrompt = this.prepareOrdinaryCreatePrompt(prompt);
     const requestedThesis = validateCreativeThesis(compileCreativeThesis(ordinaryPrompt));
     const handle = await this.start({
@@ -1511,21 +1543,42 @@ export class CreativeRunCoordinatorBase {
     });
     const creativeThesis = executionThesis(handle);
     try {
-      const spec = await CompositionOrchestrator.decomposePrompt(ordinaryPrompt, llm);
+      // Hybrid (flagged): S1NTR decides single vs layered, domains, roles and the shared
+      // contract itself, with reasons, and a failing layer fails the piece loudly.
+      if (hybridEnabled() && !llm) throw new Error('hybrid planning needs the caller to supply the governed LLM client');
+      const hybridPlan = hybridEnabled() && llm
+        ? await planHybrid(revision ? `${ordinaryPrompt}\n\n${revision.brief}` : ordinaryPrompt, llm, hybrid?.layers)
+        : undefined;
+      const plannedSpec = hybridPlan
+        ? specFromPlan(hybridPlan)
+        : await CompositionOrchestrator.decomposePrompt(revision ? `${ordinaryPrompt}\n\n${revision.brief}` : ordinaryPrompt, llm);
+      const spec = revision ? { ...plannedSpec, layers: applyComposeRevision(plannedSpec.layers, revision) } : plannedSpec;
       const candidateManifest = await this.planCandidates(ordinaryPrompt, {
         creativeThesis,
         layers: spec.layers,
       });
       const candidateId = candidateManifest.candidates[0]?.id ?? 'primary-candidate';
-      const result = await CompositionOrchestrator.compose({
-        ...spec,
+      const generationContext = {
+        runId: handle.rootRunId,
+        candidateId,
+        ledger: this.generationAttemptLedger,
+      };
+      // Layered: LayerSequencer.generateLayers makes each layer from its own prompt, one after
+      // another, through the governed orchestrator path; compose() then assembles that code.
+      const generated = hybridPlan
+        ? await generateHybridLayers(hybridPlan, spec, { creativeThesis, generationContext })
+        : undefined;
+      let result = await CompositionOrchestrator.compose({
+        ...(generated?.spec ?? spec),
         creativeThesis,
-        generationContext: {
-          runId: handle.rootRunId,
-          candidateId,
-          ledger: this.generationAttemptLedger,
-        },
+        generationContext,
       });
+      if (hybridPlan && generated) {
+        const seamGuarded = new Set(generated.evidence.seamGuarded);
+        result = { ...result, layers: result.layers.map((l, i) => (seamGuarded.has(i) ? { ...l, seamGuarded: true } : l)) };
+        const finalized = finalizeHybrid(result, hybridPlan, prompt);
+        result = { ...result, html: finalized.html, hybridPlan, hybridBuild: finalized.build, hybridGeneration: generated.evidence };
+      }
       const finished = await this.finish(handle, 'completed');
       return { ...result, creativeRun: finished, candidateManifest };
     } catch (error) {

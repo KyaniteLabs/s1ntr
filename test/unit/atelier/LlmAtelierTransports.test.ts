@@ -45,12 +45,12 @@ describe('Atelier response contracts', () => {
       .resolves.toEqual([{ ...item, vendor: 'eye-0' }]);
   });
 
-  it.each(['YES and NO', 'NO, do not answer YES', 'not sure', ''])('rejects an ambiguous grounding response: %s', async text => {
+  it.each(['YES and NO', 'NO, do not answer YES', 'not sure', 'maybe', '.', ''])('rejects an ambiguous grounding response: %s', async text => {
     await expect(fixture(text).eyes[0].probe({ html: '<html></html>', control: 'save' }))
       .rejects.toThrow('ATELIER_INVALID_RESPONSE');
   });
 
-  it.each([['YES', true], [' NO\n', false]] as const)('accepts the exact grounding response %s', async (text, expected) => {
+  it.each([['YES', true], [' NO\n', false], ['Yes.', true], [' yes\n', true], ['No!', false], ['yes!!', true]] as const)('accepts the grounding response %j (case, whitespace and trailing . or !)', async (text, expected) => {
     await expect(fixture(text).eyes[0].probe({ html: '<html></html>', control: 'save' })).resolves.toBe(expected);
   });
 

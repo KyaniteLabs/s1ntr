@@ -1,8 +1,8 @@
 /**
  * SemanticMapper — translates a rich voice frame (+ vibrato) into a perceptual
- * visual state that presets bind to. This is the expressive vocabulary: voice
- * dimensions → palette / form / motion / texture / density / composition, so
- * singing drives rich mutation instead of scaling a single uniform.
+ * visual state. This is the expressive vocabulary: voice
+ * dimensions → palette / form / motion / texture / density / composition,
+ * so a voice frame can drive more than one uniform.
  *
  * Output channels are all normalized 0–1 (hue is a normalized turn, 0–1 wrapped).
  */

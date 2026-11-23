@@ -30,6 +30,13 @@ export function isAllowedDotenvName(name: string): boolean {
   return ALLOWED.some((re) => re.test(name));
 }
 
+/** SINTER_X <-> LIMINAL_X: the other spelling of the same setting (src/utils/env.ts prefers SINTER_). */
+function brandAlias(name: string): string {
+  if (name.startsWith("SINTER_")) return `LIMINAL_${name.slice("SINTER_".length)}`;
+  if (name.startsWith("LIMINAL_")) return `SINTER_${name.slice("LIMINAL_".length)}`;
+  return name;
+}
+
 export function loadProjectDotenv(
   options: { cwd?: string; env?: NodeJS.ProcessEnv; warn?: (line: string) => void } = {},
 ): ProjectDotenvResult {
@@ -47,7 +54,7 @@ export function loadProjectDotenv(
 
   const trustAll = env.SINTER_TRUST_DOTENV === "1";
   for (const [name, value] of Object.entries(parsed)) {
-    if (env[name] !== undefined) continue; // the shell always wins
+    if (env[name] !== undefined || env[brandAlias(name)] !== undefined) continue; // the shell always wins, under either brand spelling
     if (trustAll || isAllowedDotenvName(name)) {
       env[name] = value;
       result.applied.push(name);

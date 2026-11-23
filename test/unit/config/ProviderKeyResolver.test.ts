@@ -42,12 +42,17 @@ describe('ProviderKeyResolver', () => {
     expect(selectApiKeyForEndpoint('https://api.x.ai/v1', 'grok')).toBeUndefined();
   });
 
-  it('falls back to a caller-supplied generic key', () => {
-    vi.stubEnv('XAI_API_KEY', '');
-    vi.stubEnv('GROK_API_KEY', '');
-    vi.stubEnv('LIMINAL_XAI_API_KEY', '');
-    vi.stubEnv('LIMINAL_GROK_API_KEY', '');
-    vi.stubEnv('MY_GENERIC_KEY', 'generic-secret');
-    expect(selectApiKeyForEndpoint('https://api.x.ai/v1', undefined, ['MY_GENERIC_KEY'])).toBe('generic-secret');
+  it('falls back to a caller-supplied key bound to the same endpoint', () => {
+    for (const name of ['XAI_API_KEY', 'GROK_API_KEY']) {
+      for (const prefix of ['', 'SINTER_', 'LIMINAL_']) vi.stubEnv(prefix + name, '');
+    }
+    const endpoint = 'https://api.x.ai/v1';
+    const fallbackKeys = ['TEST_GENERIC_API_KEY'];
+    vi.stubEnv('TEST_GENERIC_API_KEY', 'generic-secret');
+    expect(selectApiKeyForEndpoint(endpoint, undefined, fallbackKeys)).toBeUndefined();
+    vi.stubEnv('TEST_GENERIC_BASE_URL', 'https://elsewhere.invalid/v1');
+    expect(selectApiKeyForEndpoint(endpoint, undefined, fallbackKeys)).toBeUndefined();
+    vi.stubEnv('TEST_GENERIC_BASE_URL', endpoint);
+    expect(selectApiKeyForEndpoint(endpoint, undefined, fallbackKeys)).toBe('generic-secret');
   });
 });

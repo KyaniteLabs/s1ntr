@@ -10,7 +10,9 @@ import { HostAdapterRegistry, mintTrustKey, sha256Hex } from '../../../src/ident
 import {
   GLM_CODING_PLAN_ENDPOINT,
   assertGLMCodingPlanCapacity,
+  assertGLMCodingPlanTransport,
   loadGLMCodingPlanSeat,
+  pinnedGLMCodingPlanSeatPath,
   provisionGLMCodingPlanOwnerProvenance,
   provisionGLMCodingPlanSeat,
 } from '../../../src/identity/GLMCodingPlanSeat.js';
@@ -125,6 +127,38 @@ describe('GLM Coding Plan seat', () => {
       provenancePath, ownerPublicKeyPath })).toThrow('CAPACITY_BINDING_MISMATCH');
     expect(() => assertGLMCodingPlanCapacity({ ...capacity, surface: 'glm-direct',
       seat: { ...capacity.seat, surface: 'glm-direct' } }, host)).toThrow('MUST_BE_METERED');
+  });
+
+  it('binds each plan model separately: flash rides the plan only on its own binding', () => {
+    const { host, root, bindingPath, provenancePath, ownerPublicKeyPath, binding } = fixture();
+    const flashPath = join(root, 'binding.flash.json');
+    const flash = provisionGLMCodingPlanSeat({ registry: host, seatId: 'specialist-review',
+      expiresAt: '2026-08-04T06:00:00.000Z', now, credentialResolver: () => key,
+      outputPath: flashPath, provenancePath, ownerPublicKeyPath, model: 'glm-5.3-flash' });
+    expect(flash.subject.model).toBe('glm-5.3-flash');
+    expect(flash.subject.bindingId).not.toBe(binding.subject.bindingId);
+    expect(pinnedGLMCodingPlanSeatPath('glm-5.3-flash')).not.toBe(pinnedGLMCodingPlanSeatPath());
+    const opts = { registry: host, now, credentialResolver: () => key, provenancePath, ownerPublicKeyPath };
+    expect(loadGLMCodingPlanSeat({ ...opts, bindingPath: flashPath, model: 'glm-5.3-flash' })
+      .binding.subject.model).toBe('glm-5.3-flash');
+    // A binding for one plan model never vouches for another.
+    expect(() => loadGLMCodingPlanSeat({ ...opts, bindingPath, model: 'glm-5.3-flash' }))
+      .toThrow('BINDING_MODEL_MISMATCH');
+    expect(() => loadGLMCodingPlanSeat({ ...opts, bindingPath: flashPath, model: GLM_CODING_PLAN_MODEL }))
+      .toThrow('BINDING_MODEL_MISMATCH');
+    const transport = { provider: 'glm', baseUrl: GLM_CODING_PLAN_ENDPOINT, seatId: 'specialist-review',
+      seatDigest: sha256Hex(key), ...opts };
+    expect(assertGLMCodingPlanTransport({ ...transport, model: 'glm-5.3-flash', bindingPath: flashPath }))
+      .toBe('glm-coding-plan-seat');
+    expect(() => assertGLMCodingPlanTransport({ ...transport, model: 'glm-5.3-flash', bindingPath }))
+      .toThrow('BINDING_MODEL_MISMATCH');
+    // Models off the plan cannot be bound or ridden at all.
+    expect(() => provisionGLMCodingPlanSeat({ registry: host, seatId: 'specialist-review',
+      expiresAt: '2026-08-04T06:00:00.000Z', now, credentialResolver: () => key,
+      outputPath: join(root, 'binding.other.json'), provenancePath, ownerPublicKeyPath,
+      model: 'glm-4.6' as never })).toThrow('MODEL_NOT_ON_PLAN');
+    expect(() => assertGLMCodingPlanTransport({ ...transport, model: 'glm-4.6', bindingPath }))
+      .toThrow('TRANSPORT_BINDING_MISMATCH');
   });
 
   it('rejects tamper, expiry, and credential mismatch before adapter execution', async () => {

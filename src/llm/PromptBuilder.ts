@@ -119,7 +119,7 @@ export class PromptBuilder {
     const d = (ctx.domain || '').toLowerCase();
     const seed = PromptBuilder.stableHash(ctx.userRequest || ctx.domain || '');
     const pick = <T>(arr: readonly T[]): T => arr[seed % arr.length];
-    const visual = ['p5', 'shader', 'three', 'hydra', 'svg', 'kinetic', 'hyperframes', 'html', 'dataviz', 'meta', 'revideo'].includes(d);
+    const visual = ['p5', 'shader', 'three', 'hydra', 'svg', 'kinetic', 'html', 'dataviz', 'custom', 'nbe'].includes(d);
     const audio = ['tone', 'strudel', 'music'].includes(d);
     if (audio) {
       return [

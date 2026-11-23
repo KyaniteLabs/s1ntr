@@ -59,7 +59,7 @@ export interface EnsembleVerdict {
 
 export type AcceptDecision =
   | { readonly accepted: true; readonly reason: 'deterministic-pareto-improvement' | 'pairwise-tiebreak' }
-  | { readonly accepted: false; readonly reason: 'gate-failed' | 'frozen-regression' | 'deterministic-tie-pairwise-loss' };
+  | { readonly accepted: false; readonly reason: 'gate-failed' | 'frozen-regression' | 'deterministic-tie-pairwise-loss' | 'pairwise-critique-failed' };
 
 export interface CycleReport {
   readonly cycle: number;

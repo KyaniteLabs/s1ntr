@@ -1,0 +1,214 @@
+{
+ "production-create:cfb3a8f2129868990c54b5fead57f76d6a46b294:2db7440ad1420b9b7c2de20c4979a049c62387046c7590a7bb7191a111e5a5d0": {
+  "kind": "create",
+  "status": "completed",
+  "commandDigest": "b2fcddc9308721ea2ae5e81f77bb0e943d1b342844730a2d5d6f1bb71cf8ece6",
+  "result": {
+   "operationId": "operation:fefbd16e-8c0f-432a-87f5-b8d6eafb42ea",
+   "lineageId": "lineage:5dc05778-fdad-4d65-88c8-d8c6ad7da1d0",
+   "domain": "glsl",
+   "roles": {
+    "generator": "openai/minimax-m3",
+    "evaluator": "glm/glm-5.3",
+    "harness": "configured/glm-5.3",
+    "studio": "configured/minimax-m3"
+   },
+   "artifacts": {
+    "sourceDigest": "5b02840619355bf29c70e640082f90c281a4626336b830a59a3c01757951cc20",
+    "playableDigest": "d742729175e3d718aacec8ddff61c310fd7d89368394a8eb9f101fa59e6f3dc7",
+    "provenanceDigest": "f421ed634efa1d64dd61abe5a9e14080845d6c4ac5ef841cd2a272f494fa0704"
+   },
+   "evidence": {
+    "status": "rendered",
+    "rendererIdentity": "headless-renderer/playwright",
+    "earlyFrameDigest": "69e58a98987ba6728c01ff0577340d88959efd831264a64646f3fe0a340a688e",
+    "lateFrameDigest": "9463983612501f3b9bfb20177ec55b5ab4fb35d1192d85a13eb26a2f44b5f86b",
+    "earlyFrameSize": {
+     "width": 800,
+     "height": 600
+    },
+    "lateFrameSize": {
+     "width": 800,
+     "height": 600
+    },
+    "runtimeErrors": [],
+    "timingMs": 4867,
+    "rendererEnvironmentDigest": "679c79e25d8b176d42df802b33fa4bdc8aea854ad56986798ea42e82f3767a20",
+    "containment": {
+     "networkIsolated": true,
+     "permissionsDenied": true,
+     "cleanupSucceeded": true,
+     "assetDigests": [],
+     "runtimeDigest": "af103134436d72d4b0adc13db1ce38beb69371e7eb9dea0888d1246630212b45",
+     "postRunCensus": {
+      "durationMs": 4860,
+      "usedHeapBytes": 10000000,
+      "eventListeners": 15,
+      "timers": 0,
+      "eventsDispatched": 0,
+      "audioContexts": 0,
+      "pagesBefore": 0,
+      "pagesAfter": 0
+     }
+    },
+    "interaction": {
+     "actions": 0,
+     "stateChanged": false
+    },
+    "audio": {
+     "relevant": false,
+     "state": "not-applicable"
+    },
+    "evidenceDigest": "f164f0cfe728ffa0596ecdb853fc02c1ac18bb84ea331c0ba21bcc86a39693da"
+   },
+   "evaluation": {
+    "score": 0.5025000000000001,
+    "confidence": 0.45,
+    "failureClass": "none",
+    "reasoning": "The frames show a single coherent system: a warm red/orange ember glow anchored bottom-center (grid cell 3.9\u21923.4/10) fading into a controlled near-monochrome darkness, with clean edges, zero clipping, and a slow temporal decay consistent with a dying-ember concept. However, the work is severely underexposed and thin: mean luminance 1.1\u20131.3/10, 67\u201378% of pixels near-black, only 1.5\u20133.4% bright pixels, and low stddev (1.4\u20131.6) indicating smooth gradients with no texture, topology, occlusion, or volumetric structure. The only demonstrated motion is a subtle global dimming, which supports a mood but reveals no form. Palette and focal placement are intentional, but most of the canvas is effectively empty, so the piece sits in the poor-to-weak boundary: relevant and unified, but visually impoverished.",
+    "degraded": false,
+    "identityValid": true,
+    "evaluatorIdentity": "glm/glm-5.3",
+    "evidenceDigest": "f164f0cfe728ffa0596ecdb853fc02c1ac18bb84ea331c0ba21bcc86a39693da",
+    "admissionEligible": true,
+    "rejectionReasons": []
+   },
+   "attempts": {
+    "consumed": 2,
+    "maximum": 2
+   },
+   "receipt": {
+    "schema": "sinter.liminal-authority-receipt",
+    "schemaVersion": 1,
+    "authorityTier": "production",
+    "authorityKeyDigest": "c2ae4bb3c87622703713e263afd9174a60395a79ee20130bc2b58323deb84335",
+    "operationId": "operation:fefbd16e-8c0f-432a-87f5-b8d6eafb42ea",
+    "lineageId": "lineage:5dc05778-fdad-4d65-88c8-d8c6ad7da1d0",
+    "commandDigest": "b2fcddc9308721ea2ae5e81f77bb0e943d1b342844730a2d5d6f1bb71cf8ece6",
+    "providerInputDigest": "de6d3c2dd5f724f9c8dfe1e76a5311d91c67aff0b017b8f599b984e6359eeec1",
+    "artifactDigest": "907d2444a3a553b1ad145b750d755cbfeb89d687cc34141d433d0cffe0cc0ed6",
+    "evidenceDigest": "f164f0cfe728ffa0596ecdb853fc02c1ac18bb84ea331c0ba21bcc86a39693da",
+    "disabledTeachingReaders": [
+     "guidance-engine",
+     "semantic-art-memory",
+     "quality-archive",
+     "map-elites",
+     "compost-seed-bank",
+     "dream-queue",
+     "harness-memory"
+    ],
+    "empiricalContextDigests": [],
+    "learningEligible": false,
+    "operationTraceDigest": "22dfd6584915e4cb6bc6e8780c3a4d81acba8f2cd06f83154e7e5e6f329fb78d",
+    "signature": "fc7f21084c0b216b3449ea1a552b59b45aceeee616eac77e0a972ccde0dab994"
+   }
+  }
+ },
+ "production-create:cfb3a8f2129868990c54b5fead57f76d6a46b294:389f390557776ebdea71517de6e15ae55cd534d1a2f6a02a34865b7be34e260c": {
+  "kind": "create",
+  "status": "completed",
+  "commandDigest": "25a111041710edc138663679e4e4bd3c2470665c55d29606262ff36dd65e7b57",
+  "result": {
+   "operationId": "operation:96f9cc46-3b33-4653-8a2f-89d348c9e8fc",
+   "lineageId": "lineage:556992de-4dc6-40ac-9200-fa0ade00f4c1",
+   "domain": "glsl",
+   "roles": {
+    "generator": "openai/minimax-m3",
+    "evaluator": "glm/glm-5.3",
+    "harness": "configured/glm-5.3",
+    "studio": "configured/minimax-m3"
+   },
+   "artifacts": {
+    "sourceDigest": "8ba000dbcb33bd5ba8fffb3afc577e2abf451a0a85721d53081b51f9c217479f",
+    "playableDigest": "1efcde63f7ef566b58ab84b9f4ea321ed92a46115daa19003ba8224b84ad56f6",
+    "provenanceDigest": "5cafe6f8752d7a88558ce43c92a9093ff9608cf3f079c67be9a72d2562064d46"
+   },
+   "evidence": {
+    "status": "rendered",
+    "rendererIdentity": "headless-renderer/playwright",
+    "earlyFrameDigest": "b1f78effaad05db448be7ad446316369fa9b03a85a6e238f4b3e7201b4d56247",
+    "lateFrameDigest": "7809ec1253b1704fdad4d2251e5e8cccc2d51af80bb10a79f4a5c4d636b3e2ef",
+    "earlyFrameSize": {
+     "width": 800,
+     "height": 600
+    },
+    "lateFrameSize": {
+     "width": 800,
+     "height": 600
+    },
+    "runtimeErrors": [],
+    "timingMs": 6113,
+    "rendererEnvironmentDigest": "679c79e25d8b176d42df802b33fa4bdc8aea854ad56986798ea42e82f3767a20",
+    "containment": {
+     "networkIsolated": true,
+     "permissionsDenied": true,
+     "cleanupSucceeded": true,
+     "assetDigests": [
+      "efc726aa8aea0897f6dda19874709d09fd791781208ed5847ef1fd36f9886b18"
+     ],
+     "runtimeDigest": "365ada918aef8d3ef21912879da43ce1094cc08f2929151bf1ab568e8ca873e0",
+     "postRunCensus": {
+      "durationMs": 6068,
+      "usedHeapBytes": 10000000,
+      "eventListeners": 15,
+      "timers": 0,
+      "eventsDispatched": 0,
+      "audioContexts": 0,
+      "pagesBefore": 0,
+      "pagesAfter": 0
+     }
+    },
+    "interaction": {
+     "actions": 0,
+     "stateChanged": false
+    },
+    "audio": {
+     "relevant": false,
+     "state": "not-applicable"
+    },
+    "evidenceDigest": "486dcf1ba77c7cdfff87e0d246fa7812f58800cc04af9d43b9e7a02f06ac2e71"
+   },
+   "evaluation": {
+    "score": 0.525,
+    "confidence": 0.4,
+    "failureClass": "none",
+    "reasoning": "Screenshots were withheld, so this is judged from deterministic frame statistics only. The render is a stable, deeply dark blue/cyan field (mean ~2.4/10, stddev only ~1.4/10, just 1.5-1.8% bright pixels) dominated by near-navy tones rgb(34,51,85). The palette is genuinely controlled and cohesive \u2014 analogous deep blues, zero clipping, smooth gradients (271-305 quantized colors), and stable between frames \u2014 suggesting an intentional ambient/deep-sea mood. However, the extreme dimness and tiny luminance variance mean almost everything sits in one narrow murk band: the 3x3 grid shows only a faint center-weighted glow (3.1 vs ~2.5) and darker bottom, so compositional hierarchy, structural depth, and any sense of volume or material behavior are barely legible. Temporal change between frames is minimal (mean 2.40\u21922.46, subtle color redistribution), so motion is present but does not clearly reveal form. Net: a coherent but visually thin, low-contrast field \u2014 weak-to-poor band.",
+    "degraded": false,
+    "identityValid": true,
+    "evaluatorIdentity": "glm/glm-5.3",
+    "evidenceDigest": "486dcf1ba77c7cdfff87e0d246fa7812f58800cc04af9d43b9e7a02f06ac2e71",
+    "admissionEligible": true,
+    "rejectionReasons": []
+   },
+   "attempts": {
+    "consumed": 2,
+    "maximum": 2
+   },
+   "receipt": {
+    "schema": "sinter.liminal-authority-receipt",
+    "schemaVersion": 1,
+    "authorityTier": "production",
+    "authorityKeyDigest": "c2ae4bb3c87622703713e263afd9174a60395a79ee20130bc2b58323deb84335",
+    "operationId": "operation:96f9cc46-3b33-4653-8a2f-89d348c9e8fc",
+    "lineageId": "lineage:556992de-4dc6-40ac-9200-fa0ade00f4c1",
+    "commandDigest": "25a111041710edc138663679e4e4bd3c2470665c55d29606262ff36dd65e7b57",
+    "providerInputDigest": "5c35c2a6c2ca52f4b50d5eb8052e785da3e01e3f3ad0277931160f70382df405",
+    "artifactDigest": "fac56ecc48930efec60b3a61e097f51d513b7fc4089133e2af12f3a96d64ac80",
+    "evidenceDigest": "486dcf1ba77c7cdfff87e0d246fa7812f58800cc04af9d43b9e7a02f06ac2e71",
+    "disabledTeachingReaders": [
+     "guidance-engine",
+     "semantic-art-memory",
+     "quality-archive",
+     "map-elites",
+     "compost-seed-bank",
+     "dream-queue",
+     "harness-memory"
+    ],
+    "empiricalContextDigests": [],
+    "learningEligible": false,
+    "operationTraceDigest": "e690ba393345b4aa0e5a7e2f2fedc6bf16c3f37e6615679e0233f5c91db9d52f",
+    "signature": "d47c6fe6e1553f3d7713339b8fcdc3c4a9bcdb626cc9c0b4fac6c8d2c4c1ce5a"
+   }
+  }
+ }
+}

@@ -5,6 +5,7 @@ import { SeedSchema } from '../security/JsonSchemas.js';
 import { formatSeedForPrompt } from '../core/lir/LIRPromptFormatter.js';
 
 export const DEFAULT_SEED_K = 2;
+const MAX_SEED_K = 4;
 
 function turnRng(turn: number): () => number {
   let state = (turn ^ 0x9e3779b9) >>> 0;
@@ -36,8 +37,11 @@ export function sampleSeeds(seeds: Seed[], k: number, turn: number): Seed[] {
   return result;
 }
 
-export function injectSeedMotifs(prompt: string, cwd: string, turn: number, k = DEFAULT_SEED_K): string {
-  const seeds = sampleSeeds(readSeeds(cwd), k, turn);
+export function injectSeedMotifs(prompt: string, cwd: string, turn: number, k?: number): string {
+  const requested = k ?? Number(process.env.SINTER_COMPOST_SEEDS_K?.trim() || DEFAULT_SEED_K);
+  const budget = Number.isFinite(requested) ? Math.min(MAX_SEED_K, Math.floor(requested)) : DEFAULT_SEED_K;
+  if (budget <= 0) return prompt;
+  const seeds = sampleSeeds(readSeeds(cwd), budget, turn);
   if (seeds.length === 0) return prompt;
   const motifs = seeds.map(seed => `[seed:${seed.id}] ${formatSeedForPrompt(seed, 500)}`);
   return `${prompt}\n\n---\nCreative seed motifs from compost:\n${motifs.join('\n')}`;

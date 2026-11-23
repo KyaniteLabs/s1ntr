@@ -1,0 +1,4 @@
+# organ: utils | hashCode | data: real, in-process call
+hashCode("orbit")=106004554
+hashCode("orbiT")=106004522
+hashCode("orbit") again=106004554

@@ -52,4 +52,23 @@ describe('SinterEvaluatorGrowthMaterializer', () => {
     expect(readFileSync(rescoreOut, 'utf8')).toContain('"fresh":0');
     expect(readFileSync(reviewOut, 'utf8')).toContain('human_or_rescore_label');
   });
+
+  it('turns owner downvotes and judge hard negatives into attributable rescore tasks instead of skipping them (F05)', async () => {
+    const root = makeTempDir();
+    const queue = join(root, 'growth-queue.jsonl');
+    const reviewOut = join(root, 'review', 'review.jsonl');
+    writeJsonl(queue, [
+      { kind: 'owner_downvote', reason: 'Owner thumbs-down', payload: { id: 'ds0731-81a2ddfb62', seat: 'ds0731', reason: 'mud-camo' } },
+      { kind: 'judge_hard_negative', reason: 'Judge scored 0.2', payload: { id: 'art-9', domain: 'hydra', judgeScore: 0.2 } },
+    ]);
+    const report = await materializeEvaluatorGrowth({ growthQueueJsonl: queue, outputDir: join(root, 'out'), rescoreOutput: join(root, 'r', 'hard.jsonl'), reviewOutput: reviewOut });
+    expect(report.counts.skippedItems).toBe(0);
+    expect(report.counts.reviewItems).toBe(2);
+    const rows = readFileSync(reviewOut, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    expect(rows.map((r) => [r.id, r.kind, r.requestedAction]).sort()).toEqual([
+      ['art-9', 'judge_hard_negative', 'rescore'],
+      ['ds0731-81a2ddfb62', 'owner_downvote', 'rescore'],
+    ]);
+    expect(readFileSync(join(root, 'r', 'hard.jsonl'), 'utf8').trim()).toBe('');   // advisory: never a forged signed negative label
+  });
 });

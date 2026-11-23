@@ -72,3 +72,15 @@ describe('PromptHistory', () => {
   });
 
 });
+
+describe('PromptHistory on a fresh home (dogfood finding)', () => {
+  it('a missing history file is silent: no warning, empty defaults', async () => {
+    const { Logger } = await import('../../src/utils/Logger.js');
+    const { vi } = await import('vitest');
+    const warn = vi.spyOn(Logger, 'warn').mockImplementation(() => undefined);
+    const h = new PromptHistory(path.join(os.tmpdir(), 'atelier-history-missing', 'nope.json'));
+    expect(await h.getRecent(5)).toEqual([]);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+});

@@ -106,6 +106,8 @@ export interface ProviderResponse {
   toolCalls?: ToolCallResult[];
   /** Whether the model wants to call tools instead of generating text */
   finishReason?: 'stop' | 'tool_calls' | 'length' | 'error';
+  /** Distinct failure class, so batch tooling and the breaker can tell it from a provider fault. */
+  failureClass?: 'reasoning-exhausted';
 }
 
 // ── Streaming ──

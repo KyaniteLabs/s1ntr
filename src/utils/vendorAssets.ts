@@ -7,7 +7,9 @@
  * `vendor/` directory (fleet-server serves the repo root at `/`; artifact
  * cache roots mirror `vendor/`). Zero CDN: there is no remote fallback. A
  * missing vendor file throws — loud failure at render setup, never a silent
- * blank canvas.
+ * blank canvas. The one exception is RUNTIME_FETCHED_ASSETS (GSAP), which the
+ * public source tree does not ship: there the bytes come from the pinned CDN
+ * URL and must match the pinned sha256.
  *
  * `inlineVendorAssets` exists for the in-process render path only:
  * `page.setContent` runs the page at about:blank where root-absolute URLs
@@ -36,6 +38,30 @@ export const VENDOR_ASSETS = {
   strudelClockworker: '/vendor/strudel-web/1.3.0/assets/clockworker-ZDiUtESR.js',
   d3: '/vendor/d3/7.9.0/d3.min.js',
   gsap: '/vendor/gsap/3.15.0/gsap.min.js',
+  // three@0.185.1:
+  // the webgpu/tsl builds import ./three.core.min.js, so the core and the
+  // WebGL module build must be served beside them.
+  threeWebgpuCore: '/vendor/three-webgpu/0.185.1/three.core.min.js',
+  threeWebgpuModule: '/vendor/three-webgpu/0.185.1/three.module.min.js',
+  // holospot (vendored MIT library) — holo.js entry point plus every asset it
+  // can fetch at runtime (bump maps, volume subjects, foil logos). The kit
+  // resolves assets relative to holo.js, i.e. /vendor/holospot/0.1.0/assets/.
+  holospot: '/vendor/holospot/0.1.0/dist/holo.js',
+  holospotBumpsScratches: '/vendor/holospot/0.1.0/assets/bumps/scratches.jpg',
+  holospotBumpsBrushed: '/vendor/holospot/0.1.0/assets/bumps/brushed.png',
+  holospotBumpsCrinkle: '/vendor/holospot/0.1.0/assets/bumps/crinkle.png',
+  holospotBumpsHammered: '/vendor/holospot/0.1.0/assets/bumps/hammered.png',
+  holospotBumpsLinen: '/vendor/holospot/0.1.0/assets/bumps/linen.png',
+  holospotBumpsSandblast: '/vendor/holospot/0.1.0/assets/bumps/sandblast.png',
+  holospotVolumeEagle: '/vendor/holospot/0.1.0/assets/holo3d/eagle.sdf',
+  holospotVolumeChip: '/vendor/holospot/0.1.0/assets/holo3d/chip.sdf',
+  holospotVolumeWolf: '/vendor/holospot/0.1.0/assets/holo3d/wolf.sdf',
+  holospotVolumeGlobe: '/vendor/holospot/0.1.0/assets/holo3d/globe.sdf',
+  holospotVolumeFalcon: '/vendor/holospot/0.1.0/assets/holo3d/falcon.sdf',
+  holospotLogoRosette: '/vendor/holospot/0.1.0/assets/logos/rosette.svg',
+  holospotLogoKoru: '/vendor/holospot/0.1.0/assets/logos/koru.svg',
+  holospotLogoLeaf: '/vendor/holospot/0.1.0/assets/logos/leaf.svg',
+  holospotLogoFacets: '/vendor/holospot/0.1.0/assets/logos/facets.svg',
 } as const;
 
 export type VendorAssetPath = (typeof VENDOR_ASSETS)[keyof typeof VENDOR_ASSETS];
@@ -59,6 +85,38 @@ export function vendorRoot(): string {
   return fileURLToPath(new URL('../../vendor/', import.meta.url));
 }
 
+/**
+ * Vendored files the public source tree does not ship. GSAP's Standard
+ * "No Charge" License is Webflow's own licence and does not clearly allow
+ * redistribution in a public repo, so scripts/atelier/sync-public-mirror.sh
+ * leaves vendor/gsap/ out of the public snapshot. Where the file is absent,
+ * GSAP is fetched at runtime from its CDN, once per process, and used only if
+ * its sha256 matches the manifest pin. The private tree keeps the vendored copy.
+ */
+export const RUNTIME_FETCHED_ASSETS: Readonly<Record<string, { url: string; sha256: string }>> = Object.freeze({
+  '/vendor/gsap/3.15.0/gsap.min.js': {
+    url: 'https://cdn.jsdelivr.net/npm/gsap@3.15.0/dist/gsap.min.js',
+    sha256: '92bb9a96476f983d212a2bc4f54c889039c1696dd4461d40a736860938570fbb',
+  },
+});
+
+/** Fetch a RUNTIME_FETCHED_ASSETS entry from its CDN; rejects unless the bytes match the pin. */
+export async function fetchPinnedRuntimeAsset(
+  urlPath: string,
+  fetchImpl: typeof fetch = globalThis.fetch,
+): Promise<string> {
+  const pin = RUNTIME_FETCHED_ASSETS[urlPath];
+  if (!pin) throw new Error(`vendorAssets: no runtime source for ${urlPath}`);
+  const res = await fetchImpl(pin.url);
+  if (!res.ok) throw new Error(`vendorAssets: ${pin.url} answered HTTP ${res.status}`);
+  const bytes = Buffer.from(await res.arrayBuffer());
+  const digest = createHash('sha256').update(bytes).digest('hex');
+  if (digest !== pin.sha256) {
+    throw new Error(`vendorAssets: ${pin.url} sha256 ${digest} does not match the pin ${pin.sha256}`);
+  }
+  return bytes.toString('utf8');
+}
+
 const assetCache = new Map<string, Promise<string>>();
 
 /**
@@ -76,6 +134,13 @@ export function readVendorAsset(urlPath: string): Promise<string> {
   if (!cached) {
     const rel = urlPath.slice(VENDOR_BASE_PATH.length + 1);
     cached = readFile(`${vendorRoot()}${rel}`, 'utf8').catch((err: unknown) => {
+      if (RUNTIME_FETCHED_ASSETS[urlPath] && (err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+        // A failed fetch is not cached: the next render retries the CDN.
+        return fetchPinnedRuntimeAsset(urlPath).catch((fetchErr: unknown) => {
+          assetCache.delete(urlPath);
+          throw fetchErr;
+        });
+      }
       const message = err instanceof Error ? err.message : String(err);
       throw new Error(
         `vendorAssets: vendored asset missing on disk: ${urlPath} (${message}). ` +

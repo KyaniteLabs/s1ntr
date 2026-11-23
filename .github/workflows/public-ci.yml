@@ -50,6 +50,10 @@ jobs:
         with:
           persist-credentials: false
 
+      # ubuntu-latest has no ffmpeg; the video export and real-render tests need ffmpeg/ffprobe.
+      - name: Install ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
       - name: Enable pnpm
         run: |
           corepack enable
@@ -72,6 +76,7 @@ jobs:
         timeout-minutes: 10
         run: pnpm lint
 
+      # GSAP is not in this tree: fetch it (sha256-pinned) into vendor/ so tests read it from disk.
       - name: Fast tests
         timeout-minutes: 25
-        run: pnpm test:ci:fast
+        run: node scripts/ci/fetch-runtime-vendor.mjs && pnpm test:ci:fast

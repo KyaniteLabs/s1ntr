@@ -1,0 +1,6 @@
+# organ: gallery | data: real command, fake provider
+$ sinter gallery list
+Gallery <work>/proj/gallery: 1 project
+  2026-11-19--html-15b83514  1 version  latest v1
+# exit: 0
+

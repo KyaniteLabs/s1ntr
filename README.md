@@ -1,8 +1,8 @@
 ![Sinter — the S1NTR creative-coding studio, by KyaniteLabs](assets/s1ntr-logo.png)
 
-# Sinter
+# S1NTR
 
-Sinter is a TypeScript creative-coding studio and CLI that turns prompts into visual, audio, and motion pieces, then lets you preview them locally. It routes work to a configured language model and supports local models through OpenAI-compatible endpoints.
+S1NTR: a tool for coding art. It is a TypeScript studio and CLI that turns prompts into visual, audio, and motion pieces, then lets you preview them locally. It routes work to a configured language model and supports local models through OpenAI-compatible endpoints.
 
 ## Install
 
@@ -22,9 +22,9 @@ pnpm link --global
 sinter --version
 ```
 
-Sinter requires Node.js 20 or newer.
+S1NTR requires Node.js 20 or newer.
 
-`pnpm install` runs install scripts: Sinter's own `postinstall` (`scripts/packaging/postinstall.mjs`, which runs `npm run build` when `dist/` is missing) and those of its dependencies. To review them first, install with `pnpm install --ignore-scripts`, read the scripts, then run `pnpm rebuild`.
+`pnpm install` runs install scripts: S1NTR's own `postinstall` (`scripts/packaging/postinstall.mjs`, which runs `npm run build` when `dist/` is missing) and those of its dependencies. To review them first, install with `pnpm install --ignore-scripts`, read the scripts, then run `pnpm rebuild`.
 
 ## Quick start
 
@@ -39,7 +39,7 @@ sinter --prompt "A quiet field of blue particles, moving like grass in wind"
 sinter serve
 ```
 
-Sinter saves generated files under `~/.sinter/output` by default. Pass `--output ./my-art` to choose another folder. `sinter serve` starts the local preview server and loads the latest saved piece. The Studio GUI is available from a repository checkout with dependencies installed.
+S1NTR saves generated files under `~/.sinter/output` by default. Pass `--output ./my-art` to choose another folder. `sinter serve` starts the local preview server and loads the latest saved piece. The Studio GUI is available from a repository checkout with dependencies installed.
 
 ## Main commands
 
@@ -53,19 +53,18 @@ Sinter saves generated files under `~/.sinter/output` by default. Pass `--output
 
 See the full [CLI reference](https://docs.s1ntr.com/cli) and [getting-started guide](https://docs.s1ntr.com/guide) for command syntax.
 
-## Creative domains
+## Mediums
 
-- **Shared creative domains** — p5.js, SVG, GLSL, Three.js, Hydra, Strudel, Tone.js, Revideo, HyperFrames, ASCII, Kinetic, TextGen
-  Host-specific domains (for example HTML or DataViz on one lineage) stay documented in that host's architecture surface rather than as universal totals.
+- S1NTR supports **15 creative domains**. Its mediums include p5.js sketch, three.js scene, shader, hydra feedback synth, SVG drawing, webpage, data visualization, kinetic type and CSS motion, ASCII art, concrete poetry, strudel live-coded music, Tone.js sound piece, Blender render, fluid light simulation and invented medium.
 - **CreativeBoard critique** — 3-agent board (Minimalist / Expressionist / Technician) deliberates on output
 - **Swarm generation** (`--use-swarm`) — 5 default runtime personas (Kai / Nova / Rex / Sam / Max).
   Five default personas (Kai, Nova, Rex, Sam, Max) generate in parallel and vote on best.
 
-Prompt routing selects a domain automatically; use `--domain` to request one explicitly.
+Prompt routing selects a medium automatically; use `--domain` to request one explicitly.
 
 ## Ready-to-show market path
 
-Use this path when you want to try Sinter as a product instead of asking an agent to babysit a proof run. It keeps the shared creative surface in scope: p5, SVG, GLSL, Three.js, Hydra, Strudel, Tone.js, Revideo, HyperFrames, ASCII, Kinetic, and TextGen. Individual host lineages may expose additional generators (for example HTML or DataViz) ahead of the other mirror.
+Use this path when you want to try S1NTR as a product instead of asking an agent to babysit a proof run. It keeps the shared creative surface in scope: p5, SVG, shader, Three.js, Hydra, Strudel, Tone.js, ASCII, kinetic type and CSS motion, concrete poetry, webpage, data visualization, Blender, fluid light simulation, and invented medium.
 
 ```bash
 # 1. Install and build
@@ -88,28 +87,28 @@ pnpm proof:studio-smoke
 # 6. Refresh the live provider receipt used by the market gate
 pnpm run proof:live-provider-smoke -- --provider=glm --timeout-ms=120000
 
-# 7. Sweep every launch creative domain with the active live provider
+# 7. Sweep every launch medium with the active live provider
 pnpm proof:live-creative-domains -- --provider=glm --all --timeout-ms=120000 --out=.omx/proof/live-creative-domains
 
 # 8. Ask the app for the plain answer
 sinter market status
 ```
 
-Expected current result: `sinter market status` prints the release-truth report as JSON and exits 0 only when `ownerReleaseReady` is true (otherwise 2). Strudel patterns are saved with an external playback link, Tone.js saves playable HTML, HyperFrames saves HTML/GSAP composition artifacts, and Revideo saves composition source/HTML; mp4 export is attempted as a non-blocking video artifact and should be checked explicitly when a rendered file is required.
+Expected current result: `sinter market status` prints the release-truth report as JSON and exits 0 only when `ownerReleaseReady` is true (otherwise 2). Strudel patterns are saved with an external playback link, Tone.js saves playable HTML.
 
 ## Local models
 
-Sinter can call local OpenAI-compatible servers such as LM Studio. For a local LFM3 model, start the model server, then set its endpoint and served model name:
+S1NTR can call local OpenAI-compatible servers such as LM Studio. For a local LFM3 model, start the model server, then set its endpoint and served model name:
 
 ```bash
 sinter provider set-key lmstudio --base-url http://localhost:1234/v1 --model LFM3 --use
 ```
 
-Replace `LFM3` with the model identifier exposed by your server. Sinter handles LFM3's final answer for both streamed and non-streamed responses.
+Replace `LFM3` with the model identifier exposed by your server. S1NTR handles LFM3's final answer for both streamed and non-streamed responses.
 
 ## Project `.env` files
 
-When you run `sinter` in a folder with a `.env` file, Sinter reads only API keys (`*_API_KEY`), model names (`*_MODEL`) and `SINTER_LOG_LEVEL` from it, and never replaces a value your shell already set. Anything else, such as a base URL, a browser path, `NODE_OPTIONS` or a sandbox switch, is ignored with a one-line warning, so a `.env` in a downloaded folder cannot redirect your key or change what runs. Export those settings in your shell instead, or run with `SINTER_TRUST_DOTENV=1` to load the whole file.
+When you run `sinter` in a folder with a `.env` file, S1NTR reads only API keys (`*_API_KEY`), model names (`*_MODEL`) and `SINTER_LOG_LEVEL` from it, and never replaces a value your shell already set. Anything else, such as a base URL, a browser path, `NODE_OPTIONS` or a sandbox switch, is ignored with a one-line warning, so a `.env` in a downloaded folder cannot redirect your key or change what runs. Export those settings in your shell instead, or run with `SINTER_TRUST_DOTENV=1` to load the whole file.
 
 ## Where to go next
 

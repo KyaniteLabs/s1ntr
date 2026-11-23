@@ -25,6 +25,13 @@ export type {
 
 // TaskLedger — core persistence layer
 export { TaskLedger } from './TaskLedger.js';
+export {
+  TASK_STATUSES,
+  TASK_STATUS_TRANSITIONS,
+  IllegalTaskTransitionError,
+  canTransitionTask,
+  isTaskStatus,
+} from './types.js';
 
 // TaskRunner — executes tasks via RalphLoop
 export { TaskRunner } from './TaskRunner.js';

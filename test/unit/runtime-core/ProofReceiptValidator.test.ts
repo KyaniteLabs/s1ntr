@@ -13,6 +13,7 @@ import {
   computeArtifactDigest,
   computeArtifactDigests,
   computeProofSourceFingerprint,
+  readGitRef,
   readProofSubjectGitCommit,
   validateProofReceipt,
 } from '../../../src/runtime-core/ProofReceiptValidator.js';
@@ -389,5 +390,35 @@ describe('ProofReceiptValidator', () => {
         rmSync(repoRoot, { recursive: true, force: true });
       }
     });
+  });
+});
+
+describe('readGitRef without the git CLI', () => {
+  const sha = 'a'.repeat(40);
+  const packedSha = 'b'.repeat(40);
+  let root: string;
+  beforeEach(() => {
+    execFileSyncMock.mockReset();
+    // The CLI refuses checkouts owned by another uid; the reader must not depend on it.
+    execFileSyncMock.mockImplementation(() => { throw new Error('fatal: detected dubious ownership'); });
+    root = mkdtempSync(join(tmpdir(), 'gitref-'));
+    mkdirSync(join(root, '.git', 'refs', 'remotes', 'origin'), { recursive: true });
+  });
+
+  it('reads a loose remote ref', () => {
+    writeFileSync(join(root, '.git', 'refs', 'remotes', 'origin', 'main'), `${sha}\n`);
+    expect(readGitRef(root, 'refs/remotes/origin/main')).toBe(sha);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('reads a packed remote ref', () => {
+    writeFileSync(join(root, '.git', 'packed-refs'), `# pack-refs with: peeled fully-peeled sorted\n${packedSha} refs/remotes/origin/main\n`);
+    expect(readGitRef(root, 'refs/remotes/origin/main')).toBe(packedSha);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('returns null for a missing ref', () => {
+    expect(readGitRef(root, 'refs/remotes/origin/main')).toBeNull();
+    rmSync(root, { recursive: true, force: true });
   });
 });

@@ -205,9 +205,13 @@ export class HydraValidator {
       if (kind === 'combine' || kind === 'combineCoord') {
         firstNumberSlot = 1;
         if (args[0] && returnsNumber(args[0])) {
-          found.push({ at, message: `Hydra ${label} argument 1 is a function returning a number, but ${label} takes a source there, like .${name}(osc(10), () => ...): hydra throws "arr.slice is not a function" every frame and nothing draws. To scale brightness use .color(r, g, b) or .brightness(() => ...)` });
+          found.push({ at, message: kind === 'combineCoord'
+            ? `Hydra ${label} argument 1 is a function returning a number, but ${label} takes a source there, like .${name}(noise(3), 0.1) (the source distorts the picture, the number is how much): hydra throws "arr.slice is not a function" every frame and nothing draws. To animate a plain number use .scale(() => ...) or .rotate(() => ...), or put the function in the amount: .${name}(noise(3), () => ...)`
+            : `Hydra ${label} argument 1 is a function returning a number, but ${label} takes a source there, like .${name}(osc(10), () => ...): hydra throws "arr.slice is not a function" every frame and nothing draws. To scale brightness use .color(r, g, b) or .brightness(() => ...)` });
         } else if (notASource(args[0])) {
-          found.push({ at, message: `Hydra ${label} needs a source as argument 1, like .${name}(osc(10)) or .${name}(o1): without one hydra cannot build the shader and the frame renders black` });
+          found.push({ at, message: kind === 'combineCoord'
+            ? `Hydra ${label} needs a source as argument 1, like .${name}(noise(3), 0.1) or .${name}(o1, 0.1) (the source distorts the picture, the number is how much): without one hydra cannot build the shader and the frame renders black. A plain number is not a source; to move or resize the picture by a number use .scale(...), .rotate(...) or .scrollX(...)`
+            : `Hydra ${label} needs a source as argument 1, like .${name}(osc(10)) or .${name}(o1): without one hydra cannot build the shader and the frame renders black` });
         }
       }
       args.slice(firstNumberSlot).forEach((arg, index) => {

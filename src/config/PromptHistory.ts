@@ -63,6 +63,8 @@ export class PromptHistory {
       
       return parsed;
     } catch (err) {
+      // First run: no history file yet is normal, not a warning with a stack trace.
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return { recent: [], favorites: [] };
       Logger.warn('PromptHistory', 'Failed to load history, using defaults:', err);
       return { recent: [], favorites: [] };
     }

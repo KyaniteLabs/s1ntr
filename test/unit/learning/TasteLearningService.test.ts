@@ -301,6 +301,25 @@ describe('TasteLearningService — NIMA aesthetic enrichment', () => {
     expect((await incomplete.trainFromProject()).nimaEnrichment).toEqual({ status: 'incomplete', scored: 0, missingPreview: 0, failedScore: 2 });
   });
 
+  it('keeps the verified score and skips preview rendering for signed generation labels', async () => {
+    const operationDigest = 'a'.repeat(64);
+    const id = 'sinter://artifact/' + operationDigest;
+    const entry = makeEntry(id, 0.4, 0.8);
+    const artifactRef = sinterFs.writeArtifact({ kind: 'generated-code', content: '<html>art</html>', filename: 'source.html' });
+    const creativeLabel = createCreativeLabelAdmission({ trustKind: 'judge-scoring', allowedUses: ['evaluator-training'],
+      artifactDigest: artifactRef.hash!, evidenceDigest: 'b'.repeat(64), decisionDigest: 'c'.repeat(64),
+      rendered: true, identityValid: true, digestMatched: true, degraded: false,
+      trainingEvidence: { operationDigest, quality: entry.qualityScore } });
+    new ArchiveEntriesFSAdapter(sinterFs).writeArchiveEntry({ ...entry, artifactRef, creativeLabel,
+      lineage: { ...entry.lineage, artifactId: operationDigest } });
+    const nima = makeNimaStub({ available: true, score: 9.5 });
+    const previewProvider = vi.fn(() => Buffer.from('mutable preview'));
+    const summary = await new TasteLearningService(sinterFs, { nima, previewProvider }).trainFromProject();
+    expect(summary.reason).toBe('no usable preference pairs');
+    expect(nima.availabilityCallCount()).toBe(0);
+    expect(previewProvider).not.toHaveBeenCalled();
+  });
+
   it('trainFromProject() persists a model using NIMA-derived quality', async () => {
     const archive = new ArchiveEntriesFSAdapter(sinterFs);
     archive.writeArchiveEntry(makeEntry('liked', 0.9, 0.8));

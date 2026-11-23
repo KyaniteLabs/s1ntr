@@ -2018,7 +2018,7 @@ Return exactly one JSON object with keys thought, tool, params, expectedResult. 
   private maybeInjectEditDeadline(session: LLMSession, maxSteps: number): void {
     if (!this.isBoundedInspectionRun(session) || session.task.requiresMutation !== true) return;
     if (session.stepCount < 2) return;
-    if (session.mutatedFiles.size > 0 || session.backups.length > 0) return;
+    if (session.mutatedFiles.size > 0) return;
     const last = this.boundedEditDeadlineStep(maxSteps);
     const left = last - session.stepCount + 1;
     if (left > 3 || left < 1) return;
@@ -2074,7 +2074,7 @@ Return exactly one JSON object with keys thought, tool, params, expectedResult. 
     if ((result.data as { skipped?: boolean } | undefined)?.skipped) return false;
     const required = this.getRequiredVerificationTarget(session.task);
     if (required && !this.matchesVerificationTarget(toolCall, required)) return false;
-    return session.backups.length > 0 || session.mutatedFiles.size > 0;
+    return session.mutatedFiles.size > 0;
   }
 
   private getRequiredVerificationTarget(task: LLMTask): NonNullable<LLMTask['verificationTargets']>[number] | undefined {
@@ -2150,7 +2150,7 @@ Return exactly one JSON object with keys thought, tool, params, expectedResult. 
       return null;
     }
     if (session.task.requiresMutation !== true) return null;
-    if (session.mutatedFiles.size > 0 || session.backups.length > 0) return null;
+    if (session.mutatedFiles.size > 0) return null;
     return 'Mutation gate: execute at least one successful writeFile/applyEdit before completing this self-improvement task.';
   }
 
@@ -2254,8 +2254,10 @@ Return exactly one JSON object with keys thought, tool, params, expectedResult. 
     // Must have spent more than half the budget
     if (session.stepCount <= this.boundedEditDeadlineStep(maxSteps)) return false;
 
-    // Must have no mutations at all
-    if (session.mutatedFiles.size > 0 || session.backups.length > 0) return false;
+    if (session.mutatedFiles.size > 0) return false;
+    // A failed edit can leave a backup. Keep it for recovery on optional runs,
+    // but a required edit still has to land before its deadline.
+    if (!session.task.requiresMutation && session.backups.length > 0) return false;
 
     // Must have already completed meaningful successful inspection work
     if (!this.hasConcreteSuccessfulInspection(session)) return false;

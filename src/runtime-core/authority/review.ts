@@ -36,10 +36,22 @@ export const reviewAuthorityRows: readonly ProductionAuthorityPath[] = [
     'authoritative',
   ),
   authorityRow(
+    'src/runtime-core/ProductRerenderReevaluation.ts:journal',
+    'journal',
+    'operation-journal-authority',
+    'authoritative',
+  ),
+  authorityRow(
     'src/cli/LiminalAuthoritativeCreate.ts:journal',
     'journal',
     'operation-journal-authority',
     'authoritative',
+  ),
+  authorityRow(
+    'src/learning/ExistingArtDigest.ts:journal',
+    'journal',
+    'operation-journal-authority',
+    'projection-only',
   ),
   authorityRow(
     'src/cli/LiminalRenderedEvidenceProof.ts:journal',

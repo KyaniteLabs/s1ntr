@@ -127,15 +127,6 @@ export class CreativeIterationGate {
     const promptLower = prompt.toLowerCase();
     if (promptLower.includes('ascii') || promptLower.includes('text art')) return 'ascii';
     if (promptLower.includes('music') || promptLower.includes('strudel') || promptLower.includes('hydra')) return 'music';
-    if (
-      promptLower.includes('revideo') ||
-      promptLower.includes('video') ||
-      promptLower.includes('motion graphics') ||
-      promptLower.includes('title sequence')
-    ) {
-      return 'revideo';
-    }
-
     return domain;
   }
 }

@@ -25,6 +25,8 @@ export interface PixelVisibilityAnalysis {
   brightFraction: number;
   darkFraction: number;
   clippedHighlightFraction: number;
+  /** Fill ratio of the clipped pixels inside their own bounding box (1 = solid rectangle). */
+  clippedBoundsFill?: number;
 }
 
 type SharpPipeline = {
@@ -110,6 +112,10 @@ export function analyzeDecodedPixels(decoded: DecodedImagePixels): PixelVisibili
   let brightPixels = 0;
   let darkPixels = 0;
   let clippedHighlightPixels = 0;
+  let clipMinX = Infinity;
+  let clipMaxX = -1;
+  let clipMinY = Infinity;
+  let clipMaxY = -1;
 
   for (let pixel = 0; pixel < pixelCount; pixel += step) {
     const idx = pixel * 4;
@@ -131,7 +137,15 @@ export function analyzeDecodedPixels(decoded: DecodedImagePixels): PixelVisibili
     luminanceSum += luminance;
     if (luminance > BRIGHT_LUMINANCE_THRESHOLD) brightPixels++;
     if (luminance < DARK_LUMINANCE_THRESHOLD) darkPixels++;
-    if (luminance >= CLIPPED_HIGHLIGHT_LUMINANCE_THRESHOLD) clippedHighlightPixels++;
+    if (luminance >= CLIPPED_HIGHLIGHT_LUMINANCE_THRESHOLD) {
+      clippedHighlightPixels++;
+      const px = pixel % decoded.width;
+      const py = Math.floor(pixel / decoded.width);
+      if (px < clipMinX) clipMinX = px;
+      if (px > clipMaxX) clipMaxX = px;
+      if (py < clipMinY) clipMinY = py;
+      if (py > clipMaxY) clipMaxY = py;
+    }
     colors.add((r << 16) | (g << 8) | b);
   }
 
@@ -143,10 +157,17 @@ export function analyzeDecodedPixels(decoded: DecodedImagePixels): PixelVisibili
   const brightFraction = opaquePixels > 0 ? brightPixels / opaquePixels : 0;
   const darkFraction = opaquePixels > 0 ? darkPixels / opaquePixels : 0;
   const clippedHighlightFraction = opaquePixels > 0 ? clippedHighlightPixels / opaquePixels : 0;
+  // Sampling strides over the flat index, so the bounds are approximate; the
+  // estimate is clamped to 1 and only consulted when it is near 1.
+  const clipBoundsArea = clipMaxX >= 0 ? (clipMaxX - clipMinX + 1) * (clipMaxY - clipMinY + 1) : 0;
+  const clippedBoundsFill = clipBoundsArea > 0
+    ? Math.min(1, (clippedHighlightPixels * step) / clipBoundsArea)
+    : undefined;
 
   if (opaquePixels === 0 || visibleRatio < 0.01) {
     return {
       ...baseAnalysis(decoded.width, decoded.height, sampledPixels, opaquePixels, visibleRatio, colors.size, brightnessStd, meanLuminance, brightFraction, darkFraction, clippedHighlightFraction),
+      clippedBoundsFill,
       hasVisibleContent: false,
       reason: 'decoded screenshot is transparent',
     };
@@ -155,6 +176,7 @@ export function analyzeDecodedPixels(decoded: DecodedImagePixels): PixelVisibili
   if (colors.size <= 1 || brightnessStd < 0.5) {
     return {
       ...baseAnalysis(decoded.width, decoded.height, sampledPixels, opaquePixels, visibleRatio, colors.size, brightnessStd, meanLuminance, brightFraction, darkFraction, clippedHighlightFraction),
+      clippedBoundsFill,
       hasVisibleContent: false,
       reason: 'decoded screenshot is blank or solid',
     };
@@ -162,6 +184,7 @@ export function analyzeDecodedPixels(decoded: DecodedImagePixels): PixelVisibili
 
   return {
     ...baseAnalysis(decoded.width, decoded.height, sampledPixels, opaquePixels, visibleRatio, colors.size, brightnessStd, meanLuminance, brightFraction, darkFraction, clippedHighlightFraction),
+      clippedBoundsFill,
     hasVisibleContent: true,
   };
 }

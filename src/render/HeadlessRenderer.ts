@@ -9,6 +9,7 @@
 // (erased at compile time) so importing this module — and therefore the whole
 // `sinter` package — never eagerly loads playwright. The `chromium` runtime
 // value is loaded lazily, on the render path, via `await import('playwright')`.
+import { classifyRenderFailure } from './RenderFailureCause.js';
 import { createHash } from 'node:crypto';
 import os from 'node:os';
 import type { Browser, Page, BrowserContext, ConsoleMessage } from 'playwright';
@@ -22,13 +23,16 @@ import { getPinnedBrowserAssetForUrl,
 import { missingChromiumError } from '../utils/browserPreflight.js';
 import { getChromeArgs, isNetworkIsolatedRenderEnabled, launchPlaywrightChromium } from '../security/SandboxConfig.js';
 import { runInSandbox } from '../sandbox/index.js';
-import type { DomainString } from '../types/domains.js';
+import type { EngineDomainString } from '../types/domains.js';
 import { summarizeAudioCapture } from './AudioEvidence.js';
-import { STRUDEL_TEMPO_SCRIPT } from './strudelTempo.js';
-import { renderBlender } from './BlenderRenderer.js';
+import { decodeImagePixels } from './DecodedImageVisibility.js';
+import { musicRuntimeScript } from '../core/wrappers/musicRuntime.js';
+import { BLENDER_DEFAULT_TIMEOUT_MS, renderBlender } from './BlenderRenderer.js';
+import { renderNextDomain } from './NextDomainRenderer.js';
+import { nextDomainActive } from '../config/nextDomains.js';
 import { RevideoRenderer } from './RevideoRenderer.js';
 
-export type RenderDomain = Extract<DomainString, 'p5' | 'three' | 'glsl' | 'hydra' | 'strudel' | 'tone' | 'svg' | 'html' | 'dataviz' | 'meta' | 'ascii' | 'kinetic' | 'textgen' | 'hyperframes' | 'revideo' | 'blender' | 'unknown'>;
+export type RenderDomain = Extract<EngineDomainString, 'p5' | 'three' | 'glsl' | 'hydra' | 'strudel' | 'tone' | 'svg' | 'html' | 'dataviz' | 'custom' | 'ascii' | 'kinetic' | 'textgen' | 'hyperframes' | 'revideo' | 'blender' | 'nbe' | 'unknown'>;
 
 export interface RenderOptions {
   /** Canvas width in pixels */
@@ -37,6 +41,10 @@ export interface RenderOptions {
   height?: number;
   /** Timeout for rendering in milliseconds */
   timeout?: number;
+  /** Caller deadline for capture. Browser setup is cancellable before loading code. Native backends retain their own budgets. */
+  hardDeadlineMs?: number;
+  /** Revideo only: wall-clock budget for the whole scene render (default 60 s); on expiry the render fails with RENDER_TIMEOUT. */
+  renderTimeoutMs?: number;
   /** Whether to wait for animation/video to stabilize */
   waitForStabilization?: boolean;
   /** Stabilization time in milliseconds */
@@ -58,6 +66,8 @@ export interface RenderOptions {
   arcHorizonMs?: number;
   /** Wall-clock ceiling for the fast-forward; the late frame is taken wherever it stops. */
   arcWallBudgetMs?: number;
+  /** NBE only: how long to wait for the page's nbe:converged message before failing the render (default 8 s, capped by timeout). */
+  nbeConvergenceTimeoutMs?: number;
   /** Domain hint for specialized rendering */
   domain?: RenderDomain;
   /** Keep the Playwright page open for advanced callers */
@@ -117,6 +127,8 @@ export interface AudioCaptureResult {
 export interface RenderResult {
   /** False when the scene itself was not rendered. */
   rendered?: boolean;
+  /** Deadline before any candidate code started. */
+  setupDeadline?: boolean;
   /** #1637: virtual-clock arc capture; the late frame shows the piece at `reachedMs`. */
   arc?: { horizonMs: number; reachedMs: number; wallMs: number };
   /** The Playwright page instance (for advanced use) */
@@ -129,6 +141,8 @@ export interface RenderResult {
   audio?: AudioCaptureResult;
   /** Whether rendering succeeded */
   success: boolean;
+  /** Blender only: why the render failed, so a missing binary is not read as a bad script. */
+  failureKind?: string;
   /** Error message if rendering failed */
   error?: string;
   /** Console logs from the page */
@@ -150,12 +164,15 @@ const DEFAULT_OPTIONS: Required<RenderOptions> = {
   width: 800,
   height: 600,
   timeout: 30000,
+  hardDeadlineMs: 0,
+  renderTimeoutMs: 60_000,
   waitForStabilization: true,
   stabilizationTime: 500,
   lateCaptureDelay: 3000,
   audioCaptureMs: 0,
   arcHorizonMs: 0,
   arcWallBudgetMs: 12_000,
+  nbeConvergenceTimeoutMs: 8_000,
   domain: 'unknown',
   keepPageOpen: false,
   omitBackground: false,
@@ -267,6 +284,11 @@ function audioCapturePageInit(maxSamples: number): void {
     || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
   if (!OriginalAudioContext) return;
   const captureSinks = new WeakMap<BaseAudioContext, ScriptProcessorNode>();
+  // A single startup impulse may precede the engine that plays the piece.
+  // Once two contexts carry sustained audio, a single-track capture remains incomplete.
+  let owner: ScriptProcessorNode | null = null;
+  let ownerSoundSamples = 0;
+  let handedOff = false;
   const drains = new WeakSet<AudioNode>();
   // A destination may be fed by any node (Strudel ends at a compressor), not
   // just gains and oscillators. Tap only connections that actually reach it.
@@ -324,16 +346,36 @@ function audioCapturePageInit(maxSamples: number): void {
           // after the window (sample load, scheduler start, slow cpm) filled it
           // with leading zeros and was judged silent at random (same playable:
           // peak 0 on one render, 4.9 on the next).
+          //
+          const self = this._scriptProcessor;
+          if (self !== owner || ownerSoundSamples < 2) {
+            let audible = 0;
+            for (const sample of inputData) {
+              if (sample !== 0 && ++audible === 2) break;
+            }
+            if (!owner && audible > 0) owner = self;
+            if (owner !== self) {
+              if (audible === 0) return;
+              if (!handedOff && ownerSoundSamples === 1 && audible >= 2) {
+                owner = self;
+                ownerSoundSamples = 0;
+                handedOff = true;
+                captureData.length = 0;
+              } else {
+                (window as unknown as { __audioCaptureIncomplete?: boolean }).__audioCaptureIncomplete = true;
+                return;
+              }
+            }
+            ownerSoundSamples += audible;
+          }
           let i = 0;
           if (captureData.length === 0) {
             while (i < inputData.length && inputData[i] === 0) i += 1;
+            if (i < inputData.length) {
+              (window as unknown as { __audioCaptureRate: number }).__audioCaptureRate = ctxRate;
+            }
           }
-          if (captureData.length === 0 && i < inputData.length) {
-            (window as unknown as { __audioCaptureRate: number }).__audioCaptureRate = ctxRate;
-          }
-          for (; i < inputData.length && captureData.length < cap; i += 1) {
-            captureData.push(inputData[i]);
-          }
+          for (; i < inputData.length && captureData.length < cap; i += 1) captureData.push(inputData[i]);
         };
         // Processor output drains through a zero-gain node: onaudioprocess
         // fires on input connections alone, and this keeps the tap from
@@ -372,45 +414,9 @@ function audioCapturePageInit(maxSamples: number): void {
   };
   hookTone();
   setInterval(hookTone, 100);
-  // strudel pattern-method shims: corpus pieces chain .bpm(...)/.tempo(...)/
-  // .cpm(...) onto patterns (TidalCycles-style teaching drift); strudel has no
-  // such methods, so the whole pattern eval crashed (silent). No-op methods
-  // keep the piece playing at the scheduler's default tempo.
-  let strudelPatternPatched = false;
-  const patchStrudelPattern = () => {
-    if (strudelPatternPatched) return;
-    const P = (window as unknown as { strudel?: { Pattern?: { prototype: Record<string, unknown> } } }).strudel?.Pattern;
-    if (!P?.prototype) return;
-    const proto = P.prototype as Record<string, unknown> & { __liminalPatternShimmed?: boolean };
-    if (proto.__liminalPatternShimmed) { strudelPatternPatched = true; return; }
-    for (const m of ['bpm', 'cpm', 'tempo', 'setcpm', 'setbpm']) {
-      if (typeof proto[m] !== 'function') {
-        proto[m] = function (this: unknown) { return this; };
-      }
-    }
-    proto.__liminalPatternShimmed = true;
-    strudelPatternPatched = true;
-  };
-  patchStrudelPattern();
-  setInterval(patchStrudelPattern, 200);
-  // strudel short-name sample bank (bd/hh/cp...): the strudel.b-cdn.net
-  // banks only carry machine-prefixed names, so corpus pieces using classic
-  // Dirt short names triggered "sound bd not found" and stayed silent. Load
-  // the Dirt-Samples bank the same way the real REPL does. Renderer-side so
-  // STORED playables heal on replay/rescore (wrapper fix covers new pieces).
-  let strudelBanked = false;
-  const bankStrudel = async () => {
-    if (strudelBanked) return;
-    const sd = (window as unknown as { strudel?: { initStrudel?: () => Promise<unknown>; samples?: (u: string) => Promise<unknown> } }).strudel;
-    if (!sd?.initStrudel || typeof sd.samples !== 'function') return;
-    strudelBanked = true;
-    try {
-      await sd.initStrudel();
-      await sd.samples('https://raw.githubusercontent.com/tidalcycles/Dirt-Samples/master/strudel.json');
-    } catch { /* best effort */ }
-  };
-  void bankStrudel();
-  setInterval(() => { void bankStrudel(); }, 300);
+  // Strudel/Tone compatibility (tempo globals, Pattern no-ops, sample
+  // banks) lives in the shared music runtime, injected beside this script
+  // (#1732). This init only taps audio.
 }
 
 /**
@@ -505,6 +511,11 @@ function readPlaybackState(domain: string): PlaybackState {
 /**
  * Headless renderer for creative coding outputs
  */
+export function computeRendererEnvironmentDigest(executablePath: string, version: string): string {
+  return createHash('sha256').update(JSON.stringify({
+    engine: 'playwright-chromium', executablePath, version })).digest('hex');
+}
+
 export class HeadlessRenderer {
   private browser: Browser | null = null;
   private initializing: Promise<void> | null = null;
@@ -544,6 +555,20 @@ export class HeadlessRenderer {
    * place so callers like rescore-tops.mjs get the same logic (#339).
    */
   // eslint-disable-next-line @typescript-eslint/require-await
+  /** Launch the real browser and return the digest every observation will carry (F07). Throws when no browser can launch. */
+  static async probeRendererEnvironmentDigest(): Promise<string> {
+    const executablePath = await HeadlessRenderer.resolveChromiumExecutable();
+    if (!executablePath) throw missingChromiumError();
+    const { chromium } = await import('playwright');
+    const browser = await launchPlaywrightChromium(chromium, {
+      headless: true, executablePath,
+      args: getChromeArgs({ forceDisableSandbox: process.env.LIMINAL_DISABLE_SANDBOX === 'true' }) });
+    try {
+      return computeRendererEnvironmentDigest(executablePath,
+        typeof browser.version === 'function' ? browser.version() : 'unknown');
+    } finally { await browser.close(); }
+  }
+
   private static async resolveChromiumExecutable(): Promise<string | undefined> {
     return resolveChromiumExecutablePath();
   }
@@ -578,17 +603,10 @@ export class HeadlessRenderer {
         const browserVersion = typeof this.browser.version === 'function'
           ? this.browser.version()
           : 'unknown';
-        this.rendererEnvironmentDigest = createHash('sha256').update(JSON.stringify({
-          engine: 'playwright-chromium', executablePath,
-          version: browserVersion })).digest('hex');
+        this.rendererEnvironmentDigest = computeRendererEnvironmentDigest(executablePath, browserVersion);
       }
 
-      this.context = await this.browser.newContext({
-        viewport: { width: 1280, height: 720 },
-        deviceScaleFactor: 1,
-        serviceWorkers: 'block',
-        acceptDownloads: false,
-      });
+      this.context = await HeadlessRenderer.newRenderContext(this.browser);
       if (typeof this.context.clearPermissions === 'function') {
         await this.context.clearPermissions();
         this.permissionsCleared = true;
@@ -600,6 +618,15 @@ export class HeadlessRenderer {
       throw new Error(`Failed to initialize headless browser: ${error instanceof Error ? error.message : 'unknown error'}`,
         { cause: error instanceof Error ? error : undefined });
     }
+  }
+
+  private static newRenderContext(browser: Browser): Promise<BrowserContext> {
+    return browser.newContext({
+      viewport: { width: 1280, height: 720 },
+      deviceScaleFactor: 1,
+      serviceWorkers: 'block',
+      acceptDownloads: false,
+    });
   }
 
   /**
@@ -651,13 +678,13 @@ export class HeadlessRenderer {
    * request interception admits only its own file:// URLs, and realtime
    * transports, storage and device permissions are removed (#1628).
    */
-  private static async renderRevideoScene(code: string, maximumOutputBytes: number): Promise<RenderResult> {
+  private static async renderRevideoScene(code: string, maximumOutputBytes: number, timeoutMs: number, signal: AbortSignal): Promise<RenderResult> {
     if (Buffer.byteLength(code) > maximumOutputBytes) {
       const error = 'RENDER_OUTPUT_BYTES_EXCEEDED';
       return { rendered: false, success: false, error, logs: [], errors: [error], pageErrors: [] };
     }
     try {
-      const stills = await new RevideoRenderer().renderStills(code, { fps: 30, width: 960, height: 540 });
+      const stills = await new RevideoRenderer().renderStills(code, { fps: 30, width: 960, height: 540, timeoutMs, signal });
       const shot = (buffer: Buffer): ScreenshotResult => ({ buffer, width: stills.width, height: stills.height, success: true });
       const c = stills.containment;
       const containment: NonNullable<RenderEvidence['containment']> = {
@@ -678,11 +705,11 @@ export class HeadlessRenderer {
   }
 
   /** Run a bpy script headless and adapt the PNG to the screenshot shape the judges consume. */
-  private static async renderBlenderScript(code: string): Promise<RenderResult> {
-    const result = await renderBlender(code);
+  private static async renderBlenderScript(code: string, timeoutMs: number): Promise<RenderResult> {
+    const result = await renderBlender(code, { timeoutMs });
     if (!result.success || !result.png) {
       const error = result.error ?? 'Blender render failed';
-      return { success: false, error, logs: result.logs, errors: [error], pageErrors: [] };
+      return { success: false, error, failureKind: result.failureKind, logs: result.logs, errors: [error], pageErrors: [] };
     }
     const shot: ScreenshotResult = {
       buffer: result.png, width: result.width ?? 0, height: result.height ?? 0, success: true,
@@ -699,20 +726,62 @@ export class HeadlessRenderer {
     return { rendered: true, success: true, screenshot: shot, lateScreenshot: shot, logs: result.logs, errors: [], pageErrors: [], containment };
   }
 
-  /**
-   * Render code and capture output
-   */
+  /** Bounds the caller's wait and starts cleanup for this render's own page. */
   async render(code: string, options: RenderOptions = {}): Promise<RenderResult> {
+    const nextDomain = typeof options.domain === 'string' && nextDomainActive(options.domain);
+    const nativeBudget = options.domain === 'blender'
+      ? options.renderTimeoutMs ?? BLENDER_DEFAULT_TIMEOUT_MS
+      : options.domain === 'revideo' || nextDomain
+        ? options.renderTimeoutMs ?? (nextDomain ? options.timeout : undefined) ?? DEFAULT_OPTIONS.renderTimeoutMs
+        : undefined;
+    const hardMs = options.hardDeadlineMs || nativeBudget || ((options.timeout ?? DEFAULT_OPTIONS.timeout)
+      + (options.arcWallBudgetMs ?? 0) + (options.lateCaptureDelay ?? DEFAULT_OPTIONS.lateCaptureDelay ?? 0)
+      + (options.audioCaptureMs ?? 0) + 30_000);
+    const controller = new AbortController();
+    const hold: { page?: Page; context?: BrowserContext; candidateStarted?: boolean } = {};
+    let timer: NodeJS.Timeout | undefined;
+    const expired = new Promise<'expired'>((resolve) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        resolve('expired');
+      }, hardMs);
+    });
+    const work = this.renderGuarded(code, options, hold, controller.signal, Math.min(hardMs, nativeBudget ?? hardMs));
+    try {
+      const winner = await Promise.race([work, expired]);
+      if (winner !== 'expired') return winner;
+    } finally {
+      clearTimeout(timer);
+    }
+    const codePrefix = nativeBudget === undefined ? 'RENDER_HARD_DEADLINE' : 'RENDER_TIMEOUT';
+    const error = `${codePrefix}: render exceeded ${hardMs} ms`;
+    void (hold.context ?? hold.page)?.close().catch(() => undefined);
+    return { success: false, error, setupDeadline: nativeBudget === undefined && !hold.candidateStarted,
+      logs: [], errors: [error], pageErrors: [] };
+  }
+
+  private async renderGuarded(code: string, options: RenderOptions, hold: { page?: Page; context?: BrowserContext; candidateStarted?: boolean },
+    signal: AbortSignal, nativeTimeoutMs: number): Promise<RenderResult> {
+    // Deprecated alias: `meta` was renamed `custom` (see canonicalDomainId).
+    if ((options.domain as string | undefined) === 'meta') options = { ...options, domain: 'custom' };
     // A real Revideo scene renders through its own Player + Stage harness (#1628).
     // The HTML timeline-preview wrapper is an approximation and never counts, and
     // code that only looks like Revideo is not auto-routed into the bundler.
     if (options.domain === 'revideo' && !/data-revideo-timeline-preview/.test(code)) {
-      return HeadlessRenderer.renderRevideoScene(code, options.maximumOutputBytes ?? DEFAULT_OPTIONS.maximumOutputBytes);
+      return HeadlessRenderer.renderRevideoScene(code, options.maximumOutputBytes ?? DEFAULT_OPTIONS.maximumOutputBytes,
+        nativeTimeoutMs, signal);
     }
     if (options.domain === 'revideo' || /data-revideo-timeline-preview/.test(code)
       || ((!options.domain || options.domain === 'unknown') && HeadlessRenderer.detectDomain(code) === 'revideo')) {
       const error = 'Revideo scene not rendered: wrapper is an approximation';
       return { rendered: false, success: false, error, logs: [], errors: [error], pageErrors: [] };
+    }
+    // Next-release domains (flag-gated, off by default) render through their own pipeline, never a browser page.
+    if (typeof options.domain === 'string' && nextDomainActive(options.domain)) {
+      return renderNextDomain(options.domain, code, process.env, {
+        timeoutMs: nativeTimeoutMs,
+        maximumOutputBytes: options.maximumOutputBytes ?? DEFAULT_OPTIONS.maximumOutputBytes,
+      });
     }
     // Detect domain BEFORE applying options so we know whether to use hydra viewport
     const detectedDomain = options.domain === 'unknown' || !options.domain
@@ -723,7 +792,7 @@ export class HeadlessRenderer {
     // It runs model-written code, so only an explicit domain opts in; code that merely
     // looks like bpy (unknown domain, no domain) is refused, never auto-routed.
     if (detectedDomain === 'blender') {
-      if (options.domain === 'blender') return HeadlessRenderer.renderBlenderScript(code);
+      if (options.domain === 'blender') return HeadlessRenderer.renderBlenderScript(code, nativeTimeoutMs);
       const error = 'bpy script detected; Blender renders only run for an explicit blender domain';
       return { rendered: false, success: false, error, logs: [], errors: [error], pageErrors: [] };
     }
@@ -752,9 +821,12 @@ export class HeadlessRenderer {
       assetDigests: [],
     };
     let page: Page | undefined;
+    let ownedContext: BrowserContext | undefined;
+    let keepPage = false;
     let playback: RenderResult['playback'];
     let interaction: RenderResult['interaction'];
     const startedAt = Date.now();
+    let renderClockAt = startedAt;
 
     try {
       if (Buffer.byteLength(code) > opts.maximumOutputBytes) {
@@ -762,14 +834,32 @@ export class HeadlessRenderer {
       }
       containment.outputLimitEnforced = true;
       await this.initialize();
+      signal.throwIfAborted();
+      // The duration cap budgets the piece, not the host: a cold browser launch
+      // ate the crystal-k margin (2026-11-17), so the render clock starts here.
+      renderClockAt = Date.now();
       containment.permissionsDenied = this.permissionsCleared;
 
-      if (!this.context) {
+      const sharedContext = this.context;
+      if (!sharedContext) {
         throw new Error('Browser context not initialized');
       }
 
-      pagesBefore = typeof this.context.pages === 'function' ? this.context.pages().length : 0;
-      page = await this.context.newPage();
+      if (opts.networkPolicy === 'isolated') {
+        if (!this.browser) throw new Error('Browser not initialized');
+        ownedContext = await HeadlessRenderer.newRenderContext(this.browser);
+        hold.context = ownedContext;
+        signal.throwIfAborted();
+        containment.permissionsDenied = false;
+        await ownedContext.clearPermissions();
+        containment.permissionsDenied = true;
+      }
+      signal.throwIfAborted();
+      const renderContext = ownedContext ?? sharedContext;
+      pagesBefore = typeof renderContext.pages === 'function' ? renderContext.pages().length : 0;
+      page = await renderContext.newPage();
+      hold.page = page;
+      signal.throwIfAborted();
       const readBusyMs = await HeadlessRenderer.startBusyMeter(page);
       // The clock goes in before the guards so the timer census wraps the fake
       // timers; the guards seal setTimeout, which would block a later install.
@@ -779,8 +869,8 @@ export class HeadlessRenderer {
           / Math.max(1, opts.stabilizationTime + opts.lateCaptureDelay)))
         : opts.maximumTimers;
       const guardsInstalled = await this.installContainmentGuards(page,
-        { ...opts, maximumTimers: timerLimit });
-      containment.routeInstalled = await this.installLocalAssetFallbacks(page, opts.networkPolicy,
+        { ...opts, maximumTimers: timerLimit }, ownedContext);
+      containment.routeInstalled = await this.installLocalAssetFallbacks(ownedContext ?? page, opts.networkPolicy,
         () => { containment.blockedRequests++; }, digest => assetDigests.add(digest));
       containment.networkIsolated = opts.networkPolicy === 'isolated'
         && containment.routeInstalled && guardsInstalled;
@@ -824,10 +914,11 @@ export class HeadlessRenderer {
           // (floor 0.1 x cap 0.6) — starving the archive's best domain.
           : domain === 'textgen'
             ? 'ascii'
-            // kinetic, dataviz, and meta all emit complete HTML pages; render
-            // them via the html pass-through wrapper (dataviz = D3 HTML, meta =
-            // a custom-medium HTML page, same self-contained shape as html).
-            : domain === 'kinetic' || domain === 'dataviz' || domain === 'meta'
+            // kinetic, dataviz, meta, and nbe all emit complete HTML pages;
+            // render them via the html pass-through wrapper (dataviz = D3 HTML,
+            // meta = a custom-medium HTML page, nbe = the Neural Bloom Engine
+            // cascade-field page, same self-contained shape as html).
+            : domain === 'kinetic' || domain === 'dataviz' || domain === 'custom' || domain === 'nbe'
               ? 'html'
               : domain === 'unknown' ? undefined : domain
       });
@@ -837,6 +928,11 @@ export class HeadlessRenderer {
         // Instrumentation must exist in the page before Tone/strudel load:
         // prepend it into the head so it runs first.
         renderSource = HeadlessRenderer.audioCaptureScript(HeadlessRenderer.audioWindowMs(opts)) + renderSource;
+      }
+
+      if (domain === 'nbe') {
+        // Count the convergence signal the page must post (Sol L3-09). Prepended like the audio hook: init scripts do not run for setContent.
+        renderSource = HeadlessRenderer.NBE_CONVERGENCE_HOOK + renderSource;
       }
 
       // setContent runs at about:blank where /vendor/ URLs never resolve —
@@ -854,6 +950,8 @@ export class HeadlessRenderer {
         (digest) => { assetDigests.add(digest); }, { keepImportMaps: servedOrigin });
 
       // Load the HTML
+      signal.throwIfAborted();
+      hold.candidateStarted = true;
       await page.setContent(renderHtml, { waitUntil: 'domcontentloaded', timeout: opts.timeout });
 
       // Canvas-backed domains must be ready before capture.
@@ -891,6 +989,14 @@ export class HeadlessRenderer {
               containment,
             };
           }
+        } else if (domain === 'three' || domain === 'glsl' || domain === 'p5') {
+          // Capture after the first drawn frame, not the first canvas: async
+          // setup (holo.ready, loaders) left early captures black. Soft: a
+          // genuinely dark scene must not fail here. Probed from the
+          // compositor, never getContext: claiming the canvas first broke
+          // three's WebGL2 context (CI, 2026-11-17).
+          const frameLit = await this.waitForLitCanvasScreenshot(page, Math.min(opts.timeout, HeadlessRenderer.SOFT_FIRST_FRAME_MS));
+          if (!frameLit) logs.push(`[warn] no lit ${domain} frame within ${HeadlessRenderer.SOFT_FIRST_FRAME_MS} ms; capturing anyway`);
         }
       }
       // Trigger audio playback for audio domains so we capture actual sound
@@ -901,6 +1007,40 @@ export class HeadlessRenderer {
         if (playbackReceipt.warning) {
           logs.push(`[warn] ${playbackReceipt.warning}`);
           errors.push(playbackReceipt.warning);
+        }
+      }
+
+      // Both captured frames must show the evolved field. Wait for its first signal before capturing either.
+      const readNbeSignals = (page: Page) => page.evaluate(() => (window as unknown as { __nbeConverged?: number }).__nbeConverged ?? 0).catch(() => 0);
+      if (domain === 'nbe') {
+        const limit = Number.isFinite(opts.nbeConvergenceTimeoutMs) ? opts.nbeConvergenceTimeoutMs : DEFAULT_OPTIONS.nbeConvergenceTimeoutMs;
+        const waitMs = Math.min(opts.timeout, limit);
+        let message: string | undefined;
+        const deadline = Date.now() + waitMs;
+        for (;;) {
+          const status = await page.evaluate(() => {
+            const engine = (window as unknown as { sinterEngine?: { state: string; error?: string } }).sinterEngine;
+            return {
+              id: document.documentElement.getAttribute('data-sinter-engine'),
+              state: engine?.state, error: engine?.error,
+              signals: (window as unknown as { __nbeConverged?: number }).__nbeConverged ?? 0,
+            };
+          });
+          if (status.id && status.state === 'failed') {
+            message = `ENGINE_FAILED:${status.id}: ${status.error ?? 'unknown failure'}`;
+            break;
+          }
+          if (status.signals > 0 && (!status.id || status.state === 'ready')) break;
+          if (Date.now() >= deadline) {
+            message = status.id && status.state !== 'ready'
+              ? `ENGINE_NOT_READY:${status.id}: not ready within ${waitMs} ms`
+              : `NBE_NOT_CONVERGED: no "nbe:converged" message within ${waitMs} ms`;
+            break;
+          }
+          await page.waitForTimeout(250);
+        }
+        if (message) {
+          errors.push(message); pageErrors.push(message);
         }
       }
 
@@ -916,11 +1056,15 @@ export class HeadlessRenderer {
         errors.push(screenshot.error);
       }
 
+      const stageTimeout = Math.min(opts.timeout, 2_000);
+      let stagePaint = domain === 'hyperframes' && screenshot.success
+        ? await this.hyperFramesStagePaints(page, stageTimeout) : undefined;
+
       // Preserve the distinct steady-state frame without a separate fixed delay.
       let lateScreenshot: ScreenshotResult | undefined;
       let arc: RenderResult['arc'];
       if (screenshot.success && opts.waitForStabilization) {
-        if (arcClock) arc = await this.fastForwardArc(page, opts, startedAt);
+        if (arcClock) arc = await this.fastForwardArc(page, opts, renderClockAt);
         else await page.waitForTimeout(opts.lateCaptureDelay);
         lateScreenshot = await this.captureScreenshot(page, opts);
         if (!lateScreenshot.success) {
@@ -929,13 +1073,42 @@ export class HeadlessRenderer {
         }
       }
 
+      if (domain === 'hyperframes' && stagePaint !== true && lateScreenshot?.success) {
+        const latePaint = await this.hyperFramesStagePaints(page, stageTimeout);
+        stagePaint = latePaint ?? stagePaint;
+      }
+
+      if (domain === 'nbe') {
+        const signals = await readNbeSignals(page);
+        logs.push(`[nbe] convergence signals observed: ${signals}`);
+        if (signals > 1) logs.push(`[warn] nbe:converged posted ${signals} times; the contract says exactly once`);
+      }
+
+      // The surrounding preview shell does not attest a painted composition.
+      if (domain === 'hyperframes') {
+        logs.push(`[hyperframes] stage paint: ${stagePaint === true ? 'visible' : stagePaint === false ? 'empty' : 'unverified'}`);
+        if (stagePaint !== true) {
+          const message = stagePaint === false
+            ? 'HYPERFRAMES_STAGE_EMPTY: the composition produced no visible pixels'
+            : 'HYPERFRAMES_STAGE_UNVERIFIED: unable to inspect the composition pixels';
+          errors.push(message); pageErrors.push(message);
+        }
+      }
+
       // After the late frame, so pointer events cannot change it.
       if (opts.observeInteraction) interaction = await this.observeInteraction(page);
 
       // Capture audio if applicable
       const audio = domain === 'tone' || domain === 'strudel'
-        ? await this.captureAudio(page, opts)
+        ? await this.captureAudio(page, opts, domain)
         : undefined;
+
+      // A silent render caused by the piece's own runtime error (#1760): lead
+      // with that error, the cause, and keep the empty-capture fact after it.
+      if (audio && !audio.success && audio.error === HeadlessRenderer.EMPTY_AUDIO_ERROR) {
+        const runtimeError = errors.find(message => message.trim().length > 0);
+        if (runtimeError) audio.error = `${runtimeError.trim()} (${HeadlessRenderer.EMPTY_AUDIO_ERROR})`;
+      }
 
       if (audio && !audio.success && audio.error) {
         logs.push(`[warn] ${audio.error}`);
@@ -966,7 +1139,7 @@ export class HeadlessRenderer {
           maximumAudioContexts: opts.maximumAudioContexts,
           maximumHeapBytes: opts.maximumHeapBytes, maximumDurationMs: opts.maximumDurationMs },
       })).digest('hex');
-      const postRunCensus = await this.collectPostRunCensus(page, startedAt, pagesBefore);
+      const postRunCensus = await this.collectPostRunCensus(page, renderClockAt, pagesBefore);
       // eslint-disable-next-line require-atomic-updates -- containment is a per-render local; no other task can observe or mutate it
       containment.postRunCensus = postRunCensus;
       if (postRunCensus.usedHeapBytes !== null
@@ -999,6 +1172,11 @@ export class HeadlessRenderer {
         throw new Error('RENDER_AUDIO_CONTEXT_LIMIT_EXCEEDED');
       }
 
+      keepPage = opts.keepPageOpen;
+      if (keepPage && ownedContext) {
+        const context = ownedContext;
+        page.once('close', () => { void context.close().catch(() => undefined); });
+      }
       return {
         page: opts.keepPageOpen ? page : undefined,
         screenshot,
@@ -1042,14 +1220,19 @@ export class HeadlessRenderer {
         rendererEnvironmentDigest: this.rendererEnvironmentDigest,
       };
     } finally {
-      if (page && !opts.keepPageOpen) {
+      if ((ownedContext || page) && (!keepPage || signal.aborted)) {
         try {
-          await page.close();
-          const pagesAfter = this.context && typeof this.context.pages === 'function'
-            ? this.context.pages().length : pagesBefore;
+          if (ownedContext) await ownedContext.close();
+          else await page?.close();
+          const context = ownedContext ?? this.context;
+          const open = typeof context?.pages === 'function' ? context.pages() : undefined;
+          const pagesAfter = open?.length ?? pagesBefore;
           if (containment.postRunCensus) containment.postRunCensus.pagesAfter = pagesAfter;
           // eslint-disable-next-line require-atomic-updates -- containment is a per-render local; no other task can observe or mutate it
-          containment.cleanupSucceeded = pagesAfter === pagesBefore;
+          // Judge this request's page. Other reads on the shared context can change the census.
+          containment.cleanupSucceeded = ownedContext
+            ? open?.length === 0
+            : Boolean(page?.isClosed() && !open?.includes(page));
         } catch (closeError) {
           Logger.debug('HeadlessRenderer', 'Failed to close render page:', closeError);
         }
@@ -1059,13 +1242,13 @@ export class HeadlessRenderer {
     }
   }
 
-  private async installLocalAssetFallbacks(page: Page,
+  private async installLocalAssetFallbacks(target: Page | BrowserContext,
     policy: 'assets-only' | 'isolated' = 'assets-only',
     onBlocked: () => void = () => undefined,
     onAsset: (digest: string) => void = () => undefined): Promise<boolean> {
-    if (typeof page.route !== 'function') return false;
+    if (typeof target.route !== 'function') return false;
 
-    await page.route('**/*', async (route) => {
+    await target.route('**/*', async (route) => {
       const url = route.request().url();
       try {
         if (url.startsWith(`${RENDER_ORIGIN}/`)) {
@@ -1119,6 +1302,9 @@ export class HeadlessRenderer {
     return true;
   }
 
+  /** How long three/glsl/p5 renders wait for a lit frame before capturing anyway. */
+  static readonly SOFT_FIRST_FRAME_MS = 5_000;
+
   /** Wall time kept back from maximumDurationMs for the late capture and census. */
   private static readonly ARC_DURATION_RESERVE_MS = 10_000;
   /** The probe needs about a second at full speed; throttled timers can stretch it, so allow ten. */
@@ -1149,10 +1335,31 @@ export class HeadlessRenderer {
       opts.maximumDurationMs - (started - renderStartedAt) - HeadlessRenderer.ARC_DURATION_RESERVE_MS);
     const elapsedBeforeArc = opts.stabilizationTime;
     let reachedMs = elapsedBeforeArc;
-    while (reachedMs < opts.arcHorizonMs && Date.now() - started < budgetMs) {
-      const step = Math.min(1_000, opts.arcHorizonMs - reachedMs);
+    // runFor cannot be interrupted: a fixed one-second step on a piece whose
+    // frames take ~0.5 s each (holospot foils on swiftshader) ran 30 s past the
+    // budget and tripped RENDER_DURATION_LIMIT_EXCEEDED. Probe with a short
+    // step, then size each step to the wall left at the measured cost.
+    let wallPerPieceMs = 0;
+    let step = Math.min(250, opts.arcHorizonMs - reachedMs);
+    while (reachedMs < opts.arcHorizonMs && step > 0) {
+      let left = budgetMs - (Date.now() - started);
+      // A horizon more than 10x beyond the wall left is out of reach (foil
+      // frames run ~17 ms of wall per ms of piece): the late frame lands
+      // near the start either way, so spend half the budget, not all of it.
+      if (wallPerPieceMs * (opts.arcHorizonMs - reachedMs) > 10 * left) {
+        left = Math.min(left, budgetMs / 2 - (Date.now() - started));
+      }
+      if (left <= 0) break;
+      if (wallPerPieceMs > 0) {
+        const fits = Math.floor(left / wallPerPieceMs);
+        if (fits < 100) break;
+        step = Math.min(1_000, opts.arcHorizonMs - reachedMs, fits);
+      }
+      const t = Date.now();
       await page.clock.runFor(step);
       reachedMs += step;
+      wallPerPieceMs = Math.max(wallPerPieceMs, (Date.now() - t) / step);
+      if (wallPerPieceMs === 0) step = Math.min(1_000, opts.arcHorizonMs - reachedMs);
     }
     return { horizonMs: opts.arcHorizonMs, reachedMs, wallMs: Date.now() - started };
   }
@@ -1160,8 +1367,9 @@ export class HeadlessRenderer {
   private async installContainmentGuards(page: Page, limits: {
     maximumEventListeners: number; maximumEvents: number; maximumTimers: number;
     maximumAudioContexts: number; maximumHeapBytes: number;
-  }): Promise<boolean> {
-    if (typeof page.addInitScript !== 'function') return false;
+  }, context?: BrowserContext): Promise<boolean> {
+    const target = context ?? page;
+    if (typeof target.addInitScript !== 'function') return false;
     const install = (policy: typeof limits) => {
       const root = globalThis as unknown as Record<string, unknown>;
       if (root.__liminalContainmentInstalled) return;
@@ -1226,7 +1434,8 @@ export class HeadlessRenderer {
       }
     };
     const content = `const __name=(value)=>value;(${install.toString()})(${JSON.stringify(limits)});`;
-    await page.addInitScript({ content });
+    // No generated code runs before this context-wide policy is installed.
+    await target.addInitScript({ content });
     if (typeof page.evaluate === 'function') await page.evaluate(content);
     return true;
   }
@@ -1315,21 +1524,8 @@ export class HeadlessRenderer {
     // Only the renderer's own reason counts: text the piece threw is removed, so
     // a sketch's "browser is not defined" is not read as a missing browser. A
     // captured frame proves the browser ran.
-    const lowerError = result.pageErrors
-      .reduce((message, thrown) => message.split(thrown).join(''), result.error || '')
-      .toLowerCase();
-    const hostContention = !result.success && lowerError.includes('render_host_contention');
-    const infraUnavailable = hostContention || (!result.success && !result.screenshot?.success && (
-      lowerError.includes('failed to initialize headless browser') ||
-      lowerError.includes('browser context not initialized') ||
-      lowerError.includes('executable') ||
-      lowerError.includes('sandbox unavailable') ||
-      lowerError.includes('playwright') ||
-      lowerError.includes('chromium') ||
-      lowerError.includes('browser') ||
-      lowerError.includes('spawn') ||
-      lowerError.includes('econnrefused')
-    ));
+    const failureCause = classifyRenderFailure(result);
+    const infraUnavailable = failureCause === 'host-contention' || failureCause === 'infra';
 
     // Candidate failures: JS errors, timeouts, canvas issues caused by bad code
     const candidateFailure = !result.success && !infraUnavailable && result.rendered !== false;
@@ -1421,6 +1617,28 @@ export class HeadlessRenderer {
    * Returns true if non-black pixels are detected within the timeout.
    * Returns false if the canvas stays blank (render-failed state).
    */
+  /**
+   * Poll the composited canvas until any pixel is non-black. Reads the
+   * screenshot, not a context, so it cannot claim a canvas before the piece.
+   */
+  private async waitForLitCanvasScreenshot(page: Page, timeout: number): Promise<boolean> {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      try {
+        const png = await page.locator('canvas').first().screenshot({ timeout: Math.max(1, deadline - Date.now()) });
+        const { data } = await decodeImagePixels(png);
+        for (let i = 0; i < data.length; i += 4) {
+          if (data[i] > 0 || data[i + 1] > 0 || data[i + 2] > 0) return true;
+        }
+      } catch {
+        // screenshot() already waited for a canvas until the deadline.
+        return false;
+      }
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    return false;
+  }
+
   private async waitForFirstFrame(page: Page, timeout: number): Promise<boolean> {
     const deadline = Date.now() + timeout;
     let probeErrorLogged = false;
@@ -1447,6 +1665,44 @@ export class HeadlessRenderer {
   /**
    * Capture screenshot of the rendered output
    */
+  private async hyperFramesStagePaints(page: Page, timeout: number): Promise<boolean | undefined> {
+    const frame = page.locator('iframe.hyperframes-stage');
+    const root = frame.contentFrame().locator('[data-composition-id]').first();
+    try {
+      const box = await frame.boundingBox({ timeout });
+      const viewport = page.viewportSize();
+      if (!box || !viewport) return undefined;
+      const x = Math.ceil(Math.max(0, box.x));
+      const y = Math.ceil(Math.max(0, box.y));
+      const width = Math.floor(Math.min(viewport.width, box.x + box.width)) - x;
+      const height = Math.floor(Math.min(viewport.height, box.y + box.height)) - y;
+      // Only attest pixels visible in the preview. CSS scale bounds the decode on high-DPI browsers.
+      if (width < 1 || height < 1 || width * height > 4_194_304) return undefined;
+      const capture = () => page.screenshot({ clip: { x, y, width, height }, scale: 'css', timeout });
+      const painted = await capture();
+      const opacity = await root.evaluate(element => {
+        const { style } = element as HTMLElement;
+        const prior = { value: style.getPropertyValue('opacity'), priority: style.getPropertyPriority('opacity') };
+        style.setProperty('opacity', '0', 'important');
+        return prior;
+      }, undefined, { timeout });
+      let blank: Buffer;
+      try {
+        blank = await capture();
+      } finally {
+        await root.evaluate((element, prior) => {
+          (element as HTMLElement).style.setProperty('opacity', prior.value, prior.priority);
+        }, opacity, { timeout });
+      }
+      const [paintedImage, blankImage] = await Promise.all([decodeImagePixels(painted), decodeImagePixels(blank)]);
+      if (paintedImage.width !== blankImage.width || paintedImage.height !== blankImage.height) return undefined;
+      const { data } = paintedImage;
+      return !Buffer.from(data.buffer, data.byteOffset, data.byteLength).equals(blankImage.data);
+    } catch {
+      return undefined;
+    }
+  }
+
   private async captureScreenshot(page: Page, opts: Required<RenderOptions>): Promise<ScreenshotResult> {
     try {
       // Capture just the canvas area. Clip a page screenshot rather than calling
@@ -1512,10 +1768,15 @@ export class HeadlessRenderer {
    * renders — capture arrays stayed undefined and every tone/strudel render
    * heard silence regardless of the piece.
    */
+  private static readonly NBE_CONVERGENCE_HOOK =
+    '<script>window.__nbeConverged=0;window.addEventListener("message",function(e){if(e.data==="nbe:converged")window.__nbeConverged++;});</script>';
+
   private static audioCaptureScript(windowMs: number): string {
     // IIFE of the compiled module-level init (types erased by tsc).
     const maxSamples = Math.max(1, Math.floor(44_100 * windowMs / 1_000));
-    return STRUDEL_TEMPO_SCRIPT + '<script>(' + audioCapturePageInit.toString() + `)(${maxSamples});</script>`;
+    // The shared music runtime first, so a stored playable that predates it
+    // plays exactly as a fresh one does (idempotent on fresh pages).
+    return musicRuntimeScript() + '<script>(' + audioCapturePageInit.toString() + `)(${maxSamples});</script>`;
   }
   /**
    * Polls the page for up to 3 s until it plays, fails, or says it is still
@@ -1642,25 +1903,50 @@ export class HeadlessRenderer {
     }
   }
 
-  private async captureAudio(page: Page, opts: Required<RenderOptions>): Promise<AudioCaptureResult> {
+  private static readonly EMPTY_AUDIO_ERROR = 'No audio captured during render window';
+
+  private async waitForFirstSound(page: Page, domain: RenderDomain): Promise<boolean> {
+    const hasSound = () => page.evaluate(() =>
+      Boolean((window as unknown as { __audioCaptureData?: number[] }).__audioCaptureData?.length));
+    if (await hasSound()) return false;
+    const deadline = Date.now() + 6_000;
+    while (Date.now() < deadline) {
+      const starting = domain === 'strudel'
+        ? ['waiting', 'booting', 'idle'].includes(await page.evaluate(readPlaybackState, domain))
+        : await page.evaluate(() => {
+          const pageState = window as unknown as { __audioCaptureDestinations?: Array<{ context: { state: string } }> };
+          const contexts = pageState.__audioCaptureDestinations ?? [];
+          return contexts.some(node => node.context.state === 'suspended') && !contexts.some(node => node.context.state === 'running');
+        });
+      if (!starting) return false;
+      await page.waitForTimeout(Math.min(250, Math.max(0, deadline - Date.now())));
+      if (await hasSound()) return true;
+    }
+    return false;
+  }
+
+  private async captureAudio(page: Page, opts: Required<RenderOptions>, domain: RenderDomain = 'tone'): Promise<AudioCaptureResult> {
     try {
       // Wait for audio to be captured during the stabilization period
       await page.waitForTimeout(opts.stabilizationTime);
       const windowMs = HeadlessRenderer.audioWindowMs(opts);
-      if (windowMs > opts.stabilizationTime) await this.waitForAudioWindow(page, windowMs);
+      const late = await this.waitForFirstSound(page, domain);
+      if (late || windowMs > opts.stabilizationTime) await this.waitForAudioWindow(page, windowMs);
 
       // Retrieve the captured audio data
       const audioData = await page.evaluate((duration: number) => {
         const captureData = (window as unknown as { __audioCaptureData?: number[] }).__audioCaptureData;
         const captureWarnings = (window as unknown as { __audioCaptureWarnings?: string[] }).__audioCaptureWarnings || [];
+        const incomplete = (window as unknown as { __audioCaptureIncomplete?: boolean }).__audioCaptureIncomplete === true;
 
-        if (!captureData || captureData.length === 0) {
+        if (incomplete || !captureData || captureData.length === 0) {
           // No audio captured - return empty result
           return {
             samples: [] as number[],
             sampleRate: 44100,
             duration: duration / 1000,
             hasAudio: false,
+            incomplete,
             warnings: captureWarnings,
           };
         }
@@ -1695,7 +1981,8 @@ export class HeadlessRenderer {
         sampleRate: audioData.sampleRate,
         duration: audioData.duration,
         success: audioData.hasAudio,
-        error: audioData.hasAudio ? undefined : 'No audio captured during render window',
+        error: audioData.incomplete ? 'AUDIO_CAPTURE_INCOMPLETE: multiple AudioContexts produced sound'
+          : audioData.hasAudio ? undefined : HeadlessRenderer.EMPTY_AUDIO_ERROR,
         warnings: audioData.warnings,
       };
     } catch (error) {

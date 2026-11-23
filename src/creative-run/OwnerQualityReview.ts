@@ -16,6 +16,7 @@ import {
   type CampaignOwnerEvidenceSlot,
 } from './CampaignManifest.js';
 import type { CampaignFundingReservationV1 } from './CampaignExecutionAuthority.js';
+import { RUBRIC_DIMENSIONS, RUBRIC_V1_DIMENSIONS } from './CreativeQualityRubric.js';
 import type {
   ExecutorAttestationV2,
   ExecutorAttestationV3,
@@ -309,10 +310,16 @@ export interface OwnerPacketVerification {
 const EVIDENCE_CLASSES: readonly OwnerEvidenceClass[] = [
   'source', 'visual', 'temporal', 'audio', 'interaction', 'runtime', 'clock', 'accessibility',
 ];
-const DIMENSIONS: readonly CreativeQualityDimension[] = [
-  'coherence', 'specificity', 'surprise', 'emotionalTemporalArc',
-  'crossModalCausality', 'intentionality', 'revisitDesire',
-];
+// One list of dimensions: the anchored rubric owns it (the review spells its last one revisitDesire).
+const DIMENSIONS: readonly CreativeQualityDimension[] = RUBRIC_DIMENSIONS.map(
+  (dimension) => (dimension === 'desireToRevisit' ? 'revisitDesire' : dimension));
+
+/** The anchored 1-5 rubric the reviewers score against, shown on the owner contact sheet. */
+function rubricHtml(): string {
+  const rows = RUBRIC_V1_DIMENSIONS.map((spec) => `<li><b>${escapeHtml(spec.label)}</b>: `
+    + spec.anchors.map((anchor) => `${anchor.level} = ${escapeHtml(anchor.description)}`).join('; ') + '</li>').join('');
+  return `<details class="rubric"><summary>Scoring rubric (1 to 5)</summary><ul>${rows}</ul></details>`;
+}
 
 // ━━━ Stable digest helpers (same canonical form as CampaignOrigin) ━━━━━
 
@@ -580,7 +587,7 @@ function ownerHtml(briefId: string, candidates: readonly OwnerCandidatePacket[])
     + '.temporal{border-color:#6ab0ff}.interaction{border-color:#6affb0}'
     + '.runtime{border-color:#ffb06a}.accessibility{border-color:#b06aff}</style></head>'
     + `<body><h1>Owner review: ${escapeHtml(briefId)}</h1><p>Compare exact playable evidence. `
-    + `Model review cannot set preference or release-worthiness.</p><main>${cards}</main></body></html>`;
+    + `Model review cannot set preference or release-worthiness.</p>${rubricHtml()}<main>${cards}</main></body></html>`;
 }
 
 // ━━━ Packet digest ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

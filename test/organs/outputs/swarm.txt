@@ -1,0 +1,5 @@
+# organ: swarm | data: real command, fake provider
+$ sinter swarm sessions
+No swarm sessions found in <work><path> (labelled sessions are hidden; use --all to include them). Run: sinter swarm run --prompt "<prompt>"
+# exit: 0
+

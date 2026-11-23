@@ -18,6 +18,7 @@ import { generateHTML } from '../utils/generateHTML.js';
 import { formatError } from '../utils/errors.js';
 import { pageScript } from '../utils/pageScript.js';
 import { inlineVendorAssets } from '../utils/vendorAssets.js';
+import { prepareBrowserScratch } from '../utils/scratchSpace.js';
 
 export interface RuntimeHealthResult {
   healthy: boolean;
@@ -95,6 +96,7 @@ export class RuntimeHealthMonitor {
     }
     const executablePath = resolveChromiumExecutablePath();
     if (!executablePath) throw missingChromiumError();
+    prepareBrowserScratch();   // profile dir off the data volume + free-space check
     const browser = await puppeteer.launch({
       headless: true,
       executablePath,

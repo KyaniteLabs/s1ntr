@@ -1,0 +1,25 @@
+# organ: fs | data: real command, fake provider
+$ sinter generate --domain html "a slow orbit of colored light"
+[CLI] Resolved provider: openai @ http://127.0.0.1:33991/v1 (model=gpt-5.4)
+
+🎨 Sinter: Creative Coding Agent
+📝 Prompt: "a slow orbit of colored light"
+🔄 Governed candidates: 1
+📁 Output: <work>/out
+
+Generating: a slow orbit of colored light
+
+🎯 Domain (forced via --domain): html
+
+[08:17:00.954] LLMClient llm:response generator@127.0.0.1:33991 local/gpt-5.4 78ms ok
+[08:17:35.198] LLMClient llm:response evaluator@127.0.0.1:33991 local/gpt-5.4 17ms ok
+
+# exit: 0
+
+$ sinter fs artifacts
+📦 Artifacts (2):
+
+  archive/sinter:/artifact/f84adfa6-7d75-47a9-9e15-66cb8849a803  archive-entry  f7e4123177f0…
+  generate/15b835143dab2c4e382bfdef54082ce8d857e1995613eaae2e1d3dbd8235870f  generated-code  c1f04f6ecb4f…
+# exit: 0
+

@@ -13,7 +13,7 @@ describe('preferences CLI contract', () => {
 
   it('uses TasteLearningService and project-local preference storage', () => {
     const cli = readCli();
-    const start = cli.indexOf("else if (cmd === 'preferences')");
+    const start = cli.indexOf("else if (cmd === 'preferences'");
     const end = cli.indexOf("else if (cmd === 'emergence')", start);
     const preferencesBlock = cli.slice(start, end);
 

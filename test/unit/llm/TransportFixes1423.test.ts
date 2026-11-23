@@ -3,8 +3,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CacheManager } from '../../../src/llm/CacheManager.js';
 import { DecisionModelClient, type DecisionRequest } from '../../../src/llm/DecisionModelClient.js';
 import { isBreakerFailure, LLMClient } from '../../../src/llm/LLMClient.js';
-import { LLMAuthError, LLMError, LLMRateLimitError, LLMTimeoutError } from '../../../src/llm/errors.js';
+import { LLMAuthError, LLMError, LLMReasoningExhaustedError, LLMRateLimitError, LLMTimeoutError } from '../../../src/llm/errors.js';
 import { RetryManager } from '../../../src/llm/RetryManager.js';
+import { SSRFError } from '../../../src/security/UrlValidator.js';
+import { ProviderBudgetConfigInvalidError, ProviderBudgetExceededError } from '../../../src/llm/ProviderBudgetLedger.js';
+import { failureLogger } from '../../../src/harness/FailureLogger.js';
 
 // #1423 PR 6: the LLM transport stops lying about provider health, retries
 // only what can recover, and says when a reply was cut at the token cap.
@@ -54,6 +57,8 @@ function retryWithoutDelay(maxAttempts = 5) {
 describe('circuit breaker counts provider health only (bugs 6, 29)', () => {
   it('counts timeouts, transport failures and 5xx', () => {
     expect(isBreakerFailure(new LLMTimeoutError('p'))).toBe(true);
+    // A reasoning model spending its whole budget thinking is not a provider fault.
+    expect(isBreakerFailure(new LLMReasoningExhaustedError('kilo', 'reasoning-exhausted: network of thought, finish_reason=length'))).toBe(false);
     expect(isBreakerFailure(new LLMError('server', 'p', 502, true))).toBe(true);
     expect(isBreakerFailure(new LLMError('fetch failed: ECONNREFUSED', 'p'))).toBe(true);
     expect(isBreakerFailure(new TypeError('fetch failed'))).toBe(true);
@@ -80,6 +85,141 @@ describe('circuit breaker counts provider health only (bugs 6, 29)', () => {
     await expect(client.generate('sys', 'user', undefined, true)).rejects.toThrow(/Timeout/);
     expect(provider.generate).toHaveBeenCalledTimes(5);
     expect(breakerStats().failureCount).toBe(1);
+  });
+});
+
+describe('pre-transport refusals never count, even when their text names the network (#1736)', () => {
+  const cases: Array<[string, unknown]> = [
+    ['authority', new LLMError('Provider transport requires Liminal product command authority on the network lane', 'authority', undefined, false)],
+    ['identity', new LLMError('Harness executor blocked before transport: network identity mismatch', 'glm', undefined, false)],
+    ['funding binding', new Error('CAMPAIGN_FUNDING_TRANSPORT_PREFLIGHT_MISMATCH on network route')],
+    ['SSRF guard (wrapped)', new LLMError('SSRF Protection: Access to network-lab.local is blocked', 'llm', undefined, false)],
+    ['SSRF guard (raw)', new SSRFError('DNS lookup failed for network.example.com - potential SSRF attack')],
+    ['provider budget cap', new ProviderBudgetConfigInvalidError('provider-budgets.json could not be read: ETIMEDOUT network share')],
+    ['provider budget exceeded', new ProviderBudgetExceededError('network.example.com', { spendUsd: 5, capUsd: 5 } as never)],
+    ['action budget', new Error('Action provider-call budget exhausted (3); blocked before call 4 on network lane')],
+  ];
+  for (const [kind, error] of cases) {
+    it(`${kind} refusal is not a breaker failure`, () => {
+      expect(isBreakerFailure(error)).toBe(false);
+    });
+  }
+});
+
+describe('breaker fast-fails write one record per open window (#1736)', () => {
+  it('100 fast-fails after 5 real 5xx make one record with count=100 and the trigger', async () => {
+    retryWithoutDelay(1);
+    const { client, provider } = stubClient(async () => ({
+      isErr: () => true,
+      error: new LLMError('upstream exploded', 'lmstudio', 503, false),
+    }));
+    const logged: Array<Record<string, unknown>> = [];
+    const updates: Array<{ id: string; patch: Record<string, unknown> }> = [];
+    vi.spyOn(failureLogger, 'log').mockImplementation(((record: Record<string, unknown>) => {
+      logged.push(record);
+      return { written: true, path: '/dev/null', id: `rec-${logged.length}` };
+    }) as never);
+    vi.spyOn(failureLogger, 'update').mockImplementation(((id: string, patch: Record<string, unknown>) => {
+      updates.push({ id, patch });
+      return true;
+    }) as never);
+
+    for (let i = 0; i < 5; i++) await expect(client.generate('sys', `u${i}`, undefined, true)).rejects.toThrow(/upstream exploded/);
+    const realRecords = logged.length;
+    for (let i = 0; i < 100; i++) await expect(client.generate('sys', `f${i}`, undefined, true)).rejects.toThrow(/Circuit breaker open/);
+
+    expect(provider.generate).toHaveBeenCalledTimes(5);
+    const windowRecords = logged.filter(r => /Circuit breaker/.test(String(r.error)));
+    const windowId = `rec-${logged.indexOf(windowRecords[0]) + 1}`;
+    expect(windowRecords).toHaveLength(1);
+    expect(windowRecords[0]).toMatchObject({ trigger: { rule: '5xx' } });
+    expect(String((windowRecords[0].trigger as { firstError: string }).firstError)).toMatch(/upstream exploded/);
+    // No per-call records for the fast-fails.
+    expect(logged.length).toBe(realRecords);
+    const last = updates[updates.length - 1];
+    expect(last.patch).toMatchObject({ count: 100 });
+    expect(new Set(updates.map(u => u.id))).toEqual(new Set([windowId]));
+  });
+});
+
+describe('a local authority-gate refusal is not a provider failure (#1736)', () => {
+  it('40 gate refusals leave the glm breaker closed and a real call still goes out', async () => {
+    const client = new LLMClient({ provider: 'glm', model: 'glm-5.3' } as never);
+    const internal = client as unknown as Record<string, unknown>;
+    const provider = {
+      name: 'glm',
+      getModel: vi.fn(() => 'glm-5.3'),
+      getConfig: vi.fn(() => ({ baseUrl: 'https://api.z.ai/api/anthropic', model: 'glm-5.3' })),
+      generate: vi.fn(async () => ({
+        isErr: () => false,
+        value: { success: true, content: 'function setup() { createCanvas(10, 10); }', finishReason: 'stop' },
+      })),
+    };
+    internal.resolveModel = vi.fn(async () => 'glm-5.3');
+    internal.syncResolvedModel = vi.fn();
+    internal.detectProvider = vi.fn(() => 'glm');
+    internal.getProvider = vi.fn(async () => provider);
+    internal.getFallbackProviders = vi.fn(() => []);
+    const breaker = (internal.getBreaker as (p: string) => {
+      canExecute(): boolean; getState(): string; getStats(): { failureCount: number };
+    }).call(client, 'glm');
+
+    // Production with no role and no product authority: the gate refuses locally.
+    vi.stubEnv('NODE_ENV', 'production');
+    for (let i = 0; i < 40; i++) {
+      await expect(client.generate('sys', `refused ${i}`, undefined, true))
+        .rejects.toThrow(/Roleless provider transport is forbidden/);
+    }
+    expect(provider.generate).not.toHaveBeenCalled();
+    expect(breaker.getStats().failureCount).toBe(0);
+    expect(breaker.getState()).toBe('closed');
+
+    vi.stubEnv('NODE_ENV', 'test');
+    await client.generate('sys', 'real call', undefined, true);
+    expect(provider.generate).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('a gate refusal does not eat the half-open probe slot (#1736)', () => {
+  it('after the breaker half-opens, a refusal leaves the probe for the next real call', async () => {
+    const client = new LLMClient({ provider: 'glm', model: 'glm-5.3' } as never);
+    const internal = client as unknown as Record<string, unknown>;
+    const provider = {
+      name: 'glm',
+      getModel: vi.fn(() => 'glm-5.3'),
+      getConfig: vi.fn(() => ({ baseUrl: 'https://api.z.ai/api/anthropic', model: 'glm-5.3' })),
+      generate: vi.fn(async () => ({
+        isErr: () => false,
+        value: { success: true, content: 'function setup() { createCanvas(10, 10); }', finishReason: 'stop' },
+      })),
+    };
+    internal.resolveModel = vi.fn(async () => 'glm-5.3');
+    internal.syncResolvedModel = vi.fn();
+    internal.detectProvider = vi.fn(() => 'glm');
+    internal.getProvider = vi.fn(async () => provider);
+    internal.getFallbackProviders = vi.fn(() => []);
+    const breaker = (internal.getBreaker as (p: string) => {
+      recordFailure(): void; getState(): string; canExecute(): boolean;
+    }).call(client, 'glm');
+
+    vi.useFakeTimers();
+    try {
+      for (let i = 0; i < 5; i++) breaker.recordFailure();
+      expect(breaker.getState()).toBe('open');
+      vi.setSystemTime(Date.now() + 31_000);
+
+      vi.stubEnv('NODE_ENV', 'production');
+      await expect(client.generate('sys', 'refused', undefined, true))
+        .rejects.toThrow(/Roleless provider transport is forbidden/);
+      expect(provider.generate).not.toHaveBeenCalled();
+
+      vi.stubEnv('NODE_ENV', 'test');
+      await client.generate('sys', 'real call', undefined, true);
+      expect(provider.generate).toHaveBeenCalledTimes(1);
+      expect(breaker.getState()).toBe('closed');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

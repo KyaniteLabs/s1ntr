@@ -51,11 +51,10 @@ export class CognitiveArchitectureAtlas {
         this.domain('three', 'Three.js', 'beta', '3D scenes and WebGL objects'),
         this.domain('tone', 'Tone.js', 'beta', 'Programmatic audio and music logic'),
         this.domain('strudel', 'Strudel', 'beta', 'Pattern-based live music code'),
-        this.domain('revideo', 'Revideo', 'beta', 'Timeline/video composition generation'),
-        this.domain('hyperframes', 'HyperFrames', 'beta', 'HTML-backed GSAP asset compositing and video export prep'),
         this.domain('ascii', 'ASCII', 'scaffold', 'Text-mode visual artifacts'),
         this.domain('kinetic', 'Kinetic Typography', 'scaffold', 'Animated typographic compositions'),
         this.domain('textgen', 'TextGen', 'scaffold', 'Generative text and poetic artifacts'),
+        this.domain('nbe', 'NBE', 'scaffold', 'Cascade neural-field fluid-art renders'),
       ],
       organs: [
         { id: 'perception', label: 'Perception', role: 'Captures prompts, artifacts, previews, failures, user reactions, provider behavior, and repair attempts.', sourcePaths: ['src/core/TelemetryBridge.ts', 'src/cortex/CortexPerceptionBus.ts', 'src/tui-bridge/TuiBridgeService.ts'] },

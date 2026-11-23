@@ -54,8 +54,10 @@ function evaluator(identity: string, host: string) {
         direction: 'regressed' as const }] })) };
 }
 
-function build(root: string, products: { verifiedOwnerEvidence: ReturnType<typeof vi.fn>;
-  runResearchProviderEffect: ReturnType<typeof vi.fn> }) {
+function build(root: string, products: { verifiedOwnerEvidence?: ReturnType<typeof vi.fn>;
+  verifiedJudgeEvidence?: ReturnType<typeof vi.fn>;
+  runResearchProviderEffect: ReturnType<typeof vi.fn> },
+  readParentSource?: (createKey: string, artifactDigest: string) => Promise<string | null>) {
   const evidenceAuthority = createDreamRenderedEvidenceAuthority();
   evidenceAuthority.issuer.attest(rendered);
   const decisions = createDreamDecisionAuthority();
@@ -75,7 +77,7 @@ function build(root: string, products: { verifiedOwnerEvidence: ReturnType<typeo
         policyDigest: policy.policyDigest, rendererEnvironmentDigest: digest('8'),
         evaluatorManifestDigests: [digest('1'), digest('3')],
         transferCommitmentDigest: digest('f') }, requiredModalities: ['visual', 'motion'],
-      lease: { token: 'test-lease', fencingSequence: 1 } });
+      lease: { token: 'test-lease', fencingSequence: 1 } }, undefined, readParentSource);
   return { port, journal, operator, observer, linked };
 }
 
@@ -127,5 +129,80 @@ describe('Dream product command path', () => {
     expect(Object.values(stored.negativeNeighborhoods)).toEqual([1]);
     expect(JSON.stringify(stored)).not.toMatch(/guidance|activation|learning/i);
     fetchSpy.mockRestore();
+  });
+  it('runs on judge/scoring evidence alone and records its provenance in the parent bindings', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'dream-product-judge-'));
+    roots.push(root);
+    const products = { runResearchProviderEffect: vi.fn(async input => input.effect()),
+      verifiedOwnerEvidence: vi.fn(),
+      verifiedJudgeEvidence: vi.fn(async () => ({
+        createKey: 'create-1', ownerReviewKey: `judge-scoring:${digest('9')}`,
+        provenance: 'judge-scoring-evidence', operationId: 'operation:create-1',
+        lineageId: 'lineage:create-1', createCommandDigest: digest('1'),
+        createReceiptDigest: digest('2'), reviewCommandDigest: digest('3'),
+        reviewDecisionDigest: digest('4'), reviewReceiptDigest: digest('5'),
+        artifactDigest: digest('a'), evidenceDigest: digest('b'),
+        criterionDigest: digest('c'), domain: 'p5', quality: 0.8, decision: 'accepted' })) };
+    const built = build(root, products);
+    const command = { schema: 'sinter.dream-product-command', schemaVersion: 1,
+      idempotencyKey: 'dream-judge', evidence: [{ createKey: 'create-1', source: 'judge-scoring',
+        expectedCreateReceiptDigest: digest('2') }] } as const;
+    await expect(built.port.run({ ...command, evidence: [{
+      ...command.evidence[0], expectedCreateReceiptDigest: digest('e'),
+    }] })).rejects.toThrow('DREAM_JUDGE_CREATE_RECEIPT_MISMATCH');
+    expect(built.operator.produce).not.toHaveBeenCalled();
+    const result = await built.port.run(command);
+    expect(products.verifiedJudgeEvidence).toHaveBeenCalledWith('create-1', true);
+    expect(products.verifiedOwnerEvidence).not.toHaveBeenCalled();
+    expect(result.experimentPlan.context.liminalParentBindings).toEqual([expect.objectContaining({
+      createKey: 'create-1', provenance: 'judge-scoring-evidence' })]);
+    built.journal.close();
+  });
+
+  it('F09: same judge and score, different parent technique -> different plan, hypothesis and binding', async () => {
+    const run = async (source: string | null) => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'dream-product-technique-'));
+      roots.push(root);
+      const products = { runResearchProviderEffect: vi.fn(async input => input.effect()),
+        verifiedOwnerEvidence: vi.fn(),
+        verifiedJudgeEvidence: vi.fn(async () => ({
+          createKey: 'create-1', ownerReviewKey: `judge-scoring:${digest('9')}`,
+          provenance: 'judge-scoring-evidence', operationId: 'operation:create-1',
+          lineageId: 'lineage:create-1', createCommandDigest: digest('1'),
+          createReceiptDigest: digest('2'), reviewCommandDigest: digest('3'),
+          reviewDecisionDigest: digest('4'), reviewReceiptDigest: digest('5'),
+          artifactDigest: digest('a'), evidenceDigest: digest('b'),
+          criterionDigest: digest('c'), domain: 'p5', quality: 0.8, decision: 'accepted' })) };
+      const readSource = vi.fn(async () => source);
+      const built = build(root, products, readSource);
+      const result = await built.port.run({ schema: 'sinter.dream-product-command',
+        schemaVersion: 1, idempotencyKey: 'dream-technique',
+        evidence: [{ createKey: 'create-1', source: 'judge-scoring' }] });
+      expect(readSource).toHaveBeenCalledWith('create-1', digest('a'));
+      built.journal.close();
+      return result;
+    };
+    const shader = await run('gl=c.getContext("webgl");gl_FragColor=1');
+    const svg = await run('<svg><feTurbulence/></svg>');
+    const none = await run(null);
+    expect(shader.researchPlan.hypothesis).toContain('webgl-shader');
+    expect(svg.researchPlan.hypothesis).toContain('svg-filters');
+    expect(shader.researchPlan.planDigest).not.toBe(svg.researchPlan.planDigest);
+    expect(shader.experimentPlan.context.liminalParentBindings![0]!.parentTechniqueDigest)
+      .not.toBe(svg.experimentPlan.context.liminalParentBindings![0]!.parentTechniqueDigest);
+    // Unreadable source keeps the stated fallback: the criterion digest, no technique binding.
+    expect(none.researchPlan.hypothesis).toContain(digest('c'));
+    expect(none.experimentPlan.context.liminalParentBindings![0]!.parentTechniqueDigest).toBeUndefined();
+  });
+
+  it('rejects evidence items that name neither or both of a review and judge scoring', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'dream-product-bad-'));
+    roots.push(root);
+    const built = build(root, { runResearchProviderEffect: vi.fn() });
+    for (const item of [{ createKey: 'c' }, { createKey: 'c', ownerReviewKey: 'r', source: 'judge-scoring' }]) {
+      await expect(built.port.run({ schema: 'sinter.dream-product-command', schemaVersion: 1,
+        idempotencyKey: 'bad', evidence: [item as never] })).rejects.toThrow('DREAM_PRODUCT_COMMAND_INVALID');
+    }
+    built.journal.close();
   });
 });

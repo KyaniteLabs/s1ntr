@@ -57,6 +57,10 @@ export interface FailureRecord {
   duration: number;
   iteration?: number;
   codeLength?: number;
+  /** Repeat count for a deduplicated record (e.g. breaker fast-fails in one open window). */
+  count?: number;
+  /** What produced this record: the rule that tripped plus the first error seen. */
+  trigger?: { rule: string; firstError: string };
 }
 
 export class FailureLogger {
@@ -129,6 +133,23 @@ export class FailureLogger {
     this.prune();
     Logger.info('Meta-Harness', `Failure logged: ${filepath}`);
     return { written: true, path: filepath, id: record.id! };
+  }
+
+  /**
+   * Merge fields into a record this process already wrote, in place. Returns
+   * false when the file is gone or unreadable; never throws.
+   */
+  update(id: string, patch: Partial<FailureRecord>): boolean {
+    const filepath = join(this.logDir, `${id}.json`);
+    try {
+      const current = JSON.parse(readFileSync(filepath, 'utf-8')) as FailureRecord;
+      writeFileSync(filepath, JSON.stringify({ ...current, ...patch }, null, 2));
+      return true;
+    } catch {
+      const pending = this.unwritten.find(record => record.id === id);
+      if (pending) Object.assign(pending, patch);
+      return pending !== undefined;
+    }
   }
 
   /** Records whose disk write failed this process, oldest first (bounded). */

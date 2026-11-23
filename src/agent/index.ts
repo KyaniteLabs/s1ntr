@@ -39,6 +39,7 @@ export type { CatalogEntry } from './SkillCatalog.js'
 // Review and diff
 export { ReviewManager } from './ReviewManager.js'
 export type { ReviewCandidate, CandidateStatus } from './ReviewManager.js'
+export { CANDIDATE_STATUSES, CANDIDATE_TRANSITIONS, IllegalReviewTransitionError, canTransitionCandidate } from './ReviewManager.js'
 export { DiffRenderer } from './DiffRenderer.js'
 export type { DiffLine, DiffResult } from './DiffRenderer.js'
 

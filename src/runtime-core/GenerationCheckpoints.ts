@@ -13,6 +13,8 @@ import path from 'node:path';
 export interface GenerationCheckpoint {
   readonly kind: string;
   readonly identity: string;
+  /** Fingerprint of the effective request settings (endpoint, sampling, thinking) the reply was made under. */
+  readonly settings?: string;
   readonly code: string;
   readonly reasoning?: string;
   readonly provenance?: unknown;
@@ -26,13 +28,28 @@ export interface GenerationCheckpointStore {
   remove(key: string): Promise<void>;
 }
 
-/** Stable across reruns: seat, domain, the user's brief and the call kind. */
+/**
+ * Stable across reruns of the SAME request: seat, domain, brief, call kind and the effective request settings.
+ * Changing the endpoint, model, sampling or thinking budget under the same provider/model label is a different
+ * request and must not reuse an old reply (Sol G05).
+ */
 export function generationCheckpointKey(parts: {
   readonly identity: string; readonly domain: string; readonly prompt: string; readonly kind: string;
+  readonly settings?: string;
 }): string {
   return createHash('sha256')
-    .update(JSON.stringify([parts.identity, parts.domain, parts.prompt, parts.kind]))
+    .update(JSON.stringify([parts.identity, parts.domain, parts.prompt, parts.kind, parts.settings ?? '']))
     .digest('hex');
+}
+
+/** Normalised fingerprint of what shapes the wire request apart from the prompt text. */
+export function requestSettingsFingerprint(config: {
+  readonly baseUrl?: string; readonly model?: string; readonly temperature?: number; readonly maxTokens?: number;
+  readonly thinking?: unknown; readonly reasoningEffort?: unknown;
+}): string {
+  const url = (config.baseUrl ?? '').trim().toLowerCase().replace(/\/+$/, '');
+  return createHash('sha256').update(JSON.stringify([url, config.model ?? '', config.temperature ?? null,
+    config.maxTokens ?? null, config.thinking ?? null, config.reasoningEffort ?? null])).digest('hex').slice(0, 16);
 }
 
 export class FileGenerationCheckpointStore implements GenerationCheckpointStore {

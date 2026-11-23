@@ -24,15 +24,75 @@
  *  - physics budget: unrolled body-creation statements burn the render and
  *    judge budget. Static call-site count is a coarse gate for the unrolled
  *    form; loop-spawned runtime counts belong to the render-alive gate.
+ *  - holospot: the kit draws the frame (its own AGENTS.md law). A piece that
+ *    imports the kit but never applies a foil renders plain three.js; a
+ *    piece that also calls renderer.render composites over a half-drawn
+ *    frame. Faked foil (MeshPhysicalMaterial iridescence) is a warning —
+ *    it may decorate non-holo meshes, but it cannot reproduce the look.
  */
+
+import { stripComments } from './stripComments.js';
+import { inferLibrariesFromCode } from './ImportSpecifiers.js';
+import { VENDORED_LIBRARIES } from '../wrappers/VendoredLibraries.js';
 
 export interface LibraryRulesResult {
   valid: boolean;
   errors: string[];
+  /** Non-blocking advisories (severity below a rejection); today only the
+   * holospot iridescence heuristic populates this. */
+  warnings: readonly string[];
 }
 
 /** Max static body-creation call sites before the piece is rejected. */
 export const MAX_PHYSICS_CREATION_SITES = 128;
+
+// --- named imports must exist in the vendored library ----------------------------
+
+/**
+ * Real named exports of vendored libraries a model may import by name. Only
+ * libraries listed here are checked. Guarded by a drift test against the
+ * vendored dist's export clause (v7: all three pieces imported an invented
+ * `studio` from "holospot" and died at module load).
+ */
+export const VENDORED_LIBRARY_EXPORTS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  holospot: [
+    'ENGINE_COMMIT', 'Holo', 'HoloObject', 'LOOK_IDS', 'MATERIAL_IDS', 'MATERIAL_PARAMS',
+    'SCENE_PARAMS', 'STUDIO_PRESETS', 'VERSION', 'lookInfo', 'resolveSettings', 'shotCamera', 'shotRotation',
+  ],
+});
+
+const EXPORT_HINTS: Readonly<Record<string, string>> = Object.freeze({
+  holospot: 'light with holo.setScene({"studio.preset": "studio"}) — there is no `studio` export',
+});
+
+/** Domains whose source never runs in a wrapped browser page. */
+const NON_PAGE_DOMAINS: ReadonlySet<string> = new Set(['revideo', 'blender']);
+
+// --- holospot option names (holo.d.ts ApplyOptions / CardOptions, v0.1.0) -------------
+
+/** Options holo.apply(target, options) reads. */
+export const HOLOSPOT_APPLY_OPTIONS: readonly string[] = Object.freeze([
+  'material', 'sizeMm', 'settings', 'look', 'mapping', 'doubleSided', 'structureScale', 'scene',
+]);
+/** Options holo.card(options) reads. `sizeMm` is NOT one: a card takes widthMm/heightMm/size. */
+export const HOLOSPOT_CARD_OPTIONS: readonly string[] = Object.freeze([
+  'material', 'widthMm', 'heightMm', 'size', 'settings', 'look', 'scene',
+]);
+
+const HOLO_OPTION_HINTS: Readonly<Record<string, Readonly<Record<string, string>>>> = Object.freeze({
+  card: {
+    sizeMm: 'holo.card ignores it (that leaves a sub-pixel mesh); use widthMm/heightMm in mm (default 63 x 88) or size for the longer side in scene units',
+  },
+  apply: {
+    size: 'holo.apply sizes by sizeMm, the real size of the largest side in mm',
+    widthMm: 'widthMm/heightMm belong to holo.card; holo.apply takes sizeMm',
+    heightMm: 'widthMm/heightMm belong to holo.card; holo.apply takes sizeMm',
+  },
+});
+
+// import { a, b as c } from "lib" — braces may span lines; default/namespace
+// forms import no named exports and are not matched.
+const NAMED_IMPORT = /\bimport\s+(?:[\w$]+\s*,\s*)?\{([^}]*)\}\s*from\s*(['"])([^'"]+)\2/g;
 
 // --- library usage detection -------------------------------------------------
 
@@ -44,6 +104,7 @@ export const MAX_PHYSICS_CREATION_SITES = 128;
 const USES_CULORI = /\bculori\b/;
 const USES_RAPIER = /\bRAPIER\b|\brapier2d\b|\/vendor\/rapier2d\//;
 const USES_MATTER = /\bMatter\b|\bmatter-js\b|\/vendor\/matter-js\//;
+const USES_HOLOSPOT = /\bholospot\b|\/vendor\/holospot\//;
 
 // --- culori: no hex lerp -------------------------------------------------------
 
@@ -72,19 +133,52 @@ const DYNAMIC_TIMESTEP = /\.timestep\s*=\s*[^;\n]*(?:\bdt\b|\bdelta\w*\b|\belaps
 const RAPIER_CREATION_SITE = /\bRigidBodyDesc\s*\.\s*(?:dynamic|fixed|kinematicPositionBased|kinematicVelocityBased)\s*\(/g;
 const MATTER_CREATION_SITE = /\b(?:Matter\.)?Bodies\s*\.\s*\w+\s*\(|\b(?:Matter\.)?Body\s*\.\s*create\s*\(/g;
 
+// --- holospot: the kit draws the frame ------------------------------------------
+
+// Instance names the piece assigns (`const holo = new Holo(renderer)`,
+// `this.holo = new Holo(...)`). Calls key on the real variable name so a
+// renamed instance is still followed; the canonical `holo` is always a
+// candidate because every kit recipe uses it.
+const HOLO_INSTANCE = /\b([A-Za-z_$][\w$]*)\s*=\s*new\s+Holo\s*\(/g;
+const CANONICAL_HOLO_NAME = 'holo';
+
+// Renderer names for the render-conflict rule; `renderer` is the fallback
+// every recipe and generated piece uses when the ctor is out of the regex's
+// reach (global THREE, helper-constructed, …).
+const WEBGL_RENDERER_INSTANCE = /\b([A-Za-z_$][\w$]*)\s*=\s*new\s+(?:[\w$]+\s*\.\s*)?WebGLRenderer\s*\(/g;
+const CANONICAL_RENDERER_NAME = 'renderer';
+
+// MeshPhysicalMaterial's iridescence block, ctor option or property form.
+const IRIDESCENCE_SETTING = /\biridescence\w*\s*[:=]/i;
+
+/** Every captured group-1 of `pattern` found in `surface`. */
+function collectNames(pattern: RegExp, surface: string): string[] {
+  const names: string[] = [];
+  const re = new RegExp(pattern.source, pattern.flags);
+  for (const match of surface.matchAll(re)) names.push(match[1]);
+  return names;
+}
+
 export class LibraryRulesValidator {
-  /** Library ids the source actually references (culori / rapier2d / matter-js). */
+  /** Library ids the source actually references (culori / rapier2d / matter-js / holospot). */
   static detectLibraries(code: string): string[] {
     const surface = stripComments(code);
     const found: string[] = [];
     if (USES_CULORI.test(surface)) found.push('culori');
     if (USES_RAPIER.test(surface)) found.push('rapier2d');
     if (USES_MATTER.test(surface)) found.push('matter-js');
+    if (USES_HOLOSPOT.test(surface)) found.push('holospot');
     return found;
   }
 
-  static validate(code: string): LibraryRulesResult {
+  /**
+   * @param domain when given, domains whose source is not a browser page
+   * (revideo scenes, blender scripts) skip the import-specifier rule: their
+   * imports resolve in their own runtime, not the wrapped page's import map.
+   */
+  static validate(code: string, domain?: string): LibraryRulesResult {
     const errors: string[] = [];
+    const warnings: string[] = [];
     const surface = stripComments(code);
 
     if (USES_CULORI.test(surface)) {
@@ -97,8 +191,75 @@ export class LibraryRulesValidator {
     if (USES_MATTER.test(surface)) {
       errors.push(...LibraryRulesValidator.validatePhysicsBudget(surface, [MATTER_CREATION_SITE], 'matter-js'));
     }
+    if (USES_HOLOSPOT.test(surface)) {
+      const holo = LibraryRulesValidator.validateHolospot(surface);
+      errors.push(...holo.errors);
+      warnings.push(...holo.warnings);
+      errors.push(...LibraryRulesValidator.validateHolospotOptions(surface));
+    }
 
-    return { valid: errors.length === 0, errors };
+    errors.push(...LibraryRulesValidator.validateNamedImports(surface));
+    if (!domain || !NON_PAGE_DOMAINS.has(domain)) errors.push(...LibraryRulesValidator.validateImportSpecifiers(code));
+
+    return { valid: errors.length === 0, errors, warnings };
+  }
+
+  /** A named import the vendored library does not export throws at module load. */
+  private static validateNamedImports(surface: string): string[] {
+    const errors: string[] = [];
+    for (const match of surface.matchAll(NAMED_IMPORT)) {
+      const lib = match[3];
+      const real = VENDORED_LIBRARY_EXPORTS[lib];
+      if (!real) continue;
+      const bad = match[1].split(',')
+        .map(part => part.trim().split(/\s+as\s+/)[0].trim())
+        .filter(name => name.length > 0 && !real.includes(name));
+      for (const name of bad) {
+        errors.push(`Library rule (${lib}): \`${name}\` is not exported by "${lib}" — the page throws at module load. Real exports: ${real.join(', ')}. ${EXPORT_HINTS[lib] ?? ''}`.trim());
+      }
+    }
+    return errors;
+  }
+
+
+  /**
+   * A bare specifier with no library card cannot resolve in the wrapped page
+   * ("Failed to resolve module specifier"), which ships a blank render. Fail
+   * validation by name so the repair turn can drop or replace the import.
+   */
+  private static validateImportSpecifiers(code: string): string[] {
+    const importable = Object.keys(VENDORED_LIBRARIES).join(', ');
+    return inferLibrariesFromCode(code).unknown.map(spec =>
+      `Library rule (imports): "${spec}" is not importable — no vendored library provides that specifier, so the page fails to resolve it and renders blank. Importable libraries: ${importable}; "three" is always available. Remove the import or use one of these.`);
+  }
+
+  /**
+   * Option names on holo.apply / holo.card must be the kit's own. An unknown
+   * key is silently ignored by the kit (sizeMm on holo.card left a sub-pixel
+   * mesh), so it is rejected here with the accepted names.
+   */
+  private static validateHolospotOptions(surface: string): string[] {
+    const holoNames = new Set(collectNames(HOLO_INSTANCE, surface));
+    holoNames.add(CANONICAL_HOLO_NAME);
+    const errors: string[] = [];
+    const specs: ReadonlyArray<{ method: 'apply' | 'card'; arg: number; allowed: readonly string[] }> = [
+      { method: 'apply', arg: 1, allowed: HOLOSPOT_APPLY_OPTIONS },
+      { method: 'card', arg: 0, allowed: HOLOSPOT_CARD_OPTIONS },
+    ];
+    for (const name of holoNames) {
+      for (const { method, arg, allowed } of specs) {
+        const call = new RegExp(`\\b${name}\\s*\\.\\s*${method}\\s*\\(`, 'g');
+        for (const m of surface.matchAll(call)) {
+          const keys = objectLiteralKeys(surface, m.index + m[0].length, arg);
+          for (const key of keys) {
+            if (allowed.includes(key)) continue;
+            const hint = HOLO_OPTION_HINTS[method][key];
+            errors.push(`Library rule (holospot): \`${key}\` is not an option of holo.${method}(...)${hint ? ` — ${hint}` : ''}. holo.${method} options: ${allowed.join(', ')}.`);
+          }
+        }
+      }
+    }
+    return [...new Set(errors)];
   }
 
   /** culori pieces must interpolate through perceptual space, never hex. */
@@ -124,6 +285,76 @@ export class LibraryRulesValidator {
     return [];
   }
 
+  /**
+   * holospot pieces must let the kit draw the frame: a foil exists only where
+   * holo.apply/holo.card put it, and holo.render replaces renderer.render.
+   * Iridescence is a warning, not a rejection — it cannot reproduce the foil,
+   * but it may legitimately decorate non-holo meshes in the same piece.
+   */
+  private static validateHolospot(surface: string): { errors: string[]; warnings: string[] } {
+    const errors: string[] = [];
+    const warnings: string[] = [];
+
+    const holoNames = new Set(collectNames(HOLO_INSTANCE, surface));
+    holoNames.add(CANONICAL_HOLO_NAME);
+    const calls = (name: string, method: string): boolean =>
+      new RegExp(`\\b${name}\\s*\\.\\s*${method}\\s*\\(`).test(surface);
+
+    const appliesFoil = [...holoNames].some(n => calls(n, 'apply') || calls(n, 'card'));
+    if (!appliesFoil) {
+      errors.push('Library rule (holospot): the kit is imported but holo.apply(...) / holo.card(...) is never called — no object gets a foil; apply to the hero mesh, e.g. holo.apply(mesh, { material: "nebula", sizeMm: 120 })');
+    }
+
+    // The kit frames its own shot: a hand-placed camera crops or loses the hero
+    // (v8: 3 of 4 pieces off-centre or cropped; the one with shotCamera framed).
+    const shotNames = ['shotCamera', ...[...surface.matchAll(/\bshotCamera\s+as\s+([A-Za-z_$][\w$]*)/g)].map(m => m[1])];
+    const framesWithKit =
+      /\.\s*shotCamera\s*\(/.test(surface) ||
+      shotNames.some(n => new RegExp(`(?<![\\w$.])${n.replace(/\$/g, '\\$')}\\s*\\(`).test(surface));
+    const FRAME_RECIPE = 'const obj = holo.apply(heroMesh, {...}); await obj.ready; shotCamera(camera, obj, { aspect: innerWidth / innerHeight })';
+    const CARD_RECIPE = 'const cardMesh = holo.card({...}); scene.add(cardMesh); const obj = holo.get(cardMesh); await obj.ready; shotCamera(camera, obj, { aspect: innerWidth / innerHeight })';
+    if (appliesFoil && !framesWithKit) {
+      errors.push(`Library rule (holospot): the hero is framed by hand — import { shotCamera } from "holospot" and frame with the kit (and again on resize): ${FRAME_RECIPE}`);
+    }
+    // shotCamera reads the holo object's prepared geometry: given the bare mesh,
+    // or called before obj.ready resolves, it throws "needs the object to be
+    // ready" (v10: 4 of 4 pieces threw; the one that caught it framed by hand).
+    if (appliesFoil && framesWithKit) {
+      const holoAlt = [...holoNames].map(n => n.replace(/\$/g, '\\$')).join('|');
+      const holoObjects = new Set([...surface.matchAll(
+        new RegExp(`(?:\\b(?:const|let|var)\\s+)?([A-Za-z_$][\\w$]*)\\s*=\\s*(?:await\\s+)?(?:${holoAlt})\\s*\\.\\s*(?:apply|get)\\s*\\(`, 'g'),
+      )].map(m => m[1]));
+      const callee = `(?:\\.\\s*shotCamera|(?<![\\w$.])(?:${shotNames.map(n => n.replace(/\$/g, '\\$')).join('|')}))`;
+      const framed = [...surface.matchAll(new RegExp(`${callee}\\s*\\(\\s*[^,()]+,\\s*([A-Za-z_$][\\w$.]*)`, 'g'))].map(m => m[1]);
+      const ready = (n: string): boolean =>
+        new RegExp(`(?:await\\s+${n.replace(/\$/g, '\\$')}\\s*\\.\\s*ready\\b|\\b${n.replace(/\$/g, '\\$')}\\s*\\.\\s*ready\\s*\\.\\s*then\\s*\\()`).test(surface);
+      // holo.card returns the card MESH (no .ready: `await card.ready` is a
+      // no-op and shotCamera throws). v11: the foil card rendered black.
+      const cardMeshes = new Set([...surface.matchAll(
+        new RegExp(`(?:\\b(?:const|let|var)\\s+)?([A-Za-z_$][\\w$]*)\\s*=\\s*(?:${holoAlt})\\s*\\.\\s*card\\s*\\(`, 'g'),
+      )].map(m => m[1]));
+      const bad = framed.filter(n => !holoObjects.has(n) || !ready(n));
+      if (bad.length > 0) {
+        const fix = cardMeshes.has(bad[0]) ? CARD_RECIPE : FRAME_RECIPE;
+        errors.push(`Library rule (holospot): shotCamera(camera, ${bad[0]}) frames before the kit is ready — pass the object holo.apply/holo.get returns (holo.card returns the mesh) after awaiting its ready promise: ${fix}`);
+      }
+    }
+
+    const rendererNames = new Set(collectNames(WEBGL_RENDERER_INSTANCE, surface));
+    rendererNames.add(CANONICAL_RENDERER_NAME);
+    const holoRenders = [...holoNames].some(n => calls(n, 'render'));
+    const rendererRenders = [...rendererNames].some(n => calls(n, 'render'));
+    if (holoRenders && rendererRenders) {
+      errors.push('Library rule (holospot): holo.render(scene, camera) and renderer.render(...) are both called — holo.render replaces renderer.render for the frame; drop the renderer.render call');
+    }
+
+    if (IRIDESCENCE_SETTING.test(surface)) {
+      warnings.push('Library rule (holospot): MeshPhysicalMaterial iridescence cannot reproduce a holographic foil — use holo.apply/holo.card materials for holo objects');
+    }
+
+    return { errors, warnings };
+  }
+
   /** Coarse static budget on body-creation call sites (the unrolled form). */
   private static validatePhysicsBudget(
     surface: string,
@@ -143,50 +374,65 @@ export class LibraryRulesValidator {
 }
 
 /**
- * Blank comments (block, line, HTML) so prose that merely mentions an API
- * cannot trip the rules. STRING-AWARE: string literals are kept intact AND
- * a `//` inside a string (https:// URLs) no longer blanks the rest of the
- * line — the v1 regex stripper ate real code after URLs (GLM #1068 note).
- * Walks the source once tracking string state; comments outside strings
- * are blanked in place.
+ * Top-level keys of the object literal that is argument `argIndex` of the call
+ * whose "(" ends just before `start`. Returns [] when that argument is not an
+ * inline object literal (a variable, a call, absent) — nothing to check.
+ * Spread entries and computed keys are skipped; nested objects are not entered.
  */
-function stripComments(code: string): string {
-  const out: string[] = [];
-  let i = 0;
-  const n = code.length;
-  while (i < n) {
-    const ch = code[i];
-    if (ch === '\'' || ch === '"' || ch === '`') {
-      const quote = ch;
-      out.push(ch);
-      i++;
-      while (i < n) {
-        if (code[i] === '\\' && i + 1 < n) { out.push(code[i], code[i + 1]); i += 2; continue; }
-        out.push(code[i]);
-        if (code[i] === quote) { i++; break; }
-        i++;
-      }
-      continue;
-    }
-    if (ch === '/' && code[i + 1] === '/') {
-      while (i < n && code[i] !== '\n') { out.push(' '); i++; }
-      continue;
-    }
-    if (ch === '/' && code[i + 1] === '*') {
-      out.push(' ', ' ');
-      i += 2;
-      while (i < n && !(code[i] === '*' && code[i + 1] === '/')) { out.push(code[i] === '\n' ? '\n' : ' '); i++; }
-      if (i < n) { out.push(' ', ' '); i += 2; }
-      continue;
-    }
-    if (ch === '<' && code.startsWith('<!--', i)) {
-      const end = code.indexOf('-->', i + 4);
-      const stop = end === -1 ? n : end + 3;
-      while (i < stop) { out.push(code[i] === '\n' ? '\n' : ' '); i++; }
-      continue;
-    }
-    out.push(ch);
+function objectLiteralKeys(surface: string, start: number, argIndex: number): string[] {
+  let i = start;
+  let arg = 0;
+  let depth = 0;
+  // Walk to the target argument at call depth 0.
+  while (i < surface.length && arg < argIndex) {
+    const ch = surface[i];
+    if (ch === '\'' || ch === '"' || ch === '`') { i = skipString(surface, i); continue; }
+    if (ch === '(' || ch === '[' || ch === '{') depth++;
+    else if (ch === ')' || ch === ']' || ch === '}') { if (depth === 0) return []; depth--; }
+    else if (ch === ',' && depth === 0) arg++;
     i++;
   }
-  return out.join('');
+  while (i < surface.length && /\s/.test(surface[i])) i++;
+  if (surface[i] !== '{') return [];
+  i++;
+  const keys: string[] = [];
+  let entry = '';
+  depth = 0;
+  const flush = () => {
+    const text = entry.trim();
+    entry = '';
+    if (!text || text.startsWith('...')) return;
+    const k = /^(?:(['"])([^'"]+)\1|([A-Za-z_$][\w$]*))\s*(?::|\(|$)/.exec(text);
+    if (k) keys.push(k[2] ?? k[3]);
+  };
+  while (i < surface.length) {
+    const ch = surface[i];
+    if (ch === '\'' || ch === '"' || ch === '`') {
+      const end = skipString(surface, i);
+      entry += surface.slice(i, end);
+      i = end;
+      continue;
+    }
+    if (ch === '(' || ch === '[' || ch === '{') depth++;
+    else if (ch === ')' || ch === ']' || ch === '}') {
+      if (depth === 0) { flush(); break; }
+      depth--;
+    } else if (ch === ',' && depth === 0) { flush(); i++; continue; }
+    // Only the head of an entry (up to its value) matters for the key; skip
+    // value text beyond depth 0 to keep entries small.
+    entry += ch;
+    i++;
+  }
+  return keys;
+}
+
+function skipString(src: string, start: number): number {
+  const quote = src[start];
+  let i = start + 1;
+  while (i < src.length) {
+    if (src[i] === '\\') { i += 2; continue; }
+    if (src[i] === quote) return i + 1;
+    i++;
+  }
+  return src.length;
 }

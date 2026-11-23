@@ -5,24 +5,9 @@
  * asset) with embedded cascade neural-field weights that drives a flowing
  * fluid-art simulation on a <canvas>.
  *
- * -----------------------------------------------------------------------------
- * EXEMPTION FROM THE "NO TEMPLATE FALLBACKS" DESIGN RULE (AGENTS.md)
- * -----------------------------------------------------------------------------
- * The repo rule states: "All generators route through the LLM. If the LLM fails,
- * the fix is to improve the harness, routing, or validation — not to fall back to
- * static code." This generator is NOT a fallback and NOT a static code template:
- *
- *   - It is the PRIMARY (and only) generation path for the `nbe` domain. There is
- *     no LLM step it could be "falling back" from.
- *   - Its output is produced by a deterministic neural-field physics simulation,
- *     not by authored prose/code. The cascade weights parameterize a continuous
- *     field; the rendered frames are emergent simulation state, the same way a
- *     fixed-asset procedural generator (e.g. a cellular-automaton seed render)
- *     is deterministic by construction.
- *   - Routing still flows through the registry: `nbeConfidence` only fires on
- *     explicit NBE/neural-field cues, so ordinary prompts keep reaching the LLM.
- *     This is a specialized deterministic generator, exactly analogous to a
- *     fixed-asset generator — not a template that masks an LLM failure.
+ * The governed generator chooses bounded settings from the brief. This renderer
+ * turns those settings into the simulation. Registry callers can also supply
+ * parameters directly for reproducible renders.
  *
  * Convergence contract: the rendered document posts
  * `window.postMessage('nbe:converged', '*')` exactly once after `convergenceSteps`
@@ -35,6 +20,7 @@
 
 import type { GeneratorResult } from '../GeneratorRegistry.js';
 import { scriptString } from '../../utils/scriptEmbed.js';
+import { engineLayerCss, engineRuntimeScript } from '../engine/EngineRuntime.js';
 
 // ---------------------------------------------------------------------------
 // Cascade neural-field weights
@@ -155,6 +141,18 @@ export interface NbeInitialParams {
   seed: number;
 }
 
+/** How the picture is fed and toned. Chosen by the model through NbeSettings; defaults keep a lone centre bloom. */
+export interface NbeLook {
+  /** Sources of light in normalised 0..1 space. */
+  emitters: Array<[number, number]>;
+  /** 0..1: how strongly each source spins the fluid into a vortex. */
+  swirl: number;
+  /** 0..1: bloom, how strongly bright regions saturate toward the top colour. */
+  glow: number;
+  /** Multiplier on how fast the currents evolve. */
+  speed: number;
+}
+
 export interface NbeGeneratorParams {
   /** Named preset, a custom weight set, or omitted for the default ('aurora'). */
   weights?: NbeWeightPreset | NbeWeightSet;
@@ -162,6 +160,10 @@ export interface NbeGeneratorParams {
   initialParams?: Partial<NbeInitialParams>;
   /** Simulation steps before the convergence signal fires. */
   convergenceSteps?: number;
+  /** Source layout, vortex, glow and current speed (see NbeSettings). */
+  look?: Partial<NbeLook>;
+  /** One sentence on why these settings fit the brief; recorded in the thinking trace. */
+  reason?: string;
 }
 
 const DEFAULT_INITIAL: NbeInitialParams = {
@@ -171,6 +173,8 @@ const DEFAULT_INITIAL: NbeInitialParams = {
   inject: 0.22,
   seed: 1337,
 };
+
+const DEFAULT_LOOK: NbeLook = { emitters: [[0.5, 0.5]], swirl: 0.4, glow: 0.6, speed: 1 };
 
 const DEFAULT_CONVERGENCE_STEPS = 600;
 const MIN_CONVERGENCE_STEPS = 1;
@@ -210,12 +214,14 @@ export class NbeGenerator {
     const convergenceSteps = clampConvergenceSteps(
       params.convergenceSteps ?? DEFAULT_CONVERGENCE_STEPS,
     );
+    const look: NbeLook = { ...DEFAULT_LOOK, ...params.look };
 
     const code = this.renderHtml({
       prompt,
       weightSet,
       initial,
       convergenceSteps,
+      look,
     });
 
     return {
@@ -225,7 +231,9 @@ export class NbeGenerator {
         `NBE deterministic render for prompt: "${prompt.slice(0, 120)}".`,
         `cascade preset="${weightSet.palette.id}" (${weightSet.weights.length} layers),`,
         `grid=${initial.gridWidth}x${initial.gridHeight}, damping=${initial.damping},`,
-        `convergence after ${convergenceSteps} steps. No LLM step (specialized deterministic generator).`,
+        `${look.emitters.length} emitter(s), swirl=${look.swirl}, glow=${look.glow},`,
+        `convergence after ${convergenceSteps} steps.`,
+        params.reason ? `Chosen because: ${params.reason}` : 'Settings not model-chosen (library defaults).',
       ].join(' '),
     };
   }
@@ -235,21 +243,24 @@ export class NbeGenerator {
     weightSet: NbeWeightSet;
     initial: NbeInitialParams;
     convergenceSteps: number;
+    look: NbeLook;
   }): string {
-    const { prompt, weightSet, initial, convergenceSteps } = args;
+    const { prompt, weightSet, initial, convergenceSteps, look } = args;
     const cascadeJson = JSON.stringify(weightSet.weights);
     const paletteJson = JSON.stringify(weightSet.palette);
     const initialJson = JSON.stringify(initial);
+    const lookJson = JSON.stringify(look);
 
     return `<!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-sinter-engine="nbe">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>NBE — Neural Bloom Engine</title>
+<title>S1NTR nbe</title>
 <style>
   html, body { margin: 0; padding: 0; height: 100%; background: #04060a; overflow: hidden; }
   #stage { display: block; width: 100vw; height: 100vh; image-rendering: auto; }
+  ${engineLayerCss()}
 </style>
 </head>
 <body>
@@ -258,8 +269,9 @@ export class NbeGenerator {
   nbe_render.html — produced by NbeGenerator (domain: 'nbe').
   Prompt: ${prompt.replace(/--!?>/g, '--&gt;')}
   Convergence contract: posts window.postMessage('nbe:converged', '*') once after
-  ${convergenceSteps} simulation steps.
+  ${convergenceSteps} simulation steps, and sets window.sinterEngine.state = 'ready'.
 -->
+<script>${engineRuntimeScript({ id: 'nbe', readyMessage: null })}</script>
 <script>
 (function () {
   'use strict';
@@ -269,16 +281,21 @@ export class NbeGenerator {
   var INITIAL = ${initialJson};
   var CONVERGENCE_STEPS = ${convergenceSteps};
   var PROMPT = ${scriptString(prompt)};
+  var LOOK = ${lookJson};
+  var E = window.sinterEngine;
 
   var W = INITIAL.gridWidth, H = INITIAL.gridHeight;
   var canvas = document.getElementById('stage');
   canvas.width = W; canvas.height = H;
   var ctx = canvas.getContext('2d');
+  if (!ctx) { E.fail('2d canvas context unavailable'); return; }
   var img = ctx.createImageData(W, H);
 
-  // Density + scratch buffers.
+  // Density + scratch buffers and the per-step velocity field.
   var dens = new Float32Array(W * H);
   var next = new Float32Array(W * H);
+  var VX = new Float32Array(W * H);
+  var VY = new Float32Array(W * H);
 
   // Seeded PRNG (mulberry32) for deterministic initial noise.
   function rng(seed) {
@@ -290,7 +307,7 @@ export class NbeGenerator {
     };
   }
   var rand = rng(INITIAL.seed >>> 0);
-  for (var i = 0; i < dens.length; i++) dens[i] = rand() * 0.25;
+  for (var i = 0; i < dens.length; i++) dens[i] = rand() * 0.12;
 
   // Precompute palette LUT (1024 entries) for fast shading.
   var LUT_SIZE = 1024;
@@ -311,88 +328,123 @@ export class NbeGenerator {
     }
   })();
 
-  // Cascade neural-field velocity at a normalized point (x,y in [0,1)).
-  function field(x, y, t) {
-    var vx = 0, vy = 0;
+  var TAU = Math.PI * 2;
+  var time = 0;
+  var gain = 1.5 + 4.5 * LOOK.glow;
+  var toneNorm = 1 / (1 - Math.exp(-gain));
+
+  // Cascade neural-field velocity for the whole grid at time t. Each layer is a travelling
+  // wave across a rotated axis, so currents cross and curl instead of only shearing.
+  function buildField(t) {
+    VX.fill(0); VY.fill(0);
     for (var l = 0; l < CASCADE.length; l++) {
       var L = CASCADE[l];
-      var ax = L.freq * x + L.phaseX + t * L.speed;
-      var ay = L.freq * y + L.phaseY + t * L.speed * 0.83;
-      vx += L.amp * Math.sin(ax);
-      vy += L.amp * Math.cos(ay);
-    }
-    return [vx, vy];
-  }
-
-  var steps = 0;
-  var converged = false;
-  var time = 0;
-
-  function step() {
-    time += 0.016;
-    var damping = INITIAL.damping;
-    var inject = INITIAL.inject;
-    // Inject density near center to keep the bloom alive.
-    var cx = (W / 2) | 0, cy = (H / 2) | 0;
-    for (var dy = -2; dy <= 2; dy++) {
-      for (var dx = -2; dx <= 2; dx++) {
-        var xi = cx + dx, yi = cy + dy;
-        if (xi >= 0 && xi < W && yi >= 0 && yi < H) {
-          dens[yi * W + xi] = Math.min(1, dens[yi * W + xi] + inject * (0.4 + 0.6 * rand()));
+      var th = L.phaseX + l * 0.9;
+      var c1 = Math.cos(th), s1 = Math.sin(th), c2 = Math.cos(th + 1.7), s2 = Math.sin(th + 1.7);
+      var f = L.freq * TAU;
+      var ox = L.phaseX + t * L.speed, oy = L.phaseY + t * L.speed * 0.83;
+      for (var y = 0; y < H; y++) {
+        var ny = y / H;
+        for (var x = 0; x < W; x++) {
+          var nx = x / W, p = y * W + x;
+          VX[p] += L.amp * Math.sin(f * (nx * c1 + ny * s1) + ox);
+          VY[p] += L.amp * Math.cos(f * (nx * c2 + ny * s2) + oy);
         }
       }
     }
+    // Vortices around each source.
+    if (LOOK.swirl > 0) {
+      for (var e = 0; e < LOOK.emitters.length; e++) {
+        var ex = LOOK.emitters[e][0] * W, ey = LOOK.emitters[e][1] * H;
+        var dir = (e % 2 === 0 ? 1 : -1) * LOOK.swirl * 2.2;
+        for (var yy = 0; yy < H; yy++) {
+          for (var xx = 0; xx < W; xx++) {
+            var dx = xx - ex, dy = yy - ey;
+            var r = Math.sqrt(dx * dx + dy * dy) + 2;
+            var w = dir * Math.exp(-r / (0.22 * W)) / r * 6;
+            var q = yy * W + xx;
+            VX[q] += -dy * w; VY[q] += dx * w;
+          }
+        }
+      }
+    }
+  }
 
+  function inject() {
+    var amt = INITIAL.inject;
+    for (var e = 0; e < LOOK.emitters.length; e++) {
+      var cx = Math.round(LOOK.emitters[e][0] * (W - 1)), cy = Math.round(LOOK.emitters[e][1] * (H - 1));
+      for (var dy = -5; dy <= 5; dy++) {
+        for (var dx = -5; dx <= 5; dx++) {
+          var xi = cx + dx, yi = cy + dy;
+          if (xi >= 0 && xi < W && yi >= 0 && yi < H) {
+            var fall = Math.exp(-(dx * dx + dy * dy) / 9);
+            var ii = yi * W + xi;
+            dens[ii] = Math.min(1, dens[ii] + amt * fall * (0.5 + 0.5 * rand()) * (1 + E.input));
+          }
+        }
+      }
+    }
+  }
+
+  function step() {
+    time += 0.05 * LOOK.speed;
+    inject();
+    buildField(time);
+    var damping = INITIAL.damping;
     // Semi-Lagrangian advection through the cascade velocity field.
     for (var y = 0; y < H; y++) {
       for (var x = 0; x < W; x++) {
-        var nx = x / W, ny = y / H;
-        var v = field(nx, ny, time);
-        var px = x - v[0];
-        var py = y - v[1];
+        var p = y * W + x;
+        var px = x - VX[p] * 0.3, py = y - VY[p] * 0.3;
         var x0 = Math.max(0, Math.min(W - 1, px));
         var y0 = Math.max(0, Math.min(H - 1, py));
-        var x1 = Math.min(W - 1, Math.ceil(x0));
-        var y1 = Math.min(H - 1, Math.ceil(y0));
-        var fx = x0 - Math.floor(x0);
-        var fy = y0 - Math.floor(y0);
-        var i00 = (Math.floor(y0) * W + Math.floor(x0));
-        var i10 = (Math.floor(y0) * W + x1);
-        var i01 = (y1 * W + Math.floor(x0));
-        var i11 = (y1 * W + x1);
-        var top = dens[i00] + (dens[i10] - dens[i00]) * fx;
-        var bot = dens[i01] + (dens[i11] - dens[i01]) * fx;
-        next[y * W + x] = (top + (bot - top) * fy) * damping;
+        var xf = Math.floor(x0), yf = Math.floor(y0);
+        var x1 = Math.min(W - 1, xf + 1), y1 = Math.min(H - 1, yf + 1);
+        var fx = x0 - xf, fy = y0 - yf;
+        var top = dens[yf * W + xf] + (dens[yf * W + x1] - dens[yf * W + xf]) * fx;
+        var bot = dens[y1 * W + xf] + (dens[y1 * W + x1] - dens[y1 * W + xf]) * fx;
+        next[p] = (top + (bot - top) * fy) * damping;
       }
     }
     var tmp = dens; dens = next; next = tmp;
+  }
 
-    // Shade.
+  function draw() {
     var data = img.data;
+    var layer = E.layer;
     for (var p = 0; p < dens.length; p++) {
-      var d = Math.min(1, Math.max(0, dens[p]));
-      var li = ((d * (LUT_SIZE - 1)) | 0) * 3;
+      var d = dens[p] < 0 ? 0 : dens[p];
+      var tone = (1 - Math.exp(-d * gain)) * toneNorm;
+      if (tone > 1) tone = 1;
+      var li = ((tone * (LUT_SIZE - 1)) | 0) * 3;
       var o = p * 4;
-      data[o] = lut[li];
-      data[o + 1] = lut[li + 1];
-      data[o + 2] = lut[li + 2];
-      data[o + 3] = 255;
+      if (layer === 'mask') {
+        var g = (tone * 255) | 0;
+        data[o] = g; data[o + 1] = g; data[o + 2] = g; data[o + 3] = 255;
+      } else {
+        data[o] = lut[li]; data[o + 1] = lut[li + 1]; data[o + 2] = lut[li + 2];
+        data[o + 3] = layer === 'overlay' ? (tone * 255) | 0 : 255;
+      }
     }
     ctx.putImageData(img, 0, 0);
-
-    steps++;
-    if (!converged && steps >= CONVERGENCE_STEPS) {
-      converged = true;
-      // Convergence signal — screenshot capture waits on this exact message.
-      window.postMessage('nbe:converged', '*');
-    }
   }
 
-  function loop() {
-    step();
-    requestAnimationFrame(loop);
-  }
-  requestAnimationFrame(loop);
+  var converged = false;
+  E.run({
+    step: function () {
+      step();
+      if (!converged && E.steps + 1 >= CONVERGENCE_STEPS) {
+        converged = true;
+        // Convergence signal — the legacy contract; E.ready() raises the same state for capture.
+        window.postMessage('nbe:converged', '*');
+      }
+    },
+    draw: draw,
+    readyAfter: CONVERGENCE_STEPS,
+    warmSteps: 240,
+    stepsPerFrame: 2
+  });
 })();
 </script>
 </body>

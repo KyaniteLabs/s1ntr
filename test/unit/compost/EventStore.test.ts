@@ -233,6 +233,15 @@ describe('EventStore', () => {
   // ─── Timeline ──────────────────────────────────────────────────────────
 
   describe('timeline()', () => {
+    it('displays limited entropy while keeping both event payloads intact', () => {
+      store.append('entropy_harvest', { quality: 'degraded' });
+      store.append('entropy_fallback', { quality: 'degraded' });
+      for (const { description, event } of store.timeline()) {
+        expect(description).toContain('quality=limited');
+        expect(event.payload.quality).toBe('degraded');
+      }
+    });
+
     it('produces human-readable descriptions', () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date('2026-01-02T03:04:05.000Z'));

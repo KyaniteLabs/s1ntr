@@ -96,3 +96,20 @@ describe("loadProjectDotenv", () => {
 		expect(isAllowedDotenvName("")).toBe(false);
 	});
 });
+
+describe("F13: the shell wins under either brand spelling", () => {
+	it("does not let .env's SINTER_ key override the shell's LIMINAL_ spelling of the same setting", () => {
+		fs.writeFileSync(path.join(dir, ".env"), "SINTER_LLM_MODEL=file-model\nSINTER_LOG_LEVEL=debug\n");
+		const env: NodeJS.ProcessEnv = { LIMINAL_LLM_MODEL: "shell-model" };
+		const result = loadProjectDotenv({ cwd: dir, env, warn: () => undefined });
+		expect(env.SINTER_LLM_MODEL).toBeUndefined();
+		expect(env.LIMINAL_LLM_MODEL).toBe("shell-model");
+		expect(result.applied).toEqual(["SINTER_LOG_LEVEL"]);
+	});
+	it("and the reverse spelling", () => {
+		fs.writeFileSync(path.join(dir, ".env"), "LIMINAL_LLM_MODEL=file-model\n");
+		const env: NodeJS.ProcessEnv = { SINTER_LLM_MODEL: "shell-model" };
+		loadProjectDotenv({ cwd: dir, env, warn: () => undefined });
+		expect(env.LIMINAL_LLM_MODEL).toBeUndefined();
+	});
+});

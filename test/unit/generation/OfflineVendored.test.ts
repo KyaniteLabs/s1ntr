@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { HTMLWrapper } from "../../../src/utils/htmlWrapper.js";
+import { isVendorAssetPath, RUNTIME_FETCHED_ASSETS } from "../../../src/utils/vendorAssets.js";
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -84,6 +85,9 @@ describe("offline vendored wrapping (#924)", () => {
 				for (const r of files) { h.update(Buffer.from(r, "utf-8")); const b = readFileSync(join(p, r)); h.update(b); total += b.length; }
 				expect(h.digest("hex"), `tree integrity drift for ${asset.file}`).toBe(asset.sha256);
 				expect(total, `tree size drift for ${asset.file}`).toBe(asset.bytes);
+			} else if (!existsSync(p) && RUNTIME_FETCHED_ASSETS[`/vendor/${asset.file}`]) {
+				// Public tree: GSAP is not shipped; it is fetched from its CDN against this same pin.
+				expect(RUNTIME_FETCHED_ASSETS[`/vendor/${asset.file}`].sha256, `pin drift for ${asset.file}`).toBe(asset.sha256);
 			} else {
 				const buf = readFileSync(p);
 				expect(createHash("sha256").update(buf).digest("hex"), `integrity drift for ${asset.file}`).toBe(asset.sha256);
@@ -113,7 +117,7 @@ describe("offline vendored wrapping (#924)", () => {
 			// provenance: legacy assets pin their CDN source; phase-1 capability
 			// libraries pin the npm tarball they were vendored from.
 			expect(asset.url, `${asset.id}: manifest must record a source URL`).toMatch(
-				/^https:\/(\/registry\.npmjs\.org|\/cdnjs\.cloudflare\.com|\/cdn\.jsdelivr\.net|\/unpkg\.com|\/d3js\.org)\//);
+				/^https:\/(\/registry\.npmjs\.org|\/cdnjs\.cloudflare\.com|\/cdn\.jsdelivr\.net|\/unpkg\.com|\/d3js\.org|\/github\.com)\/|^in-repo:vendor\/sinter-kits\//);
 		}
 	});
 });
@@ -159,6 +163,18 @@ describe("vendored capability libraries (#1000 integration)", () => {
 		}
 	});
 
+	it("holospot widens the CSP for its /vendor assets and blob workers; other pieces keep connect-src 'none'", () => {
+		const three = SAMPLES.find((s) => s.route === "three")!;
+		const csp = (h: string) => h.match(/http-equiv="Content-Security-Policy" content="([^"]*)"/)![1];
+		const holo = csp(HTMLWrapper.wrap(three.code, { domain: "three", libraries: ["three-webgpu", "holospot"] }));
+		expect(holo).toMatch(/connect-src 'self'/);
+		expect(holo).not.toMatch(/connect-src[^;]*'none'/);
+		expect(holo).toMatch(/worker-src blob: 'self'/);
+		const plain = csp(HTMLWrapper.wrap(three.code, { domain: "three", libraries: ["perfect-freehand"] }));
+		expect(plain).toMatch(/connect-src 'none'/);
+		expect(plain).not.toMatch(/worker-src/);
+	});
+
 	it("three importmap merge preserves the existing three entries", () => {
 		const three = SAMPLES.find((s) => s.route === "three")!;
 		const html = HTMLWrapper.wrap(three.code, { domain: "three", libraries: ["perfect-freehand"] });
@@ -174,15 +190,64 @@ it("phase-2 opt-ins inject as importmap ids without touching default three", () 
   });
   const imports = JSON.parse(html.match(/<script type="importmap">([\s\S]*?)<\/script>/)![1]).imports;
   expect(imports["three"]).toContain("/vendor/three/0.160.0/"); // byte-tie intact without the opt-in
-  expect(imports["three-tsl"]).toContain("0.182.0");
+  expect(imports["three-tsl"]).toContain("0.185.1");
   expect(imports["three-gpu-pathtracer"]).toContain("0.0.24");
   // the three-webgpu opt-in deliberately re-points THIS piece's bare `three`
   const remapped = HTMLWrapper.wrap(SAMPLES.find((s) => s.route === "three")!.code, {
     domain: "three", libraries: ["three-webgpu", "three-gpu-pathtracer"],
   });
   const rimports = JSON.parse(remapped.match(/<script type="importmap">([\s\S]*?)<\/script>/)![1]).imports;
-  expect(rimports["three"]).toContain("0.182.0/three.webgpu");
+  // bare `three` -> the WebGL module build (pathtracer + holospot need WebGLRenderer);
+  // WebGPU and TSL ride their own specifiers, sharing one three.core.min.js
+  expect(rimports["three"]).toContain("0.185.1/three.module.min.js");
+  expect(rimports["three/webgpu"]).toContain("0.185.1/three.webgpu.min.js");
+  expect(rimports["three/tsl"]).toContain("three.tsl.min.js");
   expect(rimports["three-gpu-pathtracer"]).toContain("0.0.24");
+  // three.tsl.min.js imports "three/webgpu": requesting tsl alone must still map it
+  expect(imports["three/webgpu"]).toContain("three.webgpu.min.js");
+});
+
+it("every vendored ESM file's relative imports exist on disk and are served", async () => {
+  // three.webgpu.min.js shipped without its ./three.core.min.js sibling: every
+  // three-webgpu piece 404'd at load and rendered black. Walk the module graph.
+  const manifest = JSON.parse(readFileSync(new URL("../../../vendor/manifest.json", import.meta.url), "utf8")) as {
+    assets: { file: string; load?: string }[];
+  };
+  const missing: string[] = [];
+  for (const a of manifest.assets.filter((x) => x.load === "module" && /\.(m?js)$/.test(x.file))) {
+    const src = readFileSync(new URL(`../../../vendor/${a.file}`, import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const specs = [...src.matchAll(/(?:\bfrom\s*|\bimport\s*\(?\s*)["'](\.{1,2}\/[^"']+)["']/g)].map((m) => m[1]);
+    for (const spec of new Set(specs)) {
+      const served = new URL(spec, `http://h/vendor/${a.file}`).pathname;
+      const onDisk = existsSync(new URL(`../../..${served}`, import.meta.url));
+      if (!onDisk) missing.push(`${a.file} -> ${spec} (missing on disk)`);
+      else if (!isVendorAssetPath(served) && !served.startsWith("/vendor/thi.ng/")) missing.push(`${a.file} -> ${spec} (not served)`);
+    }
+  }
+  expect(missing).toEqual([]);
+});
+
+it("holospot importmap id resolves to the vendored holo.js", () => {
+  const html = HTMLWrapper.wrap(SAMPLES.find((s) => s.route === "three")!.code, {
+    domain: "three", libraries: ["holospot"],
+  });
+  const imports = JSON.parse(html.match(/<script type="importmap">([\s\S]*?)<\/script>/)![1]).imports;
+  expect(imports["holospot"]).toContain("/vendor/holospot/0.1.0/dist/holo.js");
+  // holo.js imports bare "three" and needs r170+ (peer >=0.170, WebGLRenderer):
+  // requesting holospot alone must re-point `three` at the 0.185.1 WebGL module
+  // build, or the piece links against 0.160 and the foil never renders.
+  expect(imports["three"]).toContain("/vendor/three-webgpu/0.185.1/three.module.min.js");
+  // the holospot asset dir is registered so the vendor server can serve runtime assets
+  expect(isVendorAssetPath("/vendor/holospot/0.1.0/assets/bumps/scratches.jpg")).toBe(true);
+  expect(isVendorAssetPath("/vendor/holospot/0.1.0/assets/holo3d/wolf.sdf")).toBe(true);
+  expect(isVendorAssetPath("/vendor/holospot/0.1.0/assets/logos/koru.svg")).toBe(true);
+  // Holo's default asset base is new URL("../assets/", import.meta.url): the
+  // vendored layout must keep holo.js one level below assets/ or every piece
+  // that omits { assets } 404s on its bump maps.
+  const holoUrl = new URL(`http://x${imports["holospot"]}`);
+  const assetBase = new URL("../assets/", holoUrl).pathname;
+  expect(assetBase).toBe("/vendor/holospot/0.1.0/assets/");
+  expect(existsSync(join(process.cwd(), assetBase, "bumps/scratches.jpg"))).toBe(true);
 });
 
 	it("thi.ng umbrella injects the generated exact-key importmap", () => {

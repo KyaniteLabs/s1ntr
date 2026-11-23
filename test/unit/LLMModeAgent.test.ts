@@ -818,7 +818,8 @@ describe('LLMModeAgent', () => {
     expect(mockApplyEdit.execute).toHaveBeenCalledTimes(1);
     expect(mockRunBuild.execute).toHaveBeenCalledTimes(1);
     expect(mockRunTests.execute).not.toHaveBeenCalled();
-    expect(mockReadFile.execute).not.toHaveBeenCalledWith({ path: 'src/extra.ts' });
+    expect(mockReadFile.execute).not.toHaveBeenCalled();
+    expect(mockComplete).toHaveBeenCalledTimes(2);
     expect(session.status).toBe(Status.SUCCESS);
     expect(mockClearRunState).toHaveBeenCalledTimes(1);
   });
@@ -853,6 +854,7 @@ describe('LLMModeAgent', () => {
       message.role === 'tool' && message.content.includes('Verification gate: run runTests (runtime-core) before completing this task.'),
     )).toBe(true);
     expect(mockRunTests.execute).toHaveBeenCalledWith({ pattern: 'runtime-core' });
+    expect(session.lastVerification).toMatchObject({ passed: true, type: 'test' });
     expect(session.status).toBe(Status.SUCCESS);
   });
 
@@ -1383,6 +1385,29 @@ describe('LLMModeAgent', () => {
     expect(warnings).toHaveLength(1);
     expect(warnings[0].content).toContain('(step 2/8)');
     expect(warnings[0].content).toContain('This run stops after step 4 unless one does: 3 planning steps left');
+    expect(session.exitReason).toBe('bounded-no-mutation');
+  });
+
+  it('keeps the edit deadline and verification gate active when an edit only created a backup', async () => {
+    mockApplyEdit.execute.mockResolvedValueOnce({ success: false, data: { backupPath: '' } });
+    queuePlans(
+      '{"tool":"applyEdit","params":{"path":"src/foo.ts","search":"missing","replace":"new"},"thought":"edit"}',
+      '{"tool":"readFile","params":{"path":"src/foo.ts"},"thought":"inspect after the failed edit"}',
+      '{"tool":"runFocusedTests","params":{"pattern":"Foo"},"thought":"check current behavior"}',
+      '{"tool":"complete","params":{},"thought":"finish"}',
+      '{"tool":"readFile","params":{"path":"src/foo.ts"},"thought":"inspect"}',
+    );
+    const session = await new LLMModeAgent(mockLLM as any).executeTask({
+      id: 'tui-self-edit-rejected', title: 'Repair failing edit', description: 'Update the implementation',
+      approved: true, maxSteps: 10, requiresMutation: true, completionPolicy: 'stop_after_verification',
+      verificationTargets: [{ tool: 'runFocusedTests', pattern: 'Foo', reason: 'verify the edit', priority: 1 }],
+    });
+
+    expect(session.mutatedFiles.size).toBe(0);
+    expect(session.backups).toHaveLength(1);
+    expect.soft(mockComplete.mock.calls[2][0].prompt).toContain('EDIT DEADLINE (step 3/10)');
+    expect.soft(session.messages.some(m => m.role === 'tool' && m.content.includes('Mutation gate:'))).toBe(true);
+    expect.soft(session.status).toBe(Status.FAILED);
     expect(session.exitReason).toBe('bounded-no-mutation');
   });
 

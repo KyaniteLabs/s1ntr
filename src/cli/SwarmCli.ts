@@ -233,10 +233,10 @@ function printLabelLater(record: SwarmSessionRecord, out: LineWriter): void {
 
 function printSessions(
   records: SwarmSessionRecord[],
-  opts: { all: boolean; out: LineWriter },
+  opts: { all: boolean; out: LineWriter; sessionDir?: string },
 ): void {
   if (records.length === 0) {
-    opts.out('No swarm sessions found. Run: sinter swarm run --prompt "<prompt>"');
+    opts.out(`No swarm sessions found${opts.sessionDir ? ` in ${opts.sessionDir}` : ''}${opts.all ? '' : ' (labelled sessions are hidden; use --all to include them)'}. Run: sinter swarm run --prompt "<prompt>"`);
     return;
   }
   opts.out(''
@@ -407,6 +407,7 @@ async function runCommand(
   // candidate belongs to which persona.
   const panelPersonas = deps.swarmConfig?.personas ?? DEFAULT_PERSONAS;
   const panelModels = [...new Set(panelPersonas.map(persona => persona.model))];
+  const maxRounds = flags.swarmRounds ?? deps.swarmConfig?.maxRounds ?? 10;
   out(`Panel: ${panelPersonas.length} personas · ${panelModels.join(', ')}`);
 
   const orchestrator = new SwarmOrchestrator({
@@ -419,7 +420,21 @@ async function runCommand(
     calibrationLedgerPath: ledgerPath,
   });
 
-  const result = await orchestrator.run(prompt, mode);
+  // The default caller reaches the provider: open the same receipted product grant as generate.
+  // An injected caller (tests, offline callers) never reaches a provider and needs none.
+  const result = deps.callOllama
+    ? await orchestrator.run(prompt, mode)
+    : await (async () => {
+      const { runProductionCliProviderEffect } = await import('./LiminalProductionProviderEffect.js');
+      const { randomUUID } = await import('node:crypto');
+      return runProductionCliProviderEffect({
+        idempotencyKey: `production-swarm-run:${randomUUID()}`,
+        binding: { surface: 'swarm-run', mode, maxRounds, panelSize: panelPersonas.length },
+        // One generation per persona per round, plus final-round voting.
+        maxGeneratorAttempts: panelPersonas.length * (maxRounds + 1),
+        effect: () => orchestrator.run(prompt, mode),
+      });
+    })();
   for (const round of result.rounds) {
     out(`Round ${round.roundNum}: ${round.outputs.size} outputs`);
   }
@@ -485,7 +500,7 @@ async function sessionsCommand(flags: SwarmCliFlags, deps: SwarmCliDeps): Promis
   const sessionDir = resolveSessionDir(flags, deps.env ?? process.env, home);
   const records = await listSwarmSessions(sessionDir);
   const visible = flags.all ? records : records.filter(record => !record.label);
-  printSessions(visible.slice(0, limit), { all: Boolean(flags.all), out });
+  printSessions(visible.slice(0, limit), { all: Boolean(flags.all), out, sessionDir });
   return 0;
 }
 

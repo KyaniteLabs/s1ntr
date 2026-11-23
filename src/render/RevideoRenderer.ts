@@ -1,3 +1,9 @@
+/**
+ * EXPORT ENGINE, not an S1NTR art domain (Simon, 2026-11-19). Revideo is a
+ * video-assembly tool that belongs to KinoCut, which can use this renderer to
+ * export Revideo scenes. S1NTR no longer generates a `revideo` domain (art that
+ * needs motion is better done in hydra/p5/three); do not re-add one.
+ */
 import fs from 'fs/promises';
 import { existsSync } from 'fs';
 import path from 'path';
@@ -5,12 +11,14 @@ import os from 'os';
 import { execSync } from 'child_process';
 import { createRequire } from 'module';
 import { pathToFileURL } from 'url';
-import { VideoRenderer, VideoRenderOptions, VideoRenderResult } from './VideoRenderer.js';
+import { VideoRenderer, VideoRenderOptions, VideoRenderResult, VideoRenderError } from './VideoRenderer.js';
+import { withRenderBudget, killProcessGroup } from './RenderBudget.js';
 import { VideoExporter } from '../export/VideoExporter.js';
 import { Logger } from '../utils/Logger.js';
 import { resolveChromiumExecutablePath } from '../utils/browserAssetFallbacks.js';
 import { missingChromiumError } from '../utils/browserPreflight.js';
 import { getChromeArgs, sandboxOptOutArgs, SOFTWARE_WEBGL_ARGS } from '../security/SandboxConfig.js';
+import { prepareBrowserScratch } from '../utils/scratchSpace.js';
 
 const DEFAULT_FPS = 30;
 const DEFAULT_WIDTH = 1920;
@@ -21,6 +29,12 @@ const DEFAULT_HEIGHT = 1080;
 const MAX_CAPTURE_FRAMES = 3600;
 // Time budget for the headless render+capture so a hung browser cannot block CI.
 const CAPTURE_TIMEOUT_MS = 180_000;
+// Whole-render wall-clock budgets (browser launch excluded). A scene that spins the
+// page's main thread answers no CDP call, so these are what actually bound a render.
+const VIDEO_RENDER_BUDGET_MS = 180_000;
+const STILLS_RENDER_BUDGET_MS = 60_000;
+// How long a clean browser.close() gets before the process group is killed.
+const BROWSER_CLOSE_GRACE_MS = 5_000;
 
 /**
  * The harness page loads from this private origin, served from the work dir
@@ -83,6 +97,24 @@ const REVIDEO_PAGE_GUARDS = `(() => {
   try { if (navigator.clipboard) Object.defineProperties(navigator.clipboard, { read: { value: deny }, readText: { value: deny }, write: { value: deny }, writeText: { value: deny } }); } catch {}
   try { if (navigator.geolocation) Object.defineProperties(navigator.geolocation, { getCurrentPosition: { value: () => {} }, watchPosition: { value: () => 0 } }); } catch {}
 })();`;
+
+/** Close a launched browser; if it will not close in time, or the render timed out, kill its process group. */
+const HeadlessBrowserShutdown = {
+  async close(browser: { close(): Promise<void> }, pid: number | undefined, force: boolean): Promise<void> {
+    if (force) {
+      killProcessGroup(pid);
+      void browser.close().catch(() => {});
+      return;
+    }
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
+    const closed = await Promise.race([
+      browser.close().then(() => true, () => false),
+      new Promise<boolean>((resolve) => { graceTimer = setTimeout(() => resolve(false), BROWSER_CLOSE_GRACE_MS); }),
+    ]);
+    clearTimeout(graceTimer);
+    if (!closed) killProcessGroup(pid);
+  },
+};
 
 export interface CompositionConfig {
   id: string;
@@ -255,7 +287,7 @@ export class RevideoRenderer implements VideoRenderer {
     // other domain uses through CanvasRecorder). This bypasses the upstream
     // @revideo/renderer toolchain, which hangs silently in headless Chrome.
     if (!allowUpstreamRenderer) {
-      return this.renderViaCanvasCapture(code, outputPath, { fps, width, height });
+      return this.renderViaCanvasCapture(code, outputPath, { fps, width, height, timeoutMs: opts.timeoutMs ?? VIDEO_RENDER_BUDGET_MS });
     }
 
     return this.renderViaUpstream(code, outputPath, { ...opts, fps, width, height });
@@ -269,7 +301,7 @@ export class RevideoRenderer implements VideoRenderer {
   private async renderViaCanvasCapture(
     code: string,
     outputPath: string,
-    opts: { fps: number; width: number; height: number },
+    opts: { fps: number; width: number; height: number; timeoutMs: number },
   ): Promise<VideoRenderResult> {
     const { fps, width, height } = opts;
     const ext = (path.extname(outputPath).slice(1) || 'mp4') as 'mp4' | 'webm' | 'mov';
@@ -284,7 +316,7 @@ export class RevideoRenderer implements VideoRenderer {
       await fs.writeFile(path.join(workDir, 'harness.js'), harnessJs);
       await fs.writeFile(path.join(workDir, 'index.html'), html);
 
-      const capturedFrames = await this.captureFrames(workDir, framesDir, { fps, width, height });
+      const capturedFrames = await this.captureFrames(workDir, framesDir, { fps, width, height, timeoutMs: opts.timeoutMs });
       if (capturedFrames === 0) {
         throw new Error('Revideo canvas capture produced no frames; the scene did not render.');
       }
@@ -462,7 +494,7 @@ export class RevideoRenderer implements VideoRenderer {
   private async captureFrames(
     workDir: string,
     framesDir: string,
-    opts: { fps: number; width: number; height: number },
+    opts: { fps: number; width: number; height: number; timeoutMs: number },
   ): Promise<number> {
     return this.withHarnessPage(workDir, opts, async ({ seek, total }) => {
       const totalFrames = Math.min(Math.max(total, 1), MAX_CAPTURE_FRAMES);
@@ -484,7 +516,7 @@ export class RevideoRenderer implements VideoRenderer {
    * the harness's own files (served at HARNESS_ORIGIN), data: and blob: load; realtime
    * transports, storage and device permissions are denied (#1628).
    */
-  async renderStills(code: string, opts: { fps?: number; width?: number; height?: number } = {}): Promise<RevideoStillsResult> {
+  async renderStills(code: string, opts: { fps?: number; width?: number; height?: number; timeoutMs?: number; signal?: AbortSignal } = {}): Promise<RevideoStillsResult> {
     const fps = opts.fps ?? DEFAULT_FPS;
     const width = opts.width ?? DEFAULT_WIDTH;
     const height = opts.height ?? DEFAULT_HEIGHT;
@@ -495,7 +527,7 @@ export class RevideoRenderer implements VideoRenderer {
       const harnessJs = await this.bundleHarness(this.normalizeSceneCode(code), workDir, { fps, width, height });
       await fs.writeFile(path.join(workDir, 'harness.js'), harnessJs);
       await fs.writeFile(path.join(workDir, 'index.html'), this.buildHarnessHtml());
-      const run = await this.withHarnessPage(workDir, { fps, width, height }, async ({ seek, total }) => {
+      const run = await this.withHarnessPage(workDir, { fps, width, height, timeoutMs: opts.timeoutMs ?? STILLS_RENDER_BUDGET_MS, signal: opts.signal }, async ({ seek, total }) => {
         const frames = Math.min(Math.max(total, 1), MAX_CAPTURE_FRAMES);
         const early = Math.min(Math.round(0.5 * fps), Math.floor(frames / 4));
         const late = Math.min(frames - 1, Math.floor(frames * 0.8));
@@ -519,15 +551,18 @@ export class RevideoRenderer implements VideoRenderer {
    */
   private async withHarnessPage<T>(
     workDir: string,
-    opts: { fps: number; width: number; height: number },
+    opts: { fps: number; width: number; height: number; timeoutMs: number; signal?: AbortSignal },
     use: (h: { seek: (frame: number) => Promise<Buffer>; total: number }) => Promise<T>,
   ): Promise<{ value: T; containment: RevideoContainment }> {
     const puppeteer = await import('puppeteer');
     const disableSandbox = process.env.LIMINAL_DISABLE_SANDBOX === 'true';
     const executablePath = resolveChromiumExecutablePath();
     if (!executablePath) throw missingChromiumError();
+    opts.signal?.throwIfAborted();
+    prepareBrowserScratch();   // profile dir off the data volume + free-space check
     const browser = await puppeteer.default.launch({
       headless: true,
+      timeout: opts.timeoutMs,
       executablePath,
       args: getChromeArgs({ forceDisableSandbox: disableSandbox }),
       // A scene that never settles must fail, not hang: every CDP call
@@ -538,7 +573,7 @@ export class RevideoRenderer implements VideoRenderer {
       networkIsolated: false, permissionsDenied: false, blockedRequests: 0, cleanupSucceeded: false,
     };
 
-    try {
+    const drive = async (): Promise<{ value: T; containment: RevideoContainment }> => {
       const page = await browser.newPage();
       await page.setRequestInterception(true);
       page.on('request', (request: { url(): string; abort(): Promise<void>; continue(): Promise<void>;
@@ -618,8 +653,22 @@ export class RevideoRenderer implements VideoRenderer {
       };
       const value = await use({ seek, total: state.total });
       return { value, containment };
+    };
+
+    const pid = browser.process?.()?.pid;
+    let timedOut = false;
+    const stop = () => {
+      timedOut = true;
+      killProcessGroup(pid);
+    };
+    opts.signal?.addEventListener('abort', stop, { once: true });
+    try {
+      if (opts.signal?.aborted) stop();
+      opts.signal?.throwIfAborted();
+      return await withRenderBudget('revideo render', opts.timeoutMs, drive, stop);
     } finally {
-      await browser.close();
+      opts.signal?.removeEventListener('abort', stop);
+      await HeadlessBrowserShutdown.close(browser, pid, timedOut);
     }
   }
 
@@ -700,7 +749,7 @@ export class RevideoRenderer implements VideoRenderer {
             }),
             new Promise<void>((_, reject) => {
               renderTimeoutId = setTimeout(
-                () => reject(new Error(`Revideo upstream render timed out after ${RENDER_TIMEOUT_MS}ms`)),
+                () => reject(new VideoRenderError('RENDER_TIMEOUT', `Revideo upstream render timed out after ${RENDER_TIMEOUT_MS}ms`)),
                 RENDER_TIMEOUT_MS,
               );
             }),

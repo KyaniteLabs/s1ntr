@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { Domain, normalizeDomain, isValidDomain } from '../../../src/types/domains.js';
+import { Domain, normalizeDomain, isValidDomain, canonicalDomainId } from '../../../src/types/domains.js';
 
 describe('normalizeDomain', () => {
   it('returns the canonical Domain for a valid label', () => {
@@ -18,10 +18,22 @@ describe('normalizeDomain', () => {
     expect(normalizeDomain('textgen')).toBe(Domain.TEXTGEN);
   });
 
-  it('resolves meta and its custom synonym to the META catch-all domain', () => {
-    expect(normalizeDomain('meta')).toBe(Domain.META);
-    expect(normalizeDomain('custom')).toBe(Domain.META);
-    expect(normalizeDomain('META')).toBe(Domain.META);
+  it('resolves custom, and its deprecated meta alias, to the CUSTOM catch-all domain', () => {
+    expect(normalizeDomain('custom')).toBe(Domain.CUSTOM);
+    expect(normalizeDomain('meta')).toBe(Domain.CUSTOM);
+    expect(normalizeDomain('META')).toBe(Domain.CUSTOM);
+    expect(Domain.CUSTOM).toBe('custom');
+  });
+
+  it('canonicalDomainId maps deprecated meta to custom, notifies once, and leaves other ids alone', () => {
+    const seen: Array<[string, string]> = [];
+    expect(canonicalDomainId('meta', (from, to) => seen.push([from, to]))).toBe('custom');
+    expect(canonicalDomainId(' Meta ')).toBe('custom');
+    expect(seen).toEqual([['meta', 'custom']]);
+    expect(canonicalDomainId('custom', () => seen.push(['x', 'x']))).toBe('custom');
+    expect(canonicalDomainId('p5')).toBe('p5');
+    expect(canonicalDomainId('')).toBe('');
+    expect(seen).toHaveLength(1);
   });
 
   it('resolves blender and its bpy synonym to the BLENDER domain', () => {

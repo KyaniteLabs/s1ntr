@@ -2,6 +2,7 @@
  * Reverse-mode brief: the text block appended to the generation prompt, plus the
  * provenance record. Only derived numbers and labels go in here, never media bytes.
  */
+import { createHash } from 'node:crypto';
 import type { FitRecord } from './RenderFit.js';
 import { curveToSections, round, type Arc, type ArcCue } from './Arc.js';
 import type { DiagramFeatures, TextFeatures } from './DocumentFeatures.js';
@@ -15,6 +16,7 @@ export interface ReverseProvenance {
   readonly arc: Arc | null;
   /** `file:<name>`, `vision:<name>`, `svg:<name>`, `derived:<name>` or `none`. */
   readonly arcSource: string;
+  readonly arcImageSha256?: string;
   readonly durationSec: number | null;
   /** Measured fit of the rendered piece (exact-duration check), when it was run. */
   readonly fit?: FitRecord;
@@ -23,6 +25,10 @@ export interface ReverseProvenance {
 export interface ReverseBrief {
   readonly promptBlock: string;
   readonly provenance: ReverseProvenance;
+}
+
+export function hashReverseProvenance(provenance: ReverseProvenance): string {
+  return createHash('sha256').update(JSON.stringify(provenance)).digest('hex');
 }
 
 const fmtList = (xs: readonly number[]) => `[${xs.join(', ')}]`;
@@ -105,9 +111,10 @@ export function buildReverseBrief(input: {
   cards: readonly ReferenceCard[];
   arc: Arc | null;
   arcSource: string;
+  arcImageSha256?: string;
   durationSec: number | null;
 }): ReverseBrief {
-  const { cards, arc, arcSource, durationSec } = input;
+  const { cards, arc, arcSource, arcImageSha256, durationSec } = input;
   const lines = ['', '--- Reverse-mode brief (derived from the references; no reference media is attached) ---'];
   if (durationSec !== null) {
     lines.push(arc?.ending === 'phrase-out'
@@ -134,6 +141,7 @@ export function buildReverseBrief(input: {
       references: cards.map(({ file, kind, sha256, bytes, features }) => ({ file, kind, sha256, bytes, features })),
       arc,
       arcSource,
+      ...(arcImageSha256 ? { arcImageSha256 } : {}),
       durationSec,
     },
   };

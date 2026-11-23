@@ -13,6 +13,7 @@
  * user's explicit runtime intent and must beat persisted file values.)
  */
 
+import { assertProofCannotTouchRealState } from './ProofIsolationGuard.js';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
@@ -23,8 +24,8 @@ import { TIMEOUT_DEFAULT_MS, TIMEOUT_EVALUATOR_MS } from '../constants/limits.js
 import type { ModelCapabilities } from '../llm/CapabilityRegistry.js';
 import type { ThinkingConfig } from '../llm/ProviderTypes.js';
 import { getEffectiveConfig, updateConfig } from './ConfigLoader.js';
-import { selectApiKeyForEndpoint } from './ProviderKeyResolver.js';
-import { PROVIDER_DEFAULTS, detectRoleProviderType, resolveProviderAlias } from './ProviderRuntime.js';
+import { selectRoleApiKeyForEndpoint } from './ProviderKeyResolver.js';
+import { PROVIDER_DEFAULTS, detectRoleProviderType, resolveProviderAlias, sameProviderEndpoint } from './ProviderRuntime.js';
 import {
   KILO_SEAT_MODELS,
   CODEX_PROXY_HARNESS_SEAT,
@@ -44,7 +45,8 @@ import { resolveRoleConfig as evaluateRoleConfig } from '../identity/roleIntegra
 
 export type ModelRole = 'generator' | 'evaluator' | 'harness' | 'studio';
 export type FatalRoleConfigCode = 'CODEX_PROXY_API_KEY_REQUIRED' | 'HARNESS_ROLE_CONFIG_REJECTED' | 'USER_CONFIG_INVALID'
-  | 'DECISION_MODEL_AT_WRITING_SEAT' | 'DECISION_HEAD_INVALID';
+  | 'DECISION_MODEL_AT_WRITING_SEAT' | 'DECISION_HEAD_INVALID'
+  | 'PROJECT_CONFIG_UNREADABLE' | 'PROJECT_CONFIG_MALFORMED';
 
 export class FatalRoleConfigError extends Error {
   constructor(readonly code: FatalRoleConfigCode, detail: string) {
@@ -137,6 +139,7 @@ export interface ResolvedRoleConfig {
   temperature: number;
   maxTokens: number;
   timeout: number;
+  timeoutOverride?: number;
   thinking: ThinkingConfig;
   streaming: boolean;
   decisionHead?: Required<DecisionHeadConfig>;
@@ -223,7 +226,9 @@ const DEFAULT_USER_CONFIG_PATH = join(CONFIG_DIR, 'config.json');
  */
 export function resolveUserConfigPath(): string {
   const override = (process.env.SINTER_CONFIG_PATH ?? process.env.LIMINAL_CONFIG_PATH)?.trim();
-  return override ? override : DEFAULT_USER_CONFIG_PATH;
+  const target = override || DEFAULT_USER_CONFIG_PATH;
+  assertProofCannotTouchRealState(target);
+  return target;
 }
 
 /**
@@ -237,12 +242,17 @@ export function resolveUserConfigPath(): string {
  *
  * After loading, applies capability overrides to CapabilityRegistry.
  */
-export async function loadRoleConfig(projectDir?: string): Promise<Record<ModelRole, ResolvedRoleConfig>> {
+export async function loadRoleConfig(
+  projectDir?: string,
+  onMerged?: (config: RoleConfigFile | null) => void,
+): Promise<Record<ModelRole, ResolvedRoleConfig>> {
   const fileConfig = await loadConfigFile();
   const projectConfig = await loadProjectConfig(projectDir);
 
   // Merge: project > user (project overrides user for same keys)
   let merged = mergeConfigs(fileConfig, projectConfig);
+  const projectChangesRoute = (role: ModelRole) =>
+    roleRouteChanged(fileConfig?.roles?.[role], projectConfig?.roles?.[role]);
 
   // No explicit role config from files? Derive the generator default from the
   // effective config so a provider KEY the user actually has — OpenAI, Google,
@@ -258,12 +268,18 @@ export async function loadRoleConfig(projectDir?: string): Promise<Record<ModelR
   // through getEffectiveConfig() there would let an unrelated ambient provider
   // key in the environment (e.g. a stray GLM_API_KEY) shadow the user's explicit
   // key. So this key-detection fallback only fires for the key-only case.
-  if (!merged?.roles && !env('LLM_BASE_URL')) {
-    const effective = await getEffectiveConfig();
+  const generatorConfig = merged?.roles?.generator;
+  if (!projectChangesRoute('generator')
+    && !generatorConfig?.baseUrl && !generatorConfig?.model && !generatorConfig?.provider
+    && !env('LLM_BASE_URL')) {
+    const effective = await getEffectiveConfig(resolveUserConfigPath());
     if (effective.baseUrl && effective.apiKey) {
       merged = {
+        ...merged,
         roles: {
+          ...merged?.roles,
           generator: {
+            ...generatorConfig,
             baseUrl: effective.baseUrl,
             model: effective.model || DEFAULT_MODEL,
             apiKey: effective.apiKey,
@@ -292,10 +308,17 @@ export async function loadRoleConfig(projectDir?: string): Promise<Record<ModelR
   // active, so the misroute is visible instead of a silent fall-through.
   warnIfOpenAiEnvIgnored(merged);
 
-  const generator = resolveRole('generator', merged);
-  const evaluator = resolveRole('evaluator', merged, generator);
-  const harness = resolveRole('harness', merged, generator);
-  const studio = resolveRole('studio', merged, generator);
+  const generatorProjectRoute = projectChangesRoute('generator');
+  const generator = resolveRole('generator', merged, generatorProjectRoute);
+  const inheritedRouteChanged = generatorProjectRoute
+    || Boolean(fileConfig?.roles?.generator?.baseUrl
+      && !sameProviderEndpoint(fileConfig.roles.generator.baseUrl, generator.baseUrl));
+  const resolveInheritedRole = (role: Exclude<ModelRole, 'generator'>) =>
+    resolveRole(role, merged, projectChangesRoute(role), generator, inheritedRouteChanged,
+      Boolean(projectConfig?.roles?.[role]?.apiKey));
+  const evaluator = resolveInheritedRole('evaluator');
+  const harness = resolveInheritedRole('harness');
+  const studio = resolveInheritedRole('studio');
 
   const harnessSource = merged?.roles?.harness
     ? 'project-config' as const
@@ -314,6 +337,7 @@ export async function loadRoleConfig(projectDir?: string): Promise<Record<ModelR
     throw new FatalRoleConfigError('HARNESS_ROLE_CONFIG_REJECTED', reason);
   }
 
+  onMerged?.(merged);
   return { generator, evaluator, harness, studio };
 }
 
@@ -408,17 +432,19 @@ function firstEnvValue(keys: string[]): { name: string; value: string } | undefi
 function resolveRole(
   role: ModelRole,
   fileConfig: RoleConfigFile | null,
+  projectChangesRoute: boolean,
   inherit?: ResolvedRoleConfig,
+  inheritedRouteChanged = false,
+  hasProjectKey = false,
 ): ResolvedRoleConfig {
   const fileRole = fileConfig?.roles?.[role];
 
   // Environment variable fallbacks per role
   // env() adds the LIMINAL_ prefix automatically, so these are the base names
-  const envMap: Record<ModelRole, { baseUrl: string[]; model: string[]; apiKey: string[] }> = {
+  const envMap: Record<ModelRole, { baseUrl: string[]; model: string[] }> = {
     generator: {
       baseUrl: ['GENERATOR_BASE_URL', 'LLM_BASE_URL'],
       model: ['GENERATOR_MODEL', 'LLM_MODEL'],
-      apiKey: ['GENERATOR_API_KEY', 'LLM_API_KEY'],
     },
     // SEAT ISOLATION (adversary catch on #1094): the generic LLM_* env is the
     // loop's GENERATOR lane channel; it must never steer the cached
@@ -427,17 +453,14 @@ function resolveRole(
     evaluator: {
       baseUrl: ['EVALUATOR_BASE_URL'],
       model: ['EVALUATOR_MODEL'],
-      apiKey: ['EVALUATOR_API_KEY'],
     },
     harness: {
       baseUrl: ['HARNESS_BASE_URL'],
       model: ['HARNESS_MODEL'],
-      apiKey: ['HARNESS_API_KEY'],
     },
     studio: {
       baseUrl: ['STUDIO_BASE_URL', 'HARNESS_BASE_URL'],
       model: ['STUDIO_MODEL', 'HARNESS_MODEL'],
-      apiKey: ['STUDIO_API_KEY', 'HARNESS_API_KEY'],
     },
   };
 
@@ -447,9 +470,11 @@ function resolveRole(
   // value gets exactly one stderr notice naming the role and winning source.
   const envBaseUrl = firstEnvValue(envSources.baseUrl);
   const envModel = firstEnvValue(envSources.model);
+  // F13: the generic LLM_PROVIDER label describes the generator's route. A non-generator seat whose file role
+  // pins its own provider keeps that provider (the label would otherwise mislabel an endpoint it does not select).
   const envProvider = firstEnvValue(role === 'generator'
     ? ['GENERATOR_PROVIDER', 'LLM_PROVIDER']
-    : ['LLM_PROVIDER']);
+    : fileRole?.provider ? [] : ['LLM_PROVIDER']);
   if (envBaseUrl && fileRole?.baseUrl) {
     emitOverrideNotice(`[config] role '${role}': env ${envBaseUrl.name} overrides file baseUrl`);
   }
@@ -537,14 +562,20 @@ function resolveRole(
   // bearer turns a local configuration error into a provider attempt and 401.
   const failClosedProxySeat = cliproxyHarnessSeat || cliproxyEvaluatorSeat;
   const endpointFromEnv = Boolean(envBaseUrl || resolvedEnvProvider);
-  const explicitRoleKey = firstEnvValue(envSources.apiKey.filter(key => key !== 'LLM_API_KEY'));
-  const apiKey = (endpointFromEnv ? undefined : fileRole?.apiKey)
-    || explicitRoleKey?.value
-    || selectApiKeyForEndpoint(baseUrl, model, envSources.apiKey)
-    || (isCodexProxyUrl(baseUrl)
-      ? (failClosedProxySeat ? getCodexProxyApiKeyFromEnv() : getCodexProxyApiKey())
-      : undefined)
-    || (explicitBaseUrl || doctrineSeat ? undefined : inherit?.apiKey);
+  // Project files may pick a new route. Shell credentials and inherited tokens
+  // stay with the operator's route unless the operator supplies the endpoint.
+  const inheritedEndpointChanged = inheritedRouteChanged && !explicitBaseUrl;
+  const allowAmbient = Boolean(envBaseUrl) || (!projectChangesRoute && !inheritedEndpointChanged);
+  const studioUsesHarnessEndpoint = role === 'studio' && envBaseUrl !== undefined && !env('STUDIO_BASE_URL');
+  const ambientApiKey = allowAmbient
+    ? selectRoleApiKeyForEndpoint(role, baseUrl, model, !studioUsesHarnessEndpoint)
+      || (isCodexProxyUrl(baseUrl)
+        ? (failClosedProxySeat ? getCodexProxyApiKeyFromEnv() : getCodexProxyApiKey())
+        : undefined)
+    : undefined;
+  const inheritedApiKey = explicitBaseUrl || doctrineSeat || projectChangesRoute ? undefined : inherit?.apiKey;
+  const fileApiKey = endpointFromEnv || (inheritedEndpointChanged && !hasProjectKey) ? undefined : fileRole?.apiKey;
+  const apiKey = fileApiKey || ambientApiKey || inheritedApiKey;
 
   if (role === 'generator' && isCodexProxyUrl(baseUrl) && !apiKey) {
     throw new FatalRoleConfigError(
@@ -557,7 +588,8 @@ function resolveRole(
     throw new FatalRoleConfigError('DECISION_MODEL_AT_WRITING_SEAT',
       `role '${role}' model ${model} is a decision model and cannot write; give the seat a generative model and set ${model} as its decisionHead`);
   }
-  const timeout = envTimeout(role) ?? fileRole?.timeout ?? defaultRoleTimeout(role);
+  const timeoutOverride = envTimeout(role) ?? fileRole?.timeout;
+  const timeout = timeoutOverride ?? defaultRoleTimeout(role);
   const decisionHead = resolveDecisionHead(role, fileRole, timeout);
 
   return {
@@ -569,6 +601,7 @@ function resolveRole(
     temperature: fileRole?.temperature ?? DEFAULT_TEMPERATURES[role],
     maxTokens: fileRole?.maxTokens ?? DEFAULT_MAX_TOKENS,
     timeout,
+    ...(timeoutOverride !== undefined ? { timeoutOverride } : {}),
     thinking: resolveThinkingConfig(fileRole?.thinking),
     streaming: fileRole?.streaming ?? (role === 'harness' || role === 'studio'),
     glmCodingPlanSeat: fileRole?.glmCodingPlanSeat === true,
@@ -602,36 +635,55 @@ async function loadConfigFile(): Promise<RoleConfigFile | null> {
   }
 }
 
-async function loadProjectConfig(projectDir?: string): Promise<RoleConfigFile | null> {
+type ProjectRoleConfig = Omit<RoleConfigFile, 'roles'> & {
+  roles: Partial<Record<keyof RoleConfigFile['roles'], Partial<RoleProviderConfig>>>;
+};
+
+async function loadProjectConfig(projectDir?: string): Promise<ProjectRoleConfig | null> {
   if (!projectDir) {
     projectDir = process.cwd();
   }
 
   // Canonical sinter.json, with back-compat fallbacks to legacy filenames.
   const candidates = ['sinter.json', 'liminal.json', 'atelier.json'];
-  let lastErr: unknown = null;
+  // F13: fall back to the next legacy name ONLY when a file is missing. A canonical file that exists but is
+  // malformed must fail loudly, not silently route generation through an older config's provider.
   for (const filename of candidates) {
     const configPath = join(projectDir, 'config', filename);
+    let content: string;
     try {
-      const content = await readFile(configPath, 'utf-8');
-      const parsed = JSON.parse(content);
-      // Project config uses different shape — extract role info from it
-      return projectToRoleConfig(parsed);
+      content = await readFile(configPath, 'utf-8');
     } catch (err) {
-      lastErr = err;
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') continue;
+      throw new FatalRoleConfigError('PROJECT_CONFIG_UNREADABLE', `${configPath}: ${err instanceof Error ? err.message : String(err)}`);
     }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(content);
+    } catch (err) {
+      throw new FatalRoleConfigError('PROJECT_CONFIG_MALFORMED', `${configPath} is not valid JSON (${err instanceof Error ? err.message : String(err)}); fix or remove it. Older config files are not used as a fallback.`);
+    }
+    if (!isObj(parsed)) throw new FatalRoleConfigError('PROJECT_CONFIG_MALFORMED', `${configPath} must contain a JSON object`);
+    // Project config uses different shape — extract role info from it
+    return projectToRoleConfig(parsed as Parameters<typeof projectToRoleConfig>[0]);
   }
-  Logger.debug('RoleConfig', `Failed to load role config from config/{${candidates.join(',')}}:`, lastErr);
+  Logger.debug('RoleConfig', `No project role config in config/{${candidates.join(',')}}`);
   return null;
 }
 
 interface ProjectConfigLike {
+  /** G09: documented per-role schema (same shape as the user config's roles/fallbacks/capabilities/evolution). */
+  roles?: Partial<Record<'generator' | 'evaluator' | 'harness' | 'studio' | 'generatorLocal', RoleProviderConfig>>;
+  fallbacks?: RoleConfigFile['fallbacks'];
+  capabilities?: RoleConfigFile['capabilities'];
+  evolution?: RoleConfigFile['evolution'];
   llm?: {
     baseUrl?: string;
     model?: string;
     apiKey?: string;
     temperature?: number;
     maxTokens?: number;
+    timeout?: number;
   };
   multiModel?: {
     primary?: {
@@ -639,6 +691,7 @@ interface ProjectConfigLike {
       model?: string;
       temperature?: number;
       maxTokens?: number;
+      timeout?: number;
     };
     secondary?: {
       baseUrl?: string;
@@ -654,18 +707,44 @@ interface ProjectConfigLike {
  * The existing project config has `llm` and `multiModel` fields
  * that map to generator and harness roles.
  */
-function projectToRoleConfig(project: ProjectConfigLike): RoleConfigFile | null {
-  if (!project.llm && !project.multiModel) return null;
+function isObj(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
 
-  const roles: RoleConfigFile['roles'] = {
-    generator: {
-      baseUrl: project.llm?.baseUrl || project.multiModel?.primary?.baseUrl || '',
-      model: project.llm?.model || project.multiModel?.primary?.model || '',
-      apiKey: project.llm?.apiKey,
-      temperature: project.llm?.temperature || project.multiModel?.primary?.temperature,
-      maxTokens: project.llm?.maxTokens || project.multiModel?.primary?.maxTokens,
-    },
-  };
+function projectToRoleConfig(project: ProjectConfigLike): ProjectRoleConfig | null {
+  const hasRoleSchema = project.roles !== undefined || project.fallbacks !== undefined
+    || project.capabilities !== undefined || project.evolution !== undefined;
+  if (!project.llm && !project.multiModel && !hasRoleSchema) return null;
+  // G09: reject a malformed documented schema up front (before any spend) instead of ignoring it.
+  if (project.roles !== undefined) {
+    if (!isObj(project.roles)) throw new FatalRoleConfigError('PROJECT_CONFIG_MALFORMED', '"roles" must be an object keyed by role name');
+    for (const [name, value] of Object.entries(project.roles)) {
+      if (!isObj(value)) throw new FatalRoleConfigError('PROJECT_CONFIG_MALFORMED', `roles.${name} must be an object`);
+    }
+  }
+  for (const key of ['fallbacks', 'capabilities', 'evolution'] as const) {
+    if (project[key] !== undefined && !isObj(project[key])) throw new FatalRoleConfigError('PROJECT_CONFIG_MALFORMED', `"${key}" must be an object`);
+  }
+
+  const roles: ProjectRoleConfig['roles'] = {};
+  if (project.llm || project.multiModel) {
+    const primary = project.multiModel?.primary;
+    const baseUrl = project.llm?.baseUrl || primary?.baseUrl;
+    const model = project.llm?.model || primary?.model;
+    const apiKey = project.llm?.apiKey;
+    const temperature = project.llm?.temperature ?? primary?.temperature;
+    const maxTokens = project.llm?.maxTokens ?? primary?.maxTokens;
+    const timeout = project.llm?.timeout ?? primary?.timeout;
+
+    roles.generator = {
+      ...(baseUrl === undefined ? {} : { baseUrl }),
+      ...(model === undefined ? {} : { model }),
+      ...(apiKey === undefined ? {} : { apiKey }),
+      ...(temperature === undefined ? {} : { temperature }),
+      ...(maxTokens === undefined ? {} : { maxTokens }),
+      ...(timeout === undefined ? {} : { timeout }),
+    };
+  }
 
   if (project.multiModel?.secondary) {
     roles.harness = {
@@ -676,26 +755,63 @@ function projectToRoleConfig(project: ProjectConfigLike): RoleConfigFile | null 
     };
   }
 
-  return { roles };
+  // Explicit `roles` entries are the most specific statement and win over the legacy llm/multiModel mapping.
+  if (project.roles) {
+    for (const [name, value] of Object.entries(project.roles)) {
+      const entries = roles as Record<string, Partial<RoleProviderConfig>>;
+      entries[name] = mergeRole(entries[name], value);
+    }
+  }
+
+  const out: ProjectRoleConfig = { roles };
+  if (project.fallbacks) out.fallbacks = project.fallbacks;
+  if (project.capabilities) out.capabilities = project.capabilities;
+  if (project.evolution) out.evolution = project.evolution;
+  return out;
+}
+
+function roleEndpointChanged(base?: Partial<RoleProviderConfig>, overlay?: Partial<RoleProviderConfig>): boolean {
+  return overlay?.baseUrl !== undefined && overlay.baseUrl !== base?.baseUrl
+    && !sameProviderEndpoint(overlay.baseUrl, base?.baseUrl);
+}
+
+function roleRouteChanged(base?: Partial<RoleProviderConfig>, overlay?: Partial<RoleProviderConfig>): boolean {
+  return roleEndpointChanged(base, overlay)
+    || (overlay?.provider !== undefined && overlay.provider !== base?.provider);
+}
+
+function mergeRole(base: Partial<RoleProviderConfig> | undefined, overlay: Partial<RoleProviderConfig>): Partial<RoleProviderConfig> {
+  const merged = { ...base };
+  if (roleRouteChanged(base, overlay)) delete merged.apiKey;
+  if (roleEndpointChanged(base, overlay)) delete merged.provider;
+  return { ...merged, ...overlay };
 }
 
 /**
- * Merge two RoleConfigFile objects. `overlay` takes priority.
+ * Apply explicitly supplied project role fields over the user role config.
  */
-function mergeConfigs(base: RoleConfigFile | null, overlay: RoleConfigFile | null): RoleConfigFile | null {
-  if (!base) return overlay;
+function mergeConfigs(base: RoleConfigFile | null, overlay: ProjectRoleConfig | null): RoleConfigFile | null {
   if (!overlay) return base;
+  function mergedRole(role: keyof RoleConfigFile['roles']): RoleProviderConfig | undefined {
+    const user = base?.roles?.[role];
+    const project = overlay?.roles[role];
+    if (!project) return user;
+    const inherited = role === 'generator' && roleEndpointChanged(user, project)
+      ? { timeout: user?.timeout } : user;
+    return { baseUrl: '', model: '', ...mergeRole(inherited, project) };
+  }
 
   return {
     roles: {
-      generator: { ...base.roles.generator, ...overlay.roles.generator },
-      evaluator: overlay.roles.evaluator || base.roles.evaluator,
-      harness: overlay.roles.harness || base.roles.harness,
-      studio: overlay.roles.studio || base.roles.studio,
+      generator: mergedRole('generator') ?? { baseUrl: '', model: '' },
+      generatorLocal: mergedRole('generatorLocal'),
+      evaluator: mergedRole('evaluator'),
+      harness: mergedRole('harness'),
+      studio: mergedRole('studio'),
     },
-    fallbacks: { ...base.fallbacks, ...overlay.fallbacks },
-    capabilities: { ...base.capabilities, ...overlay.capabilities },
-    evolution: { ...base.evolution, ...overlay.evolution },
+    fallbacks: { ...base?.fallbacks, ...overlay.fallbacks },
+    capabilities: { ...base?.capabilities, ...overlay.capabilities },
+    evolution: { ...base?.evolution, ...overlay.evolution },
   };
 }
 
@@ -704,6 +820,7 @@ function mergeConfigs(base: RoleConfigFile | null, overlay: RoleConfigFile | nul
  */
 export async function saveRoleConfig(config: RoleConfigFile, configPath?: string): Promise<void> {
   const target = configPath || resolveUserConfigPath();
+  assertProofCannotTouchRealState(target);
   const result = await updateConfig(config as unknown as Record<string, unknown>, target);
   if (result.isErr()) throw result.error;
 }

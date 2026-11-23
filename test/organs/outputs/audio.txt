@@ -1,0 +1,10 @@
+# organ: audio | data: real command, fake provider
+$ buildVoiceBrief(analyzeVoiceFile(hum.wav))  # what `generate --voice-file hum.wav` adds to the brief
+Audio-derived visual parameters:
+  Palette: hues=[0.75,0.3333333333333333,0.08333333333333333], saturations=[0.8999843559585122,0.7200000000000001,0.7200000000000001], lightness=[0.22000000000000003,0.27,0.32000000000000006]
+  Motion: speed=0.3567914273002628, turbulence=0, rhythm=smooth
+  Form: complexity=0.45000293325777896, sharpness=0.9999804449481403, scale=0.11893047576675428
+  Dynamics: energy=0.11893047576675428
+  Composition: focalWeight=0.05946523788337714, balance=0.66300594015044
+# exit: 0
+

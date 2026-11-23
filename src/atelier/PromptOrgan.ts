@@ -113,11 +113,6 @@ const STRUCTURAL_INTENTS: Record<string, string[]> = {
     'a single continuous line drawing an entire landscape',
     'geometric Islamic-style tile patterns with subtle variation',
   ],
-  hyperframes: [
-    'layered paper-cut parallax with dawn colors',
-    'a split-screen contrast between order and chaos',
-    'a journey through a procedural world with multiple layers',
-  ],
 };
 
 const MOODS = [

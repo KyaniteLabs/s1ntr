@@ -17,7 +17,8 @@ const SINTER_VERSION = (JSON.parse(readFileSync(
 
 export type SharedLayerDomain =
   | 'p5' | 'glsl' | 'three' | 'hydra' | 'strudel' | 'tone'
-  | 'revideo' | 'hyperframes' | 'ascii' | 'textgen' | 'instrument';
+  | 'revideo' | 'hyperframes' | 'ascii' | 'textgen' | 'instrument'
+  | 'svg' | 'kinetic' | 'nbe' | 'custom';
 
 export interface LayerPlanEntry {
   id: string;
@@ -94,6 +95,11 @@ const SHARED_DOMAIN: Record<DomainType, SharedLayerDomain> = {
   html: 'hyperframes',
   textgen: 'textgen',
   group: 'instrument',
+  glsl: 'glsl',
+  svg: 'svg',
+  kinetic: 'kinetic',
+  nbe: 'nbe',
+  custom: 'custom',
 };
 
 function slug(value: string): string {

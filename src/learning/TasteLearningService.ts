@@ -1,4 +1,6 @@
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { ArchiveEntriesFSAdapter } from '../fs/adapters/ArchiveEntries.js';
 import { PreferenceEventsFSAdapter } from '../fs/adapters/PreferenceEvents.js';
 import type { SinterFS } from '../fs/SinterFS.js';
@@ -11,6 +13,7 @@ import { TasteModelEvaluator, splitEntriesByRoot } from './TasteModelEvaluator.j
 import { NimaService, isValidNimaScore, type NimaResult } from './NimaService.js';
 import { Logger } from '../utils/Logger.js';
 import type { RenderDomain } from '../render/HeadlessRenderer.js';
+import { bootstrapProductionCreativeAdmissionSigner } from '../runtime-core/CreativeAdmissionAuthority.js';
 import { isCreativeLabelAdmitted } from './CreativeLabelAdmission.js';
 
 export interface TasteLearningRecordResult {
@@ -94,7 +97,7 @@ const MODEL_REF_NAME = 'taste/model/latest';
  * is no screenshot to score, so the entry silently keeps its qualityScore.
  */
 const NIMA_VISUAL_DOMAINS: ReadonlySet<RenderDomain> = new Set<RenderDomain>([
-  'p5', 'glsl', 'three', 'hydra', 'svg', 'ascii', 'textgen', 'kinetic',
+  'p5', 'glsl', 'three', 'hydra', 'svg', 'ascii', 'textgen', 'kinetic', 'nbe',
 ]);
 
 /**
@@ -191,13 +194,20 @@ export class TasteLearningService {
   }
 
   async trainFromProject(): Promise<TasteTrainingSummary> {
+    try {
+      await bootstrapProductionCreativeAdmissionSigner(
+        join(homedir(), '.sinter', 'authority', 'liminal-command-receipt.key'));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
     const archiveEntries = this.archiveAdapter.readAllArchiveEntries();
     const preferenceEvents = await this.logger.getEvents();
-    const enrichedEntries = await this.enrichArchiveWithNima(archiveEntries);
-    const admittedEntries = enrichedEntries.filter(entry =>
-      isCreativeLabelAdmitted(entry.creativeLabel, 'evaluator-training')
-      && entry.artifactRef.hash === entry.creativeLabel?.artifactDigest);
-    const trainingEntries = this.attachPreferences(admittedEntries, preferenceEvents);
+    const admittedEntries = archiveEntries.filter(entry => this.isVerifiedTrainingEntry(entry));
+    // Keep one score scale for all pairs. A source-bound label authorizes only its signed score.
+    const includesBoundScore = admittedEntries.some(entry => entry.creativeLabel?.trainingEvidence !== undefined);
+    if (includesBoundScore) this.lastNimaEnrichment = null;
+    const enrichedEntries = includesBoundScore ? admittedEntries : await this.enrichArchiveWithNima(admittedEntries);
+    const trainingEntries = this.attachPreferences(enrichedEntries, preferenceEvents);
     // Split by lineage root BEFORE pair construction so no root leaks across.
     const split = splitEntriesByRoot(trainingEntries, undefined, MIN_ROOTS_FOR_HOLDOUT);
     const builder = new PreferenceDatasetBuilder();
@@ -253,6 +263,25 @@ export class TasteLearningService {
       nimaEnrichment: this.lastNimaEnrichment ?? undefined,
       heldOutStatus,
     };
+  }
+
+  private isVerifiedTrainingEntry(entry: ArchiveEntry): boolean {
+    const label = entry.creativeLabel;
+    if (!label || entry.artifactRef.hash !== label.artifactDigest
+      || !isCreativeLabelAdmitted(label, 'evaluator-training')) return false;
+    const evidence = label.trainingEvidence;
+    if (!evidence) return true;
+    if (entry.id !== `sinter://artifact/${evidence.operationDigest}`
+      || entry.lineage.artifactId !== evidence.operationDigest
+      || entry.lineage.provenance !== 'fresh-generation'
+      || !Array.isArray(entry.lineage.parentIds) || entry.lineage.parentIds.length !== 0
+      || entry.qualityScore !== evidence.quality) return false;
+    try {
+      const source = this.sinterFs.readArtifact(entry.artifactRef);
+      return source !== null && createHash('sha256').update(source).digest('hex') === label.artifactDigest;
+    } catch {
+      return false;
+    }
   }
 
   /**

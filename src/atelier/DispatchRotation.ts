@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { canonicalCliSeatUrl } from '../identity/cliSeatUrl.js';
+import { canonicalCliSeatUrl, isAgyGeminiModel } from '../identity/cliSeatUrl.js';
 
 export interface RotationLane {
   modelId: string;
@@ -52,7 +52,7 @@ export function executorForLane(lane: RotationLane): string | null {
     }
     return codex[id] ?? null;
   }
-  if (base === 'cli://agy' && id === 'gemini-3.7-flash-medium') return 'agy-gemini-flash';
+  if (base === 'cli://agy' && isAgyGeminiModel(id)) return 'agy-gemini-flash';
   if (base === 'cli://command-code' && id === 'deepseek/deepseek-v4-pro' && lane.provider === 'cli') return 'command-code';
   let host = '';
   try { host = new URL(base).hostname; } catch { return null; }

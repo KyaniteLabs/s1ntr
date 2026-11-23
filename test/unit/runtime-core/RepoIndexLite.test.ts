@@ -103,17 +103,11 @@ describe('RepoIndexLite', () => {
     expect(context.expansionBudget).toBe(2);
     expect(context.expansionStatus).toBe('exhausted');
     expect(context.localizationConfidence).toBe('medium');
-    expect(context.verificationTargets).toEqual([
-      {
-        tool: 'typeCheck',
-        reason: 'Fast first-pass verification for runtime-core TypeScript changes',
-        priority: 1,
-      },
-      {
-        tool: 'runBuild',
-        reason: 'Full TypeScript build after runtime-core edits',
-        priority: 2,
-      },
+    expect(context.verificationTargets).toMatchObject([
+      { tool: 'runFocusedTests', pattern: 'SelfImprovementRuntime', priority: 1 },
+      { tool: 'runFocusedTests', pattern: 'LLMModeAgent', priority: 1 },
+      { tool: 'typeCheck', priority: 2 },
+      { tool: 'runBuild', priority: 3 },
     ]);
     expect(context.secondaryFiles.length).toBe(context.expansionBudget);
     expect(context.workingSet).toEqual([...context.primaryFiles, ...context.secondaryFiles]);
@@ -150,6 +144,12 @@ describe('RepoIndexLite', () => {
         priority: 1,
       },
       {
+        tool: 'runFocusedTests',
+        pattern: 'SelfImprovementRuntime',
+        reason: 'Verify packet integration in the runtime suite',
+        priority: 1,
+      },
+      {
         tool: 'runBuild',
         reason: 'Full TypeScript build after packet-shaping edits',
         priority: 2,
@@ -177,6 +177,27 @@ describe('RepoIndexLite', () => {
         pattern: 'RepoIndexLite',
       });
     }
+  });
+
+  it.each([
+    'Tighten task packet shaping after a suspended run',
+    'Use RepoIndexLite to shape packets with prior harness memory',
+    'Tighten SelfImprovementRuntime working set alignment after a checkpoint',
+  ])('keeps explicit packet intent ahead of incidental history in %s', (request) => {
+    const packet = localizeBoundedSelfImprovement(request);
+    expect(packet.fileHint).toBe('src/runtime-core/RepoIndexLite.ts');
+    expect(packet.workingSet[0]).toBe(packet.fileHint);
+    const named = localizeBoundedSelfImprovement(request + '\nEdit src/harness/RunStateStore.ts');
+    expect(named.fileHint).toBe('src/harness/RunStateStore.ts');
+  });
+
+  it('isolates verification targets between packets', () => {
+    const first = localizeBoundedSelfImprovement('task packet');
+    first.verificationTargets[0].pattern = 'override';
+    first.verificationTargets.pop();
+    const second = localizeBoundedSelfImprovement('task packet');
+    expect(second.verificationTargets[0].pattern).toBe('RepoIndexLite');
+    expect(second.verificationTargets.at(-1)?.tool).toBe('runBuild');
   });
 
   it('does not steal ordinary concrete loop requests into self-improvement packet localization', () => {
@@ -233,7 +254,7 @@ describe('RepoIndexLite', () => {
       'src/generators/svg/SVGGenerator.ts',
     ]);
     expect(context.deferredSecondaryFiles).toContain('src/generators/hydra/HydraGenerator.ts');
-    expect(context.creativeDomains).toEqual(expect.arrayContaining(['Strudel', 'Tone.js', 'Revideo', 'SVG', 'Hydra']));
+    expect(context.creativeDomains).toEqual(expect.arrayContaining(['Strudel', 'Tone.js', 'Blender', 'SVG', 'Hydra']));
   });
 
   it('keeps localization expansion overflow deterministic across repeated similar prompts', () => {
@@ -249,4 +270,21 @@ describe('RepoIndexLite', () => {
     expect(second.deferredSecondaryFiles).toEqual(first.deferredSecondaryFiles);
     expect(second.expansionStatus).toBe('allowed');
   });
+
+  it('puts files the brief names first, ahead of keyword profiles', () => {
+    const context = localizeBoundedSelfImprovement(
+      "S1NTR's own gate refusals open the provider circuit breaker\nFiles likely involved: src/llm/LLMClient.ts, src/llm/CircuitBreaker.ts",
+    );
+    expect(context.primaryFiles).toEqual(['src/llm/LLMClient.ts', 'src/llm/CircuitBreaker.ts']);
+    expect(context.fileHint).toBe('src/llm/LLMClient.ts');
+    expect(context.localizationConfidence).toBe('high');
+    expect(context.secondaryFiles).not.toContain('src/llm/LLMClient.ts');
+    expect(context.verificationTargets[0]).toMatchObject({ tool: 'runFocusedTests', pattern: 'LLMClient|CircuitBreaker' });
+  });
+
+  it('keeps keyword localization when the brief names no files', () => {
+    const context = localizeBoundedSelfImprovement('Make yourself get better every time a new model or provider comes out');
+    expect(context.primaryFiles).toContain('src/harness/MultiProviderConfig.ts');
+  });
 });
+

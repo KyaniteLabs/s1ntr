@@ -3,6 +3,7 @@ import { PromptBuilder } from '../../llm/PromptBuilder.js';
 import { detectModelTier, trimContext } from '../../llm/ModelTier.js';
 import { Logger } from '../../utils/Logger.js';
 import { TierBasedGenerator, type TierBasedGeneratorOptions } from '../TierBasedGenerator.js';
+import { directAttemptTimeoutMs } from '../directAttemptTimeout.js';
 import { SVG_MODE_PROFILES, inferSVGMode, type SVGMode } from './SVGModeProfiles.js';
 import { salvageSVG, sanitizeSVG } from './SVGSanitizer.js';
 import { validateSVG } from './SVGValidator.js';
@@ -15,14 +16,7 @@ export interface SVGGeneratorOptions extends TierBasedGeneratorOptions {
 // token), so a detailed illustration spends ~2200 tokens before closing </svg>
 // and gets truncated — the live svg_no_raw failure class was 100% truncation
 // (openSvg=true, closeSvg=false). These budgets give a complete document room to
-// finish; the timeouts scale with the larger output.
-// Match the default provider timeout (120s) so an overloaded upstream still has
-// a fair chance to return; the retry is slightly longer because it uses a tighter
-// prompt. Exponential backoff between attempts reduces thundering-herd retries
-// and gives an overloaded provider time to recover.
-const SVG_PRIMARY_ATTEMPT_TIMEOUT_MS = 120_000;
-const SVG_EMPTY_RETRY_TIMEOUT_MS = 135_000;
-const SVG_MINIMAL_RETRY_TIMEOUT_MS = 90_000;
+// finish. Backoff between attempts gives an overloaded provider time to recover.
 const SVG_MAX_ATTEMPTS = 3;
 const SVG_RETRY_BACKOFF_BASE_MS = 1_000;
 const SVG_PRIMARY_MAX_TOKENS = 8_000;
@@ -37,6 +31,7 @@ export class SVGGenerator extends TierBasedGenerator {
   }
 
   async generate(prompt: string, options?: SVGGeneratorOptions): Promise<string> {
+    await this.resolveConfigIfNeeded();
     this.currentMode = options?.mode ?? inferSVGMode(prompt);
     const svgPrompt = this.buildSVGPrompt(prompt, { mode: this.currentMode });
     const builtPrompt = await this.buildTieredSVGPrompt(svgPrompt, options);
@@ -53,18 +48,19 @@ export class SVGGenerator extends TierBasedGenerator {
     systemPrompt: string;
     prompt: string;
     maxTokens: number;
-    timeoutMs: number;
     temperature?: number;
   }, options?: SVGGeneratorOptions): Promise<Awaited<ReturnType<typeof this.llm.complete>>> {
+    const timeoutMs = directAttemptTimeoutMs(this.llm.getTimeoutOverride());
     return this.withAttemptTimeout(
       options?.signal,
-      attempt.timeoutMs,
+      timeoutMs,
       (signal) => this.llm.complete({
         systemPrompt: attempt.systemPrompt,
         prompt: attempt.prompt,
         maxTokens: attempt.maxTokens,
         temperature: attempt.temperature ?? this.llm.getConfig().temperature,
         signal,
+        providerTimeoutMs: timeoutMs,
       }),
     );
   }
@@ -148,19 +144,17 @@ export class SVGGenerator extends TierBasedGenerator {
     const mode = this.currentMode;
     let lastError: string | undefined;
     let timeoutCount = 0;
-    const prompts: Array<{ systemPrompt: string; prompt: string; maxTokens: number; timeoutMs: number; temperature?: number; isMinimal?: boolean }> = [
-      { systemPrompt: primaryPrompt.systemPrompt, prompt: primaryPrompt.userPrompt, maxTokens: options?.maxTokens ?? SVG_PRIMARY_MAX_TOKENS, timeoutMs: SVG_PRIMARY_ATTEMPT_TIMEOUT_MS },
+    const prompts: Array<{ systemPrompt: string; prompt: string; maxTokens: number; temperature?: number; isMinimal?: boolean }> = [
+      { systemPrompt: primaryPrompt.systemPrompt, prompt: primaryPrompt.userPrompt, maxTokens: options?.maxTokens ?? SVG_PRIMARY_MAX_TOKENS },
       {
         systemPrompt: this.buildEmptyCodeRetrySystemPrompt(primaryPrompt.systemPrompt),
         prompt: this.buildEmptyCodeRetryPrompt(prompt, primaryPrompt.userPrompt),
         maxTokens: options?.maxTokens ?? SVG_RETRY_MAX_TOKENS,
-        timeoutMs: SVG_EMPTY_RETRY_TIMEOUT_MS,
       },
       {
         systemPrompt: this.buildMinimalRetrySystemPrompt(),
         prompt: this.buildMinimalRetryPrompt(prompt),
         maxTokens: SVG_MINIMAL_MAX_TOKENS,
-        timeoutMs: SVG_MINIMAL_RETRY_TIMEOUT_MS,
         isMinimal: true,
       },
     ];

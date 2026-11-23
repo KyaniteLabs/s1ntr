@@ -1,0 +1,20 @@
+# organ: entropy | data: real command, fake provider
+$ sinter entropy
+[CLI] Resolved provider: openai @ http://127.0.0.1:33991/v1 (model=gpt-5.4)
+Entropy: degraded (metabolic)
+  seed:   710638195377964
+  phrase: flare ember ash grain
+  from:   0 trend rows, 0 compost heap files, 0 seeds, telemetry no
+  Nothing in this project to harvest yet: run `sinter generate` here, then try again.
+  best-of steers its tries apart with this phrase.
+# exit: 0
+
+$ sinter entropy
+[CLI] Resolved provider: openai @ http://127.0.0.1:33991/v1 (model=gpt-5.4)
+Entropy: harvested (metabolic)
+  seed:   2147567263040645
+  phrase: ember canopy dust root
+  from:   1 trend rows, 0 compost heap files, 0 seeds, telemetry yes
+  best-of steers its tries apart with this phrase.
+# exit: 0
+

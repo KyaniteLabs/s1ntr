@@ -234,6 +234,48 @@ describe('ThreeValidator', () => {
       expect(result.errors.some((e) => e.includes('adds no light'))).toBe(false);
     });
 
+    it('does not demand three.js lights on a holospot piece (studio.preset lights holo objects)', () => {
+      const code = [
+        'import { Holo } from "holospot";',
+        'const scene = new THREE.Scene();',
+        'const holo = new Holo(renderer, { background: "black" });',
+        'const mesh = new THREE.Mesh(new THREE.SphereGeometry(1), new THREE.MeshStandardMaterial());',
+        'holo.apply(mesh, { material: "nebula", sizeMm: 120 });',
+        'scene.add(mesh);',
+        'renderer.setAnimationLoop(() => holo.render(scene, camera));',
+      ].join('\n');
+      const result = ThreeValidator.validate(code);
+      expect(result.errors.some((e) => e.includes('adds no light'))).toBe(false);
+    });
+
+    it('does not flag near-black stand-in materials or a black background on a holospot piece (the kit replaces the material and paints its own background)', () => {
+      const code = [
+        'import { Holo, shotCamera } from "holospot";',
+        'const scene = new THREE.Scene();',
+        'scene.background = new THREE.Color(0x000000);',
+        'const holo = new Holo(renderer, { background: "black" });',
+        'const mesh = new THREE.Mesh(new THREE.SphereGeometry(1), new THREE.MeshStandardMaterial({ color: 0x0b0b12 }));',
+        'const obj = holo.apply(mesh, { material: "nebula", sizeMm: 120 });',
+        'scene.add(mesh);',
+        'await obj.ready; shotCamera(camera, obj, { aspect: 1 });',
+        'renderer.setAnimationLoop(() => holo.render(scene, camera));',
+      ].join('\n');
+      const result = ThreeValidator.validate(code);
+      expect(result.errors.some((e) => e.includes('near-black'))).toBe(false);
+      expect(result.errors.some((e) => e.includes('too dark'))).toBe(false);
+    });
+
+    it('still flags near-black materials when holospot is imported but never applied', () => {
+      const code = [
+        'import { Holo } from "holospot";',
+        'const scene = new THREE.Scene();',
+        'const mesh = new THREE.Mesh(new THREE.SphereGeometry(1), new THREE.MeshBasicMaterial({ color: 0x0b0b12 }));',
+        'scene.add(mesh);',
+        'renderer.render(scene, camera);',
+      ].join('\n');
+      expect(ThreeValidator.validate(code).errors.some((e) => e.includes('near-black'))).toBe(true);
+    });
+
     it('flags very dark literal backgrounds that fail image-proof luminance', () => {
       const result = ThreeValidator.validate([
         'const scene = new THREE.Scene();',

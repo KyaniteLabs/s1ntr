@@ -368,13 +368,22 @@ describe('parseScoreLine (degraded-vs-real fitness honesty)', () => {
     });
   });
 
-  it('parses the W1.1 no-number degraded line (degraded (no real score) + suffix)', () => {
+  it('parses the W1.1 no-number degraded line (unscored (judge could not score) + suffix)', () => {
     // W1.1: bin/sinter now emits NO fabricated number on degraded runs —
-    // `⭐ Quality score: degraded (no real score) (failureClass=…, confidence=…)`.
+    // `⭐ Quality score: unscored (judge could not score) (failureClass=…, confidence=…)`.
     // The ledger must still flag degraded and keep the provenance, with score null.
     const stdout =
-      '⭐ Quality score: degraded (no real score) (failureClass=infra, confidence=0.00)';
+      '⭐ Quality score: unscored (judge could not score) (failureClass=infra, confidence=0.00)';
     expect(parseScoreLine(stdout)).toEqual({
+      score: null,
+      degraded: true,
+      evalFailureClass: 'infra',
+      evalConfidence: 0,
+    });
+  });
+
+  it('still parses the legacy "degraded (no real score)" line from older runs', () => {
+    expect(parseScoreLine('⭐ Quality score: degraded (no real score) (failureClass=infra, confidence=0.00)')).toEqual({
       score: null,
       degraded: true,
       evalFailureClass: 'infra',
@@ -421,7 +430,7 @@ describe('parseScoreLine (degraded-vs-real fitness honesty)', () => {
     // Changing CreativeIterationGate human reason must not alter ledger fields
     // when the score line already carries the machine contract.
     const machine =
-      '⭐ Quality score: degraded (no real score) (failureClass=infra, confidence=0.00)';
+      '⭐ Quality score: unscored (judge could not score) (failureClass=infra, confidence=0.00)';
     const withLegacyReason = [
       '🎯 Reason: evaluation evidence degraded (infra, confidence 0.00)',
       machine,
@@ -442,7 +451,7 @@ describe('parseScoreLine (degraded-vs-real fitness honesty)', () => {
   it('machine score-line wins over a conflicting Reason-line class', () => {
     const stdout = [
       '🎯 Reason: evaluation evidence degraded (scorer, confidence 0.50)',
-      '⭐ Quality score: degraded (no real score) (failureClass=infra, confidence=0.00)',
+      '⭐ Quality score: unscored (judge could not score) (failureClass=infra, confidence=0.00)',
     ].join('\n');
     expect(parseScoreLine(stdout)).toEqual({
       score: null,

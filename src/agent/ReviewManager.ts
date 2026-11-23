@@ -12,7 +12,16 @@
  * via TUI keyboard shortcuts or commands.
  */
 
-export type CandidateStatus = 'pending' | 'accepted' | 'rejected';
+import { canTransitionCandidate, IllegalReviewTransitionError } from './ReviewLifecycle.js';
+import type { CandidateStatus } from './ReviewLifecycle.js';
+
+export {
+  CANDIDATE_STATUSES,
+  CANDIDATE_TRANSITIONS,
+  IllegalReviewTransitionError,
+  canTransitionCandidate,
+} from './ReviewLifecycle.js';
+export type { CandidateStatus } from './ReviewLifecycle.js';
 
 export interface ReviewCandidate {
   /** Unique candidate ID */
@@ -54,22 +63,31 @@ export class ReviewManager {
   }
 
   /**
-   * Accept a candidate — marks it as the chosen output.
+   * Accept a candidate — marks it as the chosen output. Returns null if the
+   * candidate is unknown; throws {@link IllegalReviewTransitionError} if it
+   * was already decided.
    */
   accept(candidateId: string): ReviewCandidate | null {
-    const candidate = this.candidates.get(candidateId);
-    if (!candidate) return null;
-    candidate.status = 'accepted';
-    return candidate;
+    return this.decide(candidateId, 'accepted');
   }
 
   /**
-   * Reject a candidate — marks it as not chosen.
+   * Reject a candidate — marks it as not chosen. Returns null if the
+   * candidate is unknown; throws {@link IllegalReviewTransitionError} if it
+   * was already decided.
    */
   reject(candidateId: string): ReviewCandidate | null {
+    return this.decide(candidateId, 'rejected');
+  }
+
+  /** The single writer of candidate `status`. */
+  private decide(candidateId: string, to: CandidateStatus): ReviewCandidate | null {
     const candidate = this.candidates.get(candidateId);
     if (!candidate) return null;
-    candidate.status = 'rejected';
+    if (!canTransitionCandidate(candidate.status, to)) {
+      throw new IllegalReviewTransitionError(candidateId, candidate.status, to);
+    }
+    candidate.status = to;
     return candidate;
   }
 

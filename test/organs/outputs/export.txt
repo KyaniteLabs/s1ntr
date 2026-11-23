@@ -1,0 +1,16 @@
+# organ: export | Exporter.exportHTML | data: real, in-process call
+wrote 2516 bytes
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-Content-Type-Options" content="nosniff">
+    <meta http-equiv="Referrer-Policy" content="strict-origin-when-cross-origin">
+    <title>Generated Output</title>
+    <script>
+    (function liminalSensorPolicy() {
+      const nativeAddEventListener = window.addEventListener.bind(window);
+      window.addEventListener = function(type, listener, options) {
+        const eventName = String(type).toLowerCase();
+        if (eventName === 'devicemotion' || eventName === 'deviceorientation' || eventName === 'deviceorientationabsolute') return;

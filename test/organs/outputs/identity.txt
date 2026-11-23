@@ -1,0 +1,3 @@
+# organ: identity | resolveExecutorAlias | data: real, in-process call
+gpt-6-luna -> {"ok":true,"canonicalProvider":"openai","canonicalModel":"gpt-6-luna","isLuna":true,"ambiguity":[]}
+totally-made-up-model -> {"ok":false,"canonicalProvider":"unknown","canonicalModel":"totally-made-up-model","isLuna":false,"ambiguity":[]}

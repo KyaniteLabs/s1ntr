@@ -1,0 +1,38 @@
+## 01-score-real-piece.txt
+# organ: emergence | step: score-real-piece | data: real
+$ node <repo>/bin/sinter emergence score <out>/_data/pieces/html-0048.html
+# cwd: <out>/_proj (repo: <repo>)
+# --- stdout
+
+=== Emergence Scorecard ===
+  Novelty                   insufficient data
+  Structure                 [#############-------] 0.66 [B]
+  Temporal Richness         [#-------------------] 0.04 [F]
+  Perturbation Resilience   [#########-----------] 0.46 [C]
+  Fertility                 [##############------] 0.70 [B]
+  Aesthetic                 [#############-------] 0.65 [B]
+
+  Overall: 0.50 [C] — Weak emergence — needs improvement
+  Strengths: Fertility
+  Weaknesses: Temporal Richness
+  Recommendations:
+    - Static output — add temporal evolution or animation
+# --- stderr
+# exit: 0
+
+## 03-probe.txt
+# organ: emergence | step: probe | data: real
+$ node <repo>/bin/sinter emergence probe <out>/_data/pieces/html-0048.html
+# cwd: <out>/_proj (repo: <repo>)
+# --- stdout
+
+Perturbation Resilience: 0.941 [resilient]
+  value-shift: 0.971
+  line-reorder: 0.910
+  noise-injection: 0.961
+  truncation: 0.891
+  redundancy: 0.973
+
+# --- stderr
+# exit: 0
+

@@ -8,3 +8,5 @@ export { LaunchSummaryBuilder } from './LaunchSummaryBuilder.js';
 export type { LaunchReadiness } from './LaunchSummaryBuilder.js';
 export { CognitiveArchitectureAtlas } from './CognitiveArchitectureAtlas.js';
 export type { CognitiveArchitectureReport, CreativeDomainCapability, CognitiveOrganCapability, CognitiveLoop, CapabilityMaturity } from './CognitiveArchitectureAtlas.js';
+export { readTasteEvidence, tasteAlignedIdsFromModel } from './TasteEvidence.js';
+export type { TasteEvidence } from './TasteEvidence.js';

@@ -3,13 +3,14 @@
  * Handles: Strudel, Hydra, Tone.js, Shader, Revideo, ASCII
  */
 
+import { expandShaderChunks } from '../../generators/glsl/ShaderChunks.js';
 import { SECURITY_HEADERS } from './SecurityHeaders.js';
 import { transliterateTypography } from '../../core/recovery/SourceRecovery.js';
 import { VENDOR_ASSETS } from '../../utils/vendorAssets.js';
-import { STRUDEL_TEMPO_SCRIPT } from '../../render/strudelTempo.js';
-import type { DomainString } from '../../types/domains.js';
+import type { EngineDomainString } from '../../types/domains.js';
 import { answerCode } from '../../llm/ModelOutput.js';
 import { scriptSafe, scriptString } from '../../utils/scriptEmbed.js';
+import { musicRuntimeScript } from './musicRuntime.js';
 import { parse } from '@babel/parser';
 
 const STRUDEL_CDN = VENDOR_ASSETS.strudel;
@@ -32,15 +33,12 @@ const STRUDEL_SECURITY_HEADERS = SECURITY_HEADERS
   .replace("connect-src 'none'", "worker-src blob: 'self'; connect-src 'self' https://strudel.b-cdn.net https://raw.githubusercontent.com");
 // The real REPL loads these banks from its CDN (verified by watching strudel.cc's
 // own network traffic). Without them, sample-based patterns run in silence.
-const STRUDEL_SAMPLE_BANKS = [
-  'https://strudel.b-cdn.net/piano.json',
-  'https://strudel.b-cdn.net/vcsl.json',
-  'https://strudel.b-cdn.net/tidal-drum-machines.json',
-  'https://strudel.b-cdn.net/tidal-drum-machines-alias.json',
-];
 const HYDRA_SECURITY_HEADERS = SECURITY_HEADERS
   .replace("script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'", "script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline' 'unsafe-eval'");
+// Tone imports worklet code from locally generated blob URLs.
 const TONE_SECURITY_HEADERS = SECURITY_HEADERS
+  .replace("'unsafe-inline'; style-src", "'unsafe-inline' blob:; style-src")
+  .replace("connect-src 'none';", 'connect-src blob:;')
   .replace("media-src 'self';", "media-src 'self'; worker-src blob:;");
 
 /**
@@ -100,7 +98,7 @@ const AUDIO_SCOPE_SCRIPT = `<script>
 })();
 </script>`;
 
-export type GenericDomain = Extract<DomainString, 'strudel' | 'hydra' | 'tone' | 'shader' | 'revideo' | 'ascii' | 'hyperframes'>;
+export type GenericDomain = Extract<EngineDomainString, 'strudel' | 'hydra' | 'tone' | 'shader' | 'revideo' | 'ascii' | 'hyperframes'>;
 
 export interface GenericWrapOptions {
   domain: GenericDomain;
@@ -354,6 +352,7 @@ export class GenericWrapper {
     <title>Strudel Pattern</title>
     ${AUDIO_SCOPE_SCRIPT}
     <script src="${STRUDEL_CDN}"></script>
+    ${musicRuntimeScript()}
     <style>
         :root { color-scheme: dark; }
         * { box-sizing: border-box; }
@@ -381,7 +380,6 @@ export class GenericWrapper {
     <canvas id="sinter-audio-scope" width="1200" height="220" style="display:block;width:100%;height:160px;margin:0 0 12px;border-radius:14px;"></canvas>
     <pre data-strudel-source-code><code>${visibleCode}</code></pre>
     <div id="sinter-strudel-status" role="status">Ready.</div>
-    ${STRUDEL_TEMPO_SCRIPT}
     <script>
       (function () {
         window.__sinterDrawScope(document.getElementById('sinter-audio-scope'));
@@ -390,17 +388,12 @@ export class GenericWrapper {
         var ready = false;
         var bootFailed = false;
         // (shims removed — see artwork tail-strip above)
-        var booted = strudel.initStrudel().then(function () {
-          // Preload the REPL's default sample banks — bd/sd/hh etc. are sample
-          // sounds; without the banks the pattern schedules in silence.
-          return Promise.all(${JSON.stringify(STRUDEL_SAMPLE_BANKS)}.map(function (u) {
-            return strudel.samples(u).catch(function () { /* bank optional */ });
-          }));
-        });
-        // Generated pieces often END with invented .start()/.tempo()/.out() calls that
-        // don't exist on Pattern. Strip ONLY a trailing occurrence — shimming
-        // Pattern.prototype breaks the scheduler's internal wiring and the
-        // piece plays silence. The JSON embed escapes < as \u003c so an
+        // One boot shared with the judge's renderer: the music runtime
+        // (musicRuntime.ts) starts Strudel and loads the sample banks.
+        var booted = window.__sinterStrudelBoot || Promise.reject(new Error('music runtime did not start Strudel'));
+        // Generated pieces often END with invented .start()/.out() calls. A
+        // trailing .out() routes a pattern away from superdough (silence), so
+        // strip it; invented tempo methods are no-ops in the music runtime. The JSON embed escapes < as \u003c so an
         // artwork containing a script-close tag (comment/prose) cannot
         // terminate the page's script early (H5).
         var artwork = ${JSON.stringify(code).replace(/</g, '\\u003c')}
@@ -623,6 +616,7 @@ export class GenericWrapper {
                 const uResolution = gl.getUniformLocation(shaderProgram, 'u_resolution');
                 const uTime = gl.getUniformLocation(shaderProgram, 'u_time');
                 const uMouse = gl.getUniformLocation(shaderProgram, 'u_mouse');
+                const uBeat = gl.getUniformLocation(shaderProgram, 'u_beat');
 
                 let mouseX = 0, mouseY = 0;
                 canvas.addEventListener('mousemove', (e) => {
@@ -637,6 +631,7 @@ export class GenericWrapper {
                     gl.uniform2f(uResolution, canvas.width, canvas.height);
                     gl.uniform1f(uTime, time);
                     gl.uniform2f(uMouse, mouseX, mouseY);
+                    gl.uniform1f(uBeat, (window.sinterSignal && window.sinterSignal.beat) || 0);
                     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
                     requestAnimationFrame(render);
                 }
@@ -649,7 +644,7 @@ export class GenericWrapper {
   }
 
   private static normalizeShaderForWebGL1(code: string): string {
-    let normalized = code
+    let normalized = expandShaderChunks(code)
       .replace(/\biTime\b/g, 'u_time')
       .replace(/\biResolution\b/g, 'u_resolution');
 

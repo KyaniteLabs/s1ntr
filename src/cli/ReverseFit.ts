@@ -37,29 +37,33 @@ export const renderAudioWithBrowser: AudioRenderer = async (code, domain, durati
   }
 };
 
-export interface ReverseFitInput {
+export interface ReverseFitInput<Take extends { sourcePath: string } = { sourcePath: string }> {
   readonly domain: string;
   readonly brief: ReverseBrief;
   readonly sourcePath: string;
   /** Generates again with the critique appended; returns the new accepted source path. */
-  readonly regenerate: (critique: string) => Promise<{ sourcePath: string }>;
+  readonly regenerate: (critique: string) => Promise<Take>;
   readonly render?: AudioRenderer;
 }
 
-export interface ReverseFitResult {
+export interface ReverseFitResult<Take extends { sourcePath: string } = { sourcePath: string }> {
+  /** The revised take (with its own Create result) when one was made; the caller reports and exits from it, not from the first Create (Sol L3-17). */
+  readonly revisedTake?: Take;
   readonly fit: FitRecord;
   /** The source that the fit passed on, or the last one tried. */
   readonly sourcePath: string;
   readonly provenance: ReverseProvenance;
 }
 
-export async function runReverseFit(input: ReverseFitInput): Promise<ReverseFitResult> {
+export async function runReverseFit<Take extends { sourcePath: string } = { sourcePath: string }>(
+  input: ReverseFitInput<Take>): Promise<ReverseFitResult<Take>> {
   const { brief, domain } = input;
   const durationSec = brief.provenance.durationSec;
   if (durationSec === null) throw new Error('REVERSE_FIT_NEEDS_DURATION: pass --duration to fit the render to a length');
   const render = input.render ?? renderAudioWithBrowser;
   const arc = brief.provenance.arc;
   let sourcePath = input.sourcePath;
+  let revisedTake: Take | undefined;
   const fit = await fitWithOneRevision({
     arc, durationSec, ending: arc?.ending ?? 'hit',
     render: async () => render(await readFile(sourcePath, 'utf8'), domain, durationSec),
@@ -67,10 +71,11 @@ export async function runReverseFit(input: ReverseFitInput): Promise<ReverseFitR
       // The critique says "your previous attempt"; the regenerate call starts fresh, so show it.
       const previous = await readFile(input.sourcePath, 'utf8');
       const withSource = `${critique}\n\nThe previous attempt, to revise:\n\`\`\`\n${previous}\n\`\`\``;
-      sourcePath = (await input.regenerate(withSource)).sourcePath;
+      revisedTake = await input.regenerate(withSource);
+      sourcePath = revisedTake.sourcePath;
     },
   });
-  return { fit, sourcePath, provenance: { ...brief.provenance, fit } };
+  return { fit, sourcePath, ...(revisedTake ? { revisedTake } : {}), provenance: { ...brief.provenance, fit } };
 }
 
 /** One-line summary of the last measurement for the terminal. */

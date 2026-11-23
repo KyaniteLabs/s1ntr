@@ -6,12 +6,11 @@ import { Logger } from '../utils/Logger.js';
 import { SERVICE_DEFAULTS } from '../constants/index.js';
 import {
   PROVIDER_DEFAULTS,
-  apiKeyEnvNamesForEndpoint,
   firstUsableApiKey,
   isPlaceholderApiKey,
   isRuntimeProviderKey,
   resolveProviderAlias,
-  readRuntimeEnv,
+  sameProviderEndpoint,
   selectRuntimeApiKey,
   type RuntimeProviderKey,
 } from './ProviderRuntime.js';
@@ -20,6 +19,7 @@ import type { ModelRole, ResolvedRoleConfig, RoleProviderConfig } from './RoleCo
 import { Result, ok, err as reject } from 'neverthrow';
 import { PersistenceError } from '../errors/PersistenceError.js';
 import { writeFileAtomic } from '../utils/atomicWrite.js';
+import { withFileLock } from '../utils/fileLock.js';
 import { migrateConfigHome } from './migrateConfigHome.js';
 
 /** Routing mode for multi-model generation */
@@ -65,6 +65,7 @@ export interface ProjectConfig {
     model?: string;
     temperature?: number;
     maxTokens?: number;
+    timeout?: number;
     localFallback?: boolean;
   };
   /** Dual-model configuration for cascade/specialized routing */
@@ -76,6 +77,7 @@ export interface ProjectConfig {
       model?: string;
       temperature?: number;
       maxTokens?: number;
+      timeout?: number;
     };
     /** Secondary/powerful model configuration */
     secondary?: {
@@ -427,35 +429,40 @@ export async function updateConfig(
 
   migrateLegacyConfig();
 
-  let current: Record<string, unknown> = {};
-  try {
-    const content = await fs.readFile(configPath, 'utf-8');
-    const parsed: unknown = JSON.parse(content);
-    if (!isPlainObject(parsed)) {
-      return reject(new PersistenceError('Invalid user config structure', { retryable: false }));
-    }
-    current = parsed;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
-      // Corrupt JSON or unreadable file: refuse to overwrite — the previous
-      // (possibly recoverable) file must not be clobbered by a partial update.
-      Logger.warn('ConfigLoader', `Refusing to update config ${configPath}: existing file could not be read`);
-      return reject(new PersistenceError('Failed to load config for update', {
-        cause: error instanceof Error ? error : new Error(String(error)),
-        retryable: false,
-      }));
-    }
-    // ENOENT: first run — merge onto an empty config.
-  }
-
-  const merged = deepMergeConfig(current, update);
-  if (!isValidUserConfig(merged)) {
-    return reject(new PersistenceError('Invalid config update: merged config fails validation', { retryable: false }));
-  }
-
+  // F20: serialize the read-merge-write across callers and processes (CLI --configure, GUI /api/config).
+  // Atomic rename prevents torn JSON but not last-writer loss; the lock spans the whole transaction.
   await fs.mkdir(path.dirname(configPath), { recursive: true });
-  await writeFileAtomic(configPath, JSON.stringify(merged, null, 2), { mode: 0o600 });
-  return ok(merged as UserConfig);
+  return withFileLock(`${configPath}.lock`, async (): Promise<Result<UserConfig, PersistenceError>> => {
+    let current: Record<string, unknown> = {};
+    try {
+      const content = await fs.readFile(configPath, 'utf-8');
+      const parsed: unknown = JSON.parse(content);
+      if (!isPlainObject(parsed)) {
+        return reject(new PersistenceError('Invalid user config structure', { retryable: false }));
+      }
+      current = parsed;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+        // Corrupt JSON or unreadable file: refuse to overwrite — the previous
+        // (possibly recoverable) file must not be clobbered by a partial update.
+        Logger.warn('ConfigLoader', `Refusing to update config ${configPath}: existing file could not be read`);
+        return reject(new PersistenceError('Failed to load config for update', {
+          cause: error instanceof Error ? error : new Error(String(error)),
+          retryable: false,
+        }));
+      }
+      // ENOENT: first run — merge onto an empty config.
+    }
+
+    const merged = deepMergeConfig(current, update);
+    if (!isValidUserConfig(merged)) {
+      return reject(new PersistenceError('Invalid config update: merged config fails validation', { retryable: false }));
+    }
+
+    await fs.mkdir(path.dirname(configPath), { recursive: true });
+    await writeFileAtomic(configPath, JSON.stringify(merged, null, 2), { mode: 0o600 });
+    return ok(merged as UserConfig);
+  });
 }
 
 /**
@@ -507,26 +514,24 @@ export async function getEffectiveConfig(configPath?: string, projectConfigPath?
     : rawFileProviderConfigForProvider;
   const projectLlm = projectConfig?.llm || {};
   const runtimeDefaults = runtimeProvider && hasProviderSignal ? PROVIDER_DEFAULTS[runtimeProvider] : undefined;
-  const baseUrl = env('LLM_BASE_URL') || projectLlm.baseUrl || fileProviderConfig.baseUrl || runtimeDefaults?.baseUrl;
+  const envBaseUrl = env('LLM_BASE_URL');
+  const fileBaseUrl = fileProviderConfig.baseUrl || runtimeDefaults?.baseUrl;
+  const projectBaseUrl = projectLlm.baseUrl ?? fileBaseUrl;
+  const baseUrl = envBaseUrl || projectBaseUrl || runtimeDefaults?.baseUrl;
   const model = env('LLM_MODEL') || projectLlm.model || fileProviderConfig.model || runtimeDefaults?.model || SERVICE_DEFAULTS.DEFAULT_MODEL;
+  const matchesSavedRoute = baseUrl === fileBaseUrl || sameProviderEndpoint(baseUrl, fileBaseUrl);
+  const projectChangesRoute = (projectLlm.baseUrl !== undefined && !matchesSavedRoute)
+    || Boolean(projectProvider && projectProvider !== usableFileProviderName);
+  const projectKey = !envBaseUrl || sameProviderEndpoint(envBaseUrl, projectLlm.baseUrl)
+    ? projectLlm.apiKey : undefined;
+  const configuredApiKey = firstUsableApiKey(projectKey, matchesSavedRoute ? fileProviderConfig.apiKey : undefined);
+  if (projectChangesRoute && !envBaseUrl) return { provider, baseUrl, model, apiKey: configuredApiKey };
 
-  return {
-    provider,
-    baseUrl,
-    model,
-    apiKey: runtimeProvider
-      ? selectRuntimeApiKey({
-          provider: runtimeProvider,
-          baseUrl: baseUrl ?? '',
-          model,
-          configuredApiKey: firstUsableApiKey(projectLlm.apiKey, fileProviderConfig.apiKey),
-          genericFallbackKeys: ['LLM_API_KEY'],
-          genericFirst: true,
-        })
-      : firstUsableApiKey(
-          ...apiKeyEnvNamesForEndpoint(baseUrl ?? '', model).map((key) => readRuntimeEnv(process.env, key)),
-          env('LLM_API_KEY'), projectLlm.apiKey, fileProviderConfig.apiKey),
-  };
+  const apiKey = selectRuntimeApiKey({
+    provider: runtimeProvider, baseUrl: baseUrl ?? '', model, configuredApiKey,
+    genericFallbackKeys: ['LLM_API_KEY'], genericFirst: true,
+  });
+  return { provider, baseUrl, model, apiKey };
 }
 
 function effectiveProviderName(providerName: string): NonNullable<EffectiveConfig['provider']> {

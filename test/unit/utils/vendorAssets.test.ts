@@ -6,6 +6,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { readFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
@@ -14,6 +15,8 @@ import {
   readVendorAsset,
   vendorRoot,
   inlineVendorAssets,
+  RUNTIME_FETCHED_ASSETS,
+  fetchPinnedRuntimeAsset,
 } from '../../../src/utils/vendorAssets.js';
 import { HTMLWrapper } from '../../../src/utils/htmlWrapper.js';
 
@@ -37,6 +40,11 @@ describe('vendor manifest integrity', () => {
     for (const path of Object.values(VENDOR_ASSETS)) {
       const entry = byPath.get(path);
       expect(entry && `/vendor/${entry.file}`, `manifest missing entry for ${path}`).toBe(path);
+      // The public tree ships without RUNTIME_FETCHED_ASSETS files (GSAP): there the CDN pin must equal the manifest pin.
+      if (RUNTIME_FETCHED_ASSETS[path] && !existsSync(`${vendorRoot()}${entry!.file}`)) {
+        expect(RUNTIME_FETCHED_ASSETS[path].sha256).toBe(entry!.sha256);
+        continue;
+      }
       const bytes = await readFile(`${vendorRoot()}${entry!.file}`);
       expect(bytes.length).toBe(entry!.bytes);
       expect(createHash('sha256').update(bytes).digest('hex')).toBe(entry!.sha256);
@@ -45,8 +53,37 @@ describe('vendor manifest integrity', () => {
 
   it('resolves every registered path from disk (fail loud when missing)', async () => {
     for (const path of Object.values(VENDOR_ASSETS)) {
+      // The public tree has no GSAP file. Reading it there would fetch the CDN; the stubbed-fetch test below covers that path.
+      if (RUNTIME_FETCHED_ASSETS[path] && !existsSync(`${vendorRoot()}${path.slice('/vendor/'.length)}`)) continue;
       const body = await readVendorAsset(path);
-      expect(body.length).toBeGreaterThan(1000);
+      expect(body.length).toBeGreaterThan(path.endsWith(".js") ? 1000 : 0);
+    }
+  });
+
+  it('pins every runtime-fetched asset to the manifest sha256', async () => {
+    const manifest = JSON.parse(await readFile(vendorManifestPath, 'utf8')) as { assets: ManifestAsset[] };
+    const byPath = new Map(manifest.assets.map(a => [`/vendor/${a.file}`, a]));
+    expect(Object.keys(RUNTIME_FETCHED_ASSETS)).toEqual(['/vendor/gsap/3.15.0/gsap.min.js']);
+    for (const [path, pin] of Object.entries(RUNTIME_FETCHED_ASSETS)) {
+      expect(isVendorAssetPath(path), path).toBe(true);
+      expect(pin.sha256, path).toBe(byPath.get(path)?.sha256);
+      expect(pin.url, path).toMatch(/^https:\/\/cdn\.jsdelivr\.net\/npm\/gsap@3\.15\.0\/dist\/gsap\.min\.js$/);
+    }
+  });
+
+  it('accepts runtime-fetched bytes only when they match the pin', async () => {
+    const path = '/vendor/gsap/3.15.0/gsap.min.js';
+    const body = 'pinned body';
+    const answer = (text: string, status = 200) => (async () => new Response(text, { status })) as unknown as typeof fetch;
+    // A tampered or wrong-version body is refused.
+    await expect(fetchPinnedRuntimeAsset(path, answer(body))).rejects.toThrow(/does not match the pin/);
+    await expect(fetchPinnedRuntimeAsset(path, answer('', 404))).rejects.toThrow(/HTTP 404/);
+    await expect(fetchPinnedRuntimeAsset('/vendor/p5/1.9.0/p5.min.js', answer(body))).rejects.toThrow(/no runtime source/);
+    // The vendored copy, where present, is exactly what the pin accepts.
+    const local = `${vendorRoot()}gsap/3.15.0/gsap.min.js`;
+    if (existsSync(local)) {
+      const bytes = await readFile(local, 'utf8');
+      await expect(fetchPinnedRuntimeAsset(path, answer(bytes))).resolves.toBe(bytes);
     }
   });
 

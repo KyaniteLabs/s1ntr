@@ -14,6 +14,7 @@ import type { DreamTransferEvaluator, DreamTransferProducer }
 import type { CompoundBlindedArm, CompoundCreateJudge, CompoundCreateJudgment }
   from './CompoundCreateProofPort.js';
 import { answerJson } from '../llm/ModelOutput.js';
+import { CapabilityRegistry } from '../llm/CapabilityRegistry.js';
 // Liminal-owned transfer oracle (AC6) — re-export keeps module on production call graph.
 export {
   buildOracleReceipt,
@@ -54,7 +55,14 @@ export function dreamClientIdentity(client: LLMClient): DreamEvaluatorIdentity {
 }
 
 function parseObject(text: string): Record<string, unknown> {
-  const value = JSON.parse(answerJson(text)) as unknown;
+  let value: unknown;
+  try {
+    value = JSON.parse(answerJson(text));
+  } catch (error) {
+    // Carry the head of the reply: a bare JSON.parse message cannot say what the model sent.
+    const head = text.slice(0, 240).replace(/\s+/g, ' ');
+    throw new Error(`DREAM_PROVIDER_RESPONSE_UNPARSEABLE:${(error as Error).message}:${head}`);
+  }
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('DREAM_PROVIDER_RESPONSE_INVALID');
   }
@@ -115,6 +123,12 @@ export class LLMDreamCreativeOperator implements DreamCreativeOperator {
 export class LLMDreamEvaluator implements DreamPairwiseEvaluator, DreamTransferEvaluator {
   readonly identity: DreamEvaluatorIdentity;
   constructor(private readonly client: LLMClient) {
+    // A blind pixel comparison needs pixels. LLMClient drops images for a text-only model and
+    // still answers, so such an evaluator returns a guess and the pair of evaluators can never
+    // agree on a keeper (RCA 2026-11-18: studio seat = text-only DeepSeek). Fail before any spend.
+    if (!CapabilityRegistry.supportsVision(String(client.getConfig().model ?? ''))) {
+      throw new Error('DREAM_EVALUATOR_VISION_REQUIRED');
+    }
     this.identity = dreamClientIdentity(client);
   }
 
@@ -152,19 +166,22 @@ export class LLMDreamEvaluator implements DreamPairwiseEvaluator, DreamTransferE
       ]
       : (first as DreamAnonymousComparison<DreamEvaluatorEvidence>).arms
         .flatMap(arm => arm.evidence.pixelFrames);
+    const criterionIds = second ? [] : (first as DreamAnonymousComparison<DreamEvaluatorEvidence>).criteria;
     const systemPrompt = second
       ? 'Judge only attached rendered pixels. Image order is treatment frames then control frames (labels match). '
         + 'validated = treatment has clearer multi-layer visual depth than control; '
         + 'falsified = no treatment depth advantage; inconclusive = cannot decide. '
         + 'Return strict JSON. No markdown.'
-      : 'Judge only attached rendered pixels. Return strict JSON. No markdown.';
+      : 'Judge only attached rendered pixels. Return strict JSON. No markdown. '
+        + `Each criteria entry's "criterion" must be one of: ${criterionIds.join(', ')}.`;
     const response = await this.client.generate(
       systemPrompt,
       JSON.stringify({ ...comparison,
         schema: second ? { outcome: 'validated|falsified|inconclusive' }
           : { outcome: 'keeper|rejected|inconclusive', uncertainty: 0.2,
-            criteria: [{ criterion: 'id', direction: 'improved|regressed|neutral' }] } }),
-      undefined, true, pixelFrames, { jsonMode: true });
+            criteria: [{ criterion: criterionIds[0] ?? 'criterion-id',
+              direction: 'improved|regressed|neutral' }] } }),
+      undefined, true, pixelFrames, { jsonMode: true, requireVision: true });
     if (!response.success) throw new Error(response.error ?? 'DREAM_EVALUATOR_PROVIDER_FAILED');
     const body = parseObject(response.code);
     if (second) return this.transferOutcome(body.outcome);
@@ -178,6 +195,11 @@ export class LLMDreamEvaluator implements DreamPairwiseEvaluator, DreamTransferE
         || typeof item.criterion !== 'string' || !item.criterion.trim()
         || !['improved', 'regressed', 'neutral'].includes(String(item.direction)))) {
       throw new Error('DREAM_CRITERION_VERDICT_INVALID');
+    }
+    for (const item of rawCriteria as Array<Record<string, unknown>>) {
+      if (!criterionIds.includes(String(item.criterion))) {
+        throw new Error(`DREAM_CRITERION_VERDICT_INVALID:unknown-criterion:${String(item.criterion)}`);
+      }
     }
     const criteria = (rawCriteria as Array<Record<string, unknown>>).map(item => ({
       criterion: String(item.criterion), direction: String(item.direction) as
@@ -210,7 +232,7 @@ export const TRANSFER_DEPTH_CUE_VOCAB = Object.freeze([
 ] as const);
 
 /** Contrastive arm contract for transfer producer (A+). Exported for tests. */
-export function transferArmInstructions(findingDigest: string | null): string {
+export function transferArmInstructions(findingDigest: string | null, technique?: string): string {
   if (findingDigest == null) {
     return [
       TRANSFER_CONTROL_MARKERS.NO_FINDING,
@@ -226,6 +248,7 @@ export function transferArmInstructions(findingDigest: string | null): string {
     'findingDigest is an assignment token only — do not try to decode the hash.',
     'Implement visual-depth with at least two of:',
     `${TRANSFER_DEPTH_CUE_VOCAB[0]}; ${TRANSFER_DEPTH_CUE_VOCAB[1]}; ${TRANSFER_DEPTH_CUE_VOCAB[2]}.`,
+    ...(technique ? [`Apply ${technique}.`] : []),
     `Assignment token findingDigest=${findingDigest}`,
   ].join(' ');
 }
@@ -233,8 +256,8 @@ export function transferArmInstructions(findingDigest: string | null): string {
 export class LLMDreamTransferProducer implements DreamTransferProducer {
   constructor(private readonly client: LLMClient) {}
   async produce(input: { holdout: string; contextDigest: string;
-    findingDigest: string | null }): Promise<DreamCreativeCandidate> {
-    const armInstructions = transferArmInstructions(input.findingDigest);
+    findingDigest: string | null; technique?: string }): Promise<DreamCreativeCandidate> {
+    const armInstructions = transferArmInstructions(input.findingDigest, input.technique);
     const response = await this.client.generate(
       `Return strict JSON playable creative source. ${PLAYABLE_SOURCE_CONTRACT} ${armInstructions}`,
       JSON.stringify({ task: 'Create an unseen transfer artifact', holdout: input.holdout,

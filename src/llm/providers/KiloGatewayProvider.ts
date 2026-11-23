@@ -60,6 +60,61 @@ function normalizeKiloContent(content: unknown): string {
   return '';
 }
 
+/**
+ * Read a streamed (SSE) chat completion into the same shape a non-streamed
+ * response has, so generate() can stream without changing its callers.
+ * Long reasoning runs need this: a non-streamed request sends no response
+ * headers until the whole answer is done, and the gateway answers 503
+ * "upstream provider did not send response headers" after ~31 minutes.
+ * A body that is plain JSON (gateway ignored stream:true) is parsed as-is.
+ */
+export async function collectKiloStream(response: Response): Promise<Record<string, unknown>> {
+  const type = response.headers?.get?.('content-type') || '';
+  if (!type.includes('text/event-stream') || !response.body) return await response.json() as Record<string, unknown>;
+  const decoder = new TextDecoder();
+  const reader = response.body.getReader();
+  let buffer = '';
+  let content = '';
+  let reasoning = '';
+  let finishReason: string | undefined;
+  let usage: unknown;
+  let model: unknown;
+  let error: unknown;
+  const take = (line: string): void => {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('data:')) return;
+    const payload = trimmed.slice(5).trim();
+    if (!payload || payload === '[DONE]') return;
+    let chunk: Record<string, unknown>;
+    try { chunk = JSON.parse(payload) as Record<string, unknown>; } catch { return; }
+    if (chunk.error) error = chunk.error;
+    if (chunk.model) model = chunk.model;
+    if (chunk.usage) usage = chunk.usage;
+    const choice = (chunk.choices as Array<{ delta?: { content?: unknown; reasoning?: unknown; reasoning_content?: unknown }; finish_reason?: string | null }> | undefined)?.[0];
+    if (!choice) return;
+    if (typeof choice.delta?.content === 'string') content += choice.delta.content;
+    const r = choice.delta?.reasoning ?? choice.delta?.reasoning_content;
+    if (typeof r === 'string') reasoning += r;
+    if (choice.finish_reason) finishReason = choice.finish_reason;
+  };
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+    for (const line of lines) take(line);
+  }
+  take(buffer);
+  const message: Record<string, unknown> = { content };
+  if (reasoning) message.reasoning = reasoning;
+  const data: Record<string, unknown> = { choices: [{ message, finish_reason: finishReason }] };
+  if (usage) data.usage = usage;
+  if (model) data.model = model;
+  if (error) data.error = error;
+  return data;
+}
+
 function summarizeKiloResponse(data: unknown): string {
   if (!data || typeof data !== 'object') return 'non-object response';
   const record = data as Record<string, unknown>;
@@ -186,6 +241,14 @@ export class KiloGatewayProvider extends BaseProvider {
         body.reasoning = { effort: 'none' };
       }
 
+      // Stream when no tools are in play, so headers arrive at once and a long
+      // reasoning run cannot hit the gateway's header timeout (see collectKiloStream).
+      const streamed = !body.tools;
+      if (streamed) {
+        body.stream = true;
+        body.stream_options = { include_usage: true };
+      }
+
       const signal = this.withTimeout(req.signal, this.config.timeout || TIMEOUT_DEFAULT_MS);
 
       const response = await this.limitedFetch(url, {
@@ -205,7 +268,7 @@ export class KiloGatewayProvider extends BaseProvider {
         }));
       }
 
-      const data = await response.json();
+      const data = streamed ? await collectKiloStream(response) : await response.json();
       const thinking = extractOpenRouterThinking(data);
       const choices = data.choices as Array<{ message?: { content?: unknown; tool_calls?: Array<{ id: string; function: { name: string; arguments: string } }> }; finish_reason?: string }> | undefined;
       const message = choices?.[0]?.message;

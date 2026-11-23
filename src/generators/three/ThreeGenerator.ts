@@ -76,7 +76,8 @@ export class ThreeGenerator extends TierBasedGenerator {
       };
     }
 
-    if (/\bOrbitControls\b/.test(code) || /examples\/jsm\//.test(code)) {
+    // The page maps only bare 'three'; 'three/addons/...' is the same examples/jsm tree under its npm alias.
+    if (/\bOrbitControls\b/.test(code) || /examples\/jsm\//.test(code) || /['"]three\/(?:addons|examples)\//.test(code)) {
       return {
         valid: false,
         error: 'Generated Three.js output must not import OrbitControls or examples modules; animate the camera manually',

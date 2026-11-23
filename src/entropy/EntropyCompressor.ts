@@ -24,7 +24,9 @@ export class EntropyCompressor {
       }).join('');
 
       // Round 3: entropic hashing (information collapse)
-      const hash = createHash('sha256').update(reduced).digest('hex');
+      // The hash also binds the full pre-decimation input: decimation + nibble quantization alone discarded
+      // most of the harvested state (84% of single-character changes left the seed unchanged, #organ-audit).
+      const hash = createHash('sha256').update(current).update('\u0000').update(reduced).digest('hex');
       hashChain.push(hash);
 
       // Round 4: recursive re-entrance

@@ -44,6 +44,22 @@ describe('shouldFit', () => {
 });
 
 describe('runReverseFit', () => {
+  it('L3-17: hands back the revised take with its own Create result, so callers report and exit from it', async () => {
+    const first = path.join(tmp, 'c-source.txt');
+    const second = path.join(tmp, 'd-source.txt');
+    writeFileSync(first, 'old code');
+    writeFileSync(second, 'new code');
+    const secondTake = { sourcePath: second, result: { receipt: { signature: 'second-create' }, evaluation: { score: 0.8 } } };
+    const render = async (code: string) => ({ samples: code === 'old code' ? tooLong() : good(), sampleRate: SR });
+    const out = await runReverseFit({ domain: 'tone', brief: brief(), sourcePath: first,
+      regenerate: async () => secondTake, render });
+    expect(out.revisedTake).toBe(secondTake);
+    // no revision needed: nothing to switch to
+    const kept = await runReverseFit({ domain: 'tone', brief: brief(), sourcePath: second,
+      regenerate: async () => secondTake, render });
+    expect(kept.revisedTake).toBeUndefined();
+  });
+
   it('revises once with the measured critique, switches to the revised source, and records the fit', async () => {
     const first = path.join(tmp, 'a-source.txt');
     const second = path.join(tmp, 'b-source.txt');

@@ -23,7 +23,7 @@
     "incremental": true,
     "tsBuildInfoFile": ".tsbuildinfo"
   },
-  "include": ["src/**/*"],
+  "include": ["src/**/*", "src/scavenger/fragments/fragments.json"],
   "exclude": ["node_modules", "dist", "test", "src/collab/archive", "src/brain/archive"],
   "ts-node": {
     "esm": true,

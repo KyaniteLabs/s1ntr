@@ -20,7 +20,8 @@ describe('market quickstart docs', () => {
     expect(readme).toContain('pnpm run proof:live-provider-smoke -- --provider=glm --timeout-ms=120000');
     expect(readme).toContain('pnpm proof:live-creative-domains -- --provider=glm --all --timeout-ms=120000 --out=.omx/proof/live-creative-domains');
     expect(readme).toContain('sinter market status');
-    expect(readme).toContain('p5, SVG, GLSL, Three.js, Hydra, Strudel, Tone.js, Revideo, HyperFrames, ASCII, Kinetic, and TextGen');
-    expect(readme).toContain('HyperFrames saves HTML/GSAP composition artifacts, and Revideo saves composition source/HTML; mp4 export is attempted as a non-blocking video artifact and should be checked explicitly when a rendered file is required.');
+    expect(readme).toContain('p5, SVG, shader, Three.js, Hydra, Strudel, Tone.js, ASCII, kinetic type and CSS motion');
+    // Removed mediums are no longer advertised (their ids stay as silent aliases).
+    expect(readme).not.toMatch(/Revideo|HyperFrames/);
   });
 });

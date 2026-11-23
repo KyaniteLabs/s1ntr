@@ -5,7 +5,7 @@
  * Supports parallel generation where safe, optimal ordering, and rollback on failure.
  */
 
-import { TierBasedGenerator } from '../generators/TierBasedGenerator.js';
+import type { TierBasedGenerator } from '../generators/TierBasedGenerator.js';
 import { DomainType, Layer } from './types.js';
 
 /** Error thrown when generation is aborted */
@@ -16,10 +16,40 @@ export class AbortError extends Error {
   }
 }
 
+/** One layer to generate through a governed generator. */
+export interface GovernedLayerRequest {
+  readonly domain: DomainType;
+  /** This layer's own prompt (from `layerPrompts`, else the shared base prompt). */
+  readonly prompt: string;
+  /** Position of this layer in the `domains` argument (not the generation order). */
+  readonly index: number;
+  /** Layers already generated, in generation order. */
+  readonly context: readonly Layer[];
+  readonly signal?: AbortSignal;
+}
+
+/** Generates one layer through a governed path (e.g. CompositionOrchestrator.generateGovernedLayer). */
+export type GovernedLayerGenerator = (request: GovernedLayerRequest) => Promise<Layer>;
+
 /** Options for LayerSequencer */
 export interface LayerSequencerOptions {
   /** Map of domain types to their generators */
   generators: Map<DomainType, TierBasedGenerator>;
+
+  /**
+   * Per-layer prompts, aligned with the `domains` argument. A missing entry falls back to the base
+   * prompt, so the original one-prompt call keeps working.
+   */
+  layerPrompts?: readonly string[];
+
+  /**
+   * Governed generator used instead of `generators`. It owns provider governance, vendor inlining
+   * inputs and the seam guard; the sequencer only orders, passes context and collects failures.
+   */
+  generate?: GovernedLayerGenerator;
+
+  /** Append "Context from previous layers" to each prompt (default: true; the layered build turns it off, its prompts carry the shared contract). */
+  passContext?: boolean;
 
   /** Progress callback - called when each layer completes */
   onProgress?: (completed: number, total: number) => void;
@@ -43,7 +73,10 @@ export interface SequencerResult {
   layers: Layer[];
 
   /** Errors that occurred during generation */
-  errors: Array<{ domain: DomainType; error: Error }>;
+  errors: Array<{ domain: DomainType; error: Error; index?: number }>;
+
+  /** Indices (into the `domains` argument) in the order layers were attempted. */
+  generationOrder?: number[];
 }
 
 /** A task for parallel generation */
@@ -74,6 +107,13 @@ const DOMAIN_CATEGORIES: Record<string, number> = {
   // Text/content layers (usually on top)
   html: 4,
   textgen: 4,
+  kinetic: 4,
+
+  // Hybrid-path domains
+  glsl: 1,
+  nbe: 1,
+  svg: 2,
+  custom: 3,
 };
 
 /**
@@ -112,16 +152,23 @@ export class LayerSequencer {
       return result;
     }
 
-    // Optimize order if requested
-    const orderedDomains = opts.optimizeOrder
-      ? this.optimizeDomainOrder(domains)
-      : [...domains];
+    // Pair each domain with its input index and prompt, then order (stable sort keeps ties in input order)
+    const entries = domains.map((domain, index) => ({
+      domain, index, prompt: opts.layerPrompts?.[index] ?? prompt,
+    }));
+    const orderedEntries = opts.optimizeOrder
+      ? [...entries].sort((a, b) => (DOMAIN_CATEGORIES[a.domain] || 99) - (DOMAIN_CATEGORIES[b.domain] || 99))
+      : entries;
+    const orderedDomains = orderedEntries.map((e) => e.domain);
+    result.generationOrder = [];
 
     // Track context from previous layers
     const context: Layer[] = [];
 
     for (let i = 0; i < orderedDomains.length; i++) {
       const domain = orderedDomains[i];
+      const entry = orderedEntries[i];
+      result.generationOrder.push(entry.index);
 
       // Check for abort before processing
       if (opts.signal?.aborted) {
@@ -142,20 +189,30 @@ export class LayerSequencer {
       }
 
       try {
-        // Get generator for this domain
-        const generator = opts.generators.get(domain);
-        if (!generator) {
-          throw new Error(`No generator registered for domain: ${domain}`);
+        let layer: Layer;
+        if (opts.generate) {
+          const generate = opts.generate;
+          const governedPrompt = opts.passContext === false ? entry.prompt : this.enhancePrompt(entry.prompt, context);
+          layer = await this.generateWithAbort(
+            () => generate({ domain, prompt: governedPrompt, index: entry.index, context: [...context], signal: opts.signal }),
+            opts.signal
+          );
+        } else {
+          // Get generator for this domain
+          const generator = opts.generators.get(domain);
+          if (!generator) {
+            throw new Error(`No generator registered for domain: ${domain}`);
+          }
+
+          // Enhance prompt with context from previous layers
+          const enhancedPrompt = opts.passContext === false ? entry.prompt : this.enhancePrompt(entry.prompt, context);
+
+          // Generate layer with abort support
+          layer = await this.generateWithAbort(
+            () => generator.generateLayer(enhancedPrompt),
+            opts.signal
+          );
         }
-
-        // Enhance prompt with context from previous layers
-        const enhancedPrompt = this.enhancePrompt(prompt, context);
-
-        // Generate layer with abort support
-        const layer = await this.generateWithAbort(
-          () => generator.generateLayer(enhancedPrompt),
-          opts.signal
-        );
 
         // Validate layer
         if (!this.isValidLayer(layer)) {
@@ -170,7 +227,7 @@ export class LayerSequencer {
         opts.onProgress?.(result.layers.length, orderedDomains.length);
       } catch (error) {
         const err = error instanceof Error ? error : new Error(String(error));
-        result.errors.push({ domain, error: err });
+        result.errors.push({ domain, error: err, index: entry.index });
 
         // Rollback if configured
         if (opts.rollbackOnError) {
@@ -334,6 +391,9 @@ export class LayerSequencer {
   ): LayerSequencerOptions {
     return {
       generators: options.generators || new Map(),
+      layerPrompts: options.layerPrompts,
+      generate: options.generate,
+      passContext: options.passContext,
       onProgress: options.onProgress,
       continueOnError: options.continueOnError ?? true,
       rollbackOnError: options.rollbackOnError ?? false,
@@ -379,6 +439,10 @@ ${contextParts.join('\n')}`;
    * Optimize domain order for optimal generation.
    * Base visual layers first, then audio, then effects.
    */
+  orderDomains(domains: DomainType[]): DomainType[] {
+    return this.optimizeDomainOrder(domains);
+  }
+
   private optimizeDomainOrder(domains: DomainType[]): DomainType[] {
     return [...domains].sort((a, b) => {
       const priorityA = DOMAIN_CATEGORIES[a] || 99;

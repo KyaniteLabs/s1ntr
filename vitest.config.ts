@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 const audioCoreSrc = fileURLToPath(new URL('./packages/audio-core/src', import.meta.url));
 
 const SLOW_TEST_PATTERNS = [
+  'test/organs/**/*.test.ts',
   'test/e2e/**/*.test.ts',
   'test/e2e/**/*.test.js',
   'test/e2e/**/*.e2e.test.ts',
@@ -14,6 +15,7 @@ const SLOW_TEST_PATTERNS = [
   // the fast suite cost ~42s per attempt.
   'test/unit/lint.test.ts',
   'test/integration/dual-llm.test.ts',
+  'test/integration/dream-pilot-fake-provider.test.ts',
   'test/integration/e2e-aesthetic-audio.test.ts',
   'test/integration/full-loop.test.js',
   'test/integration/generator-renderer.test.js',
@@ -22,7 +24,6 @@ const SLOW_TEST_PATTERNS = [
   'test/integration/preview-server.test.js',
   'test/integration/renderer.test.js',
   'test/integration/run-merge-approve-api.test.js',
-  'packages/sing/test/e2e/**/*.test.ts',
 ] as const;
 
 const isFastCi = process.env.LIMINAL_CI_FAST === '1';
@@ -68,6 +69,10 @@ export default defineConfig({
     ],
   },
   test: {
+    globalSetup: ['test/global-setup-dist.ts'],
+    // Spawned-CLI tests start node and import dist; the 5 s default fails them on a loaded host.
+    // Tests that need less or more set their own cap.
+    testTimeout: 30_000,
     setupFiles: ['test/setup.ts'],
     include: isSlowCi ? [...SLOW_TEST_PATTERNS] : ['**/test/**/*.test.(js|ts)', '**/test/**/*.e2e.test.(js|ts)'],
     exclude: isFastCi ? [...baseExclude, ...SLOW_TEST_PATTERNS] : baseExclude,

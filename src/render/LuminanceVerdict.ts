@@ -7,6 +7,8 @@ export interface LuminanceMeasure {
   darkFraction: number;
   /** Fraction of pixels at or above 0.95 luminance. */
   clippedHighlightFraction?: number;
+  /** Fill ratio of clipped pixels in their bounding box; ~1 means a solid flat panel. */
+  clippedBoundsFill?: number;
   /** Standard deviation of perceptual brightness on the 0..255 luma scale. */
   brightnessStd?: number;
 }
@@ -24,6 +26,11 @@ export const CLIPPED_HIGHLIGHT_LUMINANCE_THRESHOLD = 0.95;
 // this deliberately narrow because this verdict fails creative admission.
 export const CLIPPED_HIGHLIGHT_MIN_FRACTION = 0.15;
 export const CLIPPED_HIGHLIGHT_MIN_DARK_FRACTION = 0.12;
+// A clipped region that fills its own bounding box is a designed flat panel
+// (a cream card on a dark page), not an additive bloom. Measured on 18 archived
+// highlight-clipped late frames: the 3 svg metro cards fill 0.95-0.96; every
+// hydra/p5/html blowout fills <= 0.77.
+export const CLIPPED_SOLID_PANEL_MIN_FILL = 0.9;
 // brightnessStd is measured on the 0..255 luma scale; the F19 labeled set
 // separates true washouts (<= 9.5) from good high-key art (>= 18.5).
 export const WASHOUT_MAX_STD = 15;
@@ -79,6 +86,7 @@ export function verdictFromMeasure(
   if (
     (measure.clippedHighlightFraction ?? 0) >= CLIPPED_HIGHLIGHT_MIN_FRACTION
     && measure.darkFraction >= CLIPPED_HIGHLIGHT_MIN_DARK_FRACTION
+    && (measure.clippedBoundsFill ?? 0) < CLIPPED_SOLID_PANEL_MIN_FILL
   ) return 'highlight-clipped';
   // Dim-sparse: nearly empty crushed canvas — independent of std (W6c).
   if (

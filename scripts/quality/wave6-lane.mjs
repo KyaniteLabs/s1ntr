@@ -467,6 +467,7 @@ async function startStudio(root, label, studioLineagePath = path.join(runRoot, `
   const log = await fs.open(logPath, 'w');
   const code = `import http from 'node:http';
 import { createApp } from './gui/server.js';
+import { prepareBrowserScratch } from '../lib/scratch-space.mjs';
 const server=http.createServer(createApp(process.env.SINTER_CONFIG_PATH,${port}));
 server.listen(${port},'127.0.0.1',()=>console.log('READY'));
 process.on('SIGTERM',()=>server.close(()=>process.exit(0)));`;
@@ -553,6 +554,7 @@ async function loadCompletedArtifact(label) {
 
 async function verifyResumedArtifact(resumed) {
   const { chromium } = await import('playwright');
+  prepareBrowserScratch();   // browser profile off the data volume + free-space check
   const browser = await chromium.launch(chromiumLaunchOptions());
   const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
   const errors = [];
@@ -675,6 +677,7 @@ await controlStudio.stop();
 await candidateStudio.stop();
 
 const { chromium } = await import('playwright');
+prepareBrowserScratch();   // browser profile off the data volume + free-space check
 const browser = await chromium.launch(chromiumLaunchOptions());
 async function observeCoupling(page) {
   return page.evaluate(() => {

@@ -19,6 +19,11 @@ export type DomainType =
   | 'ascii'
   | 'video'
   | 'html'
+  | 'glsl'
+  | 'svg'
+  | 'kinetic'
+  | 'nbe'
+  | 'custom'
   | 'textgen'
   | 'group';
 

@@ -20,3 +20,14 @@ describe('durable payload encoding', () => {
     expect(({} as { polluted?: string }).polluted).toBeUndefined();
   });
 });
+
+describe('void effect results', () => {
+  it('digests undefined like null instead of throwing (a cycle effect that returns nothing must journal)', () => {
+    expect(() => liminalDurablePayloadDigest(undefined)).not.toThrow();
+    expect(liminalDurablePayloadDigest(undefined)).toBe(liminalDurablePayloadDigest(null));
+    expect(liminalDurablePayloadDigest(undefined)).toMatch(/^[0-9a-f]{64}$/);
+    expect(liminalDurablePayloadDigest('x')).not.toBe(liminalDurablePayloadDigest(undefined));
+    expect(liminalDurablePayloadDigest({ a: 1 })).toMatch(/^[0-9a-f]{64}$/);
+    expect(liminalDurablePayloadDigest(0)).not.toBe(liminalDurablePayloadDigest(undefined));
+  });
+});

@@ -28,6 +28,7 @@ import {
   assertIdentityOracle,
   assertBehaviorOracle,
 } from '../../../src/runtime-core/SelfImprovementRuntime.js';
+import type { LLMClient } from '../../../src/llm/LLMClient.js';
 import { Status } from '../../../src/types/status.js';
 
 function stableTaskIdentity(task: any) {
@@ -114,6 +115,21 @@ describe('LLMModeSelfImprovementRuntime', () => {
     };
     expect(assertBehaviorOracle(emptyCite, adaptationId, { custom: () => true })).toBe(false);
     expect(assertIdentityOracle(emptyCite, adaptationId)).toBe(true);
+  });
+
+  it.each([
+    ['1234567', true, false],
+    ['12345678', true, true],
+    ['short', false, true],
+  ] as const)('verifies an injected adaptation body %s with requireBody=%s', (body, requireBody, accepted) => {
+    const llm = { getConfig: () => ({ model: 'fixture' }) } as LLMClient;
+    mockWithLearned.mockImplementation((request) => `- [adaptation:prior] ${body}\n${request}`);
+    const prepared = new LLMModeSelfImprovementRuntime().prepare({ llm, description: 'Improve packet shaping' });
+    const check = { requireBody, custom: (text: string) => text === prepared.task.description };
+
+    expect(assertBehaviorOracle(prepared, 'prior', check)).toBe(accepted);
+    expect(assertBehaviorOracle({ ...prepared, injectedAdaptationIds: [] }, 'prior', check)).toBe(false);
+    expect(assertIdentityOracle(prepared, 'missing')).toBe(false);
   });
 
   it('preserves bounded packet contracts across runtime-core and runstate preparations', () => {
@@ -263,6 +279,20 @@ describe('LLMModeSelfImprovementRuntime', () => {
     expect(mockRecordOutcome).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps learned file names in the prompt and outside the bounded focus', () => {
+    const llm = { getConfig: () => ({ model: 'fixture' }) } as LLMClient;
+    const request = 'Edit src/runtime-core/RepoIndexLite.ts';
+    const carried = '- [adaptation:prior provenance:harness-memory] Resume work in src/harness/RunStateStore.ts';
+    const fresh = '- [adaptation:recent] Read src/harness/agent/LLMModeAgent.ts';
+    mockWithLearned.mockImplementation((description) => fresh + '\n' + description);
+    const prepared = new LLMModeSelfImprovementRuntime().prepare({ llm, description: carried + '\n' + request });
+
+    expect(prepared.task.primaryFiles).toEqual(['src/runtime-core/RepoIndexLite.ts']);
+    expect(prepared.task.fileHint).toBe(prepared.task.workingSet?.[0]);
+    expect(prepared.task.description).toContain([fresh, carried, request].join('\n'));
+    expect(prepared.injectedAdaptationIds).toEqual(['recent', 'prior']);
+  });
+
   it('preloads checkpoint/resume runs with a deterministic working set', async () => {
     const runtime = new LLMModeSelfImprovementRuntime();
     const llm = { getConfig: vi.fn(() => ({ model: 'glm-5.1' })) } as any;
@@ -332,6 +362,12 @@ describe('LLMModeSelfImprovementRuntime', () => {
           tool: 'runFocusedTests',
           pattern: 'RepoIndexLite',
           reason: 'RepoIndexLite packet-shaping changes should hit focused runtime tests first',
+          priority: 1,
+        },
+        {
+          tool: 'runFocusedTests',
+          pattern: 'SelfImprovementRuntime',
+          reason: 'Verify packet integration in the runtime suite',
           priority: 1,
         },
         {

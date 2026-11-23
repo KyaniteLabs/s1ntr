@@ -13,6 +13,7 @@ const { mockReadFile, mockAccess, mockStat, mockMkdir, mockWriteFileAtomic } = v
   mockWriteFileAtomic: vi.fn(),
 }));
 
+vi.mock('../../../src/utils/fileLock.js', () => ({ withFileLock: async (_p: string, fn: () => unknown) => fn() }));
 vi.mock('fs/promises', () => ({
   default: {
     readFile: mockReadFile,

@@ -1,0 +1,3 @@
+# organ: intuition | ForgettingCurve.computeRetention | data: real, in-process call
+1 day old: {"retention":0.9048374180359595,"daysSinceUpdate":1,"effectiveStability":10,"value":0.8143536762323635,"shouldPrune":false}
+90 days old: {"retention":0.00012340980408667956,"daysSinceUpdate":90,"effectiveStability":10,"value":0.00011106882367801161,"shouldPrune":true}

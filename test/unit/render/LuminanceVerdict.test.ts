@@ -40,6 +40,25 @@ describe('LuminanceVerdict', () => {
     expect(verdictFromMeasure({ meanLuminance: 0.7, brightFraction: 1.0, darkFraction: 0 })).toBe('ok'); // no std measured → conservative
   });
 
+  it('does not flag a solid flat panel (designed card on a dark page) as clipped', () => {
+    expect(verdictFromMeasure({
+      meanLuminance: 0.4,
+      brightFraction: 0.34,
+      darkFraction: 0.65,
+      brightnessStd: 121,
+      clippedHighlightFraction: 0.34,
+      clippedBoundsFill: 0.95,
+    })).toBe('ok');
+    expect(verdictFromMeasure({
+      meanLuminance: 0.4,
+      brightFraction: 0.34,
+      darkFraction: 0.65,
+      brightnessStd: 121,
+      clippedHighlightFraction: 0.34,
+      clippedBoundsFill: 0.77,
+    })).toBe('highlight-clipped');
+  });
+
   it('flags concentrated clipped highlights in an otherwise dark structured frame', () => {
     expect(verdictFromMeasure({
       meanLuminance: 0.47,

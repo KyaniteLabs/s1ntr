@@ -3,7 +3,6 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { RevideoValidator } from '../../../src/core/validators/RevideoValidator.js';
-import { REVIDEO_RULES } from '../../../src/generators/revideo/revideoRules.js';
 
 const FIXTURES = join(__dirname, '../../fixtures/revideo-render-failed');
 const fixture = (name: string) => readFileSync(join(FIXTURES, name), 'utf8');
@@ -109,10 +108,5 @@ describe('Revideo ref gate', () => {
   ])('accepts %s', (_name, body) => {
     const result = RevideoValidator.validate(scene(body));
     expect(result.errors).toEqual([]);
-  });
-
-  it('keeps the ref contract in the prompt rules', () => {
-    expect(REVIDEO_RULES).toContain('<Circle ref={ring} ... />');
-    expect(REVIDEO_RULES).toContain('Never ring.scale(...)');
   });
 });

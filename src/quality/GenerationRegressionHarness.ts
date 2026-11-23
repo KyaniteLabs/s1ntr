@@ -10,13 +10,13 @@ import { HydraGenerator } from '../generators/hydra/HydraGenerator.js';
 import { ToneGenerator } from '../generators/tone/ToneGenerator.js';
 import { HTMLWebGenerator } from '../generators/html/HTMLWebGenerator.js';
 import { ASCIIArtGenerator } from '../generators/ascii/ASCIIArtGenerator.js';
-import { RevideoGenerator } from '../generators/revideo/RevideoGenerator.js';
+import { SVGGenerator } from '../generators/svg/SVGGenerator.js';
 import { PROVIDER_DEFAULTS, resolveProviderAlias } from '../config/ProviderRuntime.js';
 import type { DomainString } from '../types/domains.js';
 
 export type RegressionDomain = Extract<
   DomainString,
-  'p5' | 'glsl' | 'three' | 'strudel' | 'hydra' | 'tone' | 'html' | 'ascii' | 'revideo'
+  'p5' | 'glsl' | 'three' | 'strudel' | 'hydra' | 'tone' | 'html' | 'ascii' | 'svg'
 >;
 
 export interface RegressionRequest {
@@ -61,11 +61,12 @@ const DEFAULT_PROMPTS: Record<RegressionDomain, string> = {
   tone: 'Create a Tone.js synthesizer patch that plays an ambient drone with reverb and delay effects. Use multiple oscillators and LFOs for rich sound.',
   html: 'Create a responsive landing page for a creative coding portfolio. Include a hero section with animated gradient background, project cards, and contact form.',
   ascii: 'Create simple ASCII art of a mountain landscape. Use only basic characters like @ # % * + = - . and spaces.',
-  revideo: 'Create a Revideo scene that animates text typing with a cursor blink, then fades in a subtitle.',
+  svg: 'Create an SVG illustration of a lighthouse at dusk with layered waves, a beam of light and a gradient sky.',
 };
 
-export function normalizeRegressionDomain(domain: RegressionRequest['domain']): RegressionDomain {
-  return domain;
+export function normalizeRegressionDomain(domain: string): RegressionDomain {
+  if (!Object.hasOwn(DEFAULT_PROMPTS, domain)) throw new Error(`Unsupported regression domain: ${domain}`);
+  return domain as RegressionDomain;
 }
 
 export function inferRegressionBaseUrl(provider: string, explicitBaseUrl?: string): string {
@@ -83,6 +84,8 @@ function getArtifactExtension(domain: RegressionDomain): string {
   switch (domain) {
     case 'ascii':
       return 'txt';
+    case 'svg':
+      return 'svg';
     case 'html':
     case 'tone':
     case 'three':
@@ -92,7 +95,6 @@ function getArtifactExtension(domain: RegressionDomain): string {
       return 'glsl';
     case 'p5':
     case 'hydra':
-    case 'revideo':
     default:
       return 'js';
   }
@@ -126,8 +128,8 @@ function createGenerator(domain: RegressionDomain, llm: LLMClient) {
       return new HTMLWebGenerator(llm);
     case 'ascii':
       return new ASCIIArtGenerator(llm);
-    case 'revideo':
-      return new RevideoGenerator(llm);
+    case 'svg':
+      return new SVGGenerator(llm);
   }
 }
 

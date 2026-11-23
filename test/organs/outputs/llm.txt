@@ -1,0 +1,28 @@
+## run5.log
+piece d9-html GPT-6.1 Sol 0.8
+
+🎨 Sinter: Creative Coding Agent
+📝 Prompt: "Push S1NTR to its limit: a single self-contained HTML page that is a living tide clock for an imaginary harbour. A circular dial shows the tide height as animated water inside the ring, boa
+🔄 Governed candidates: 1
+📁 Output: <out>/generate/run5
+
+Generating: Push S1NTR to its limit: a single self-contained HTML page that is a living tide clock for an imaginary harbour. A circular dial shows the tide height as animated water inside the ring, bo
+
+🎯 Domain (forced via --domain): html
+
+[LLMClient] [attestation] non-harness generator attempt completes unattested: EXECUTOR_AUTHORITY_UNAVAILABLE: metered funding evidence missing for unknown
+[07:01:06.276] LLMClient llm:response <email>:34985 local/gpt-5.4 515ms ok
+[SandboxConfig] Chromium has no usable OS sandbox on this host, so it runs unsandboxed. Give Chromium an AppArmor profile that allows userns, or set LIMINAL_DISABLE_SANDBOX=true to choose this on purp
+[LLMClient] [attestation] non-harness evaluator attempt completes unattested: EXECUTOR_AUTHORITY_UNAVAILABLE: metered funding evidence missing for unknown
+[07:02:24.507] LLMClient llm:response <email>:34985 local/gpt-5.4 95ms ok
+
+✅ Generation complete!
+🎯 Reason: governed production Create completed
+⭐ Quality score: 0.80
+🤖 Model: openai/gpt-5.4
+🧾 Provider calls: 2/2
+✅ Saved: <out>/generate/run5/artifacts/e0446587893d1f6280dfbbea71efa96281d57adffcbbf04c31cd9f680e4c5a93/source.txt
+✅ HTML: <out>/generate/run5/artifacts/e0446587893d1f6280dfbbea71efa96281d57adffcbbf04c31cd9f680e4c5a93/playable.html
+🧾 Authority receipt: 39a8727820eb59822776019224b13d040dff908d459ec4e370f67fac7592efd4
+
+

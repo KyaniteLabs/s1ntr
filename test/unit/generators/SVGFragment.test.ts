@@ -3,10 +3,14 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { JSDOM } from 'jsdom';
 import {
   buildFragmentBrief,
+  buildHostProofPage,
   extractFragmentSpec,
+  FRAGMENT_DOMAIN_ERROR,
   parseSvgOutputFlags,
+  routeFragmentDomain,
   validateSVGFragment,
   type SVGFragmentSpec,
 } from '../../../src/generators/svg/SVGFragment.js';
@@ -149,10 +153,114 @@ describe('standalone output is unchanged', () => {
   });
 });
 
+describe('routeFragmentDomain (meta/custom routing, #1162)', () => {
+  it('keeps an explicit svg domain as-is', () => {
+    expect(routeFragmentDomain('svg')).toEqual({ ok: true, route: { domain: 'svg', notice: '' } });
+  });
+
+  it('routes custom (formerly meta) to svg with a notice', () => {
+    const r = routeFragmentDomain('custom');
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.route.domain).toBe('svg');
+      expect(r.route.reroutedFrom).toBe('custom');
+      expect(r.route.notice).toContain('svg');
+    }
+  });
+
+  it('defaults an undetected domain to svg with a notice', () => {
+    const r = routeFragmentDomain(undefined);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.route.domain).toBe('svg');
+      expect(r.route.reroutedFrom).toBe('undetected');
+    }
+  });
+
+  it.each(['p5', 'three', 'glsl', 'strudel'])('refuses %s: p5 instance-mode and Three.js fragments are separate issues', (domain) => {
+    const r = routeFragmentDomain(domain);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toBe(FRAGMENT_DOMAIN_ERROR);
+  });
+});
+
+describe('buildHostProofPage (host-page proof, #1162)', () => {
+  it('embeds the fragment verbatim and declares every token on :root', () => {
+    const page = buildHostProofPage(GOOD, spec);
+    expect(page).toContain(GOOD);
+    expect(page).toContain('--art-red: #e5484d;');
+    expect(page).toContain('--art-ink: #3b5bdb;');
+    expect(page).toContain('width: 320px; height: 80px;');
+  });
+
+  it('renders a visible, editable swatch per token', () => {
+    const page = buildHostProofPage(GOOD, spec);
+    expect(page.match(/class="swatch"/g)?.length).toBe(2);
+    expect(page).toContain('<code>--art-red</code>');
+  });
+
+  it('notes the empty-token case instead of inventing tokens', () => {
+    const page = buildHostProofPage(GOOD, { tokens: [], motion: 'none' });
+    expect(page).toContain('declare them here');
+    expect(page).not.toContain('--art-red:');
+  });
+
+  it.each([
+    ['none', ['Motion: none'], false],
+    ['hover', ['prefers-reduced-motion: no-preference', '.fragment-host:hover svg'], false],
+    ['loop', ['prefers-reduced-motion: no-preference', '@keyframes sinter-fragment-drift'], true],
+  ] as const)('motion %s CSS', (motion, mustContain, wantsKeyframes) => {
+    const page = buildHostProofPage(GOOD, { ...spec, motion });
+    for (const fragment_ of mustContain) expect(page).toContain(fragment_);
+    expect(page.includes('@keyframes')).toBe(wantsKeyframes);
+    expect(page.includes('prefers-reduced-motion')).toBe(motion !== 'none');
+  });
+});
+
+describe('host-page render proof in jsdom (#1162 acceptance)', () => {
+  const page = buildHostProofPage(GOOD, spec);
+  const dom = new JSDOM(page);
+  const doc = dom.window.document;
+
+  it('embeds the fragment as a namespaced SVG inside the host container', () => {
+    const svg = doc.querySelector('.fragment-host svg');
+    expect(svg).toBeInstanceOf(dom.window.SVGElement);
+    expect(svg?.namespaceURI).toBe('http://www.w3.org/2000/svg');
+    expect(svg?.getAttribute('viewBox')).toBe('0 0 320 80');
+    expect(svg?.getAttribute('aria-hidden')).toBe('true');
+  });
+
+  it('declares every token the fragment references on :root', () => {
+    const used = new Set([...GOOD.matchAll(/var\(--([a-z0-9_-]+)/gi)].map((m) => m[1]));
+    expect([...used].sort()).toEqual(['art-ink', 'art-red']);
+    const style = doc.querySelector('style')?.textContent ?? '';
+    const rootBlock = /:root\s*\{([^}]*)\}/.exec(style)?.[1] ?? '';
+    for (const token of used) expect(rootBlock).toContain(`--${token}:`);
+  });
+
+  it('re-themes from the host stylesheet without touching the fragment markup', () => {
+    const before = doc.querySelector('.fragment-host')?.innerHTML;
+    expect(before).toContain('var(--art-red)');
+    const themed = page.replace(/--art-red: [^;]+;/, '--art-red: #00008b;');
+    const dom2 = new JSDOM(themed);
+    expect(dom2.window.document.querySelector('.fragment-host')?.innerHTML).toBe(before);
+    expect(dom2.window.document.querySelector('style')?.textContent).toContain('--art-red: #00008b;');
+  });
+
+  it('keeps styling and scripting in the host, never inside the fragment', () => {
+    expect(doc.querySelectorAll('.fragment-host svg script, .fragment-host svg style').length).toBe(0);
+    expect(doc.querySelectorAll('script').length).toBe(0);
+  });
+});
+
 describe('sinter CLI flag wiring', () => {
   const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
   const run = (args: string[]) => promisify(execFile)(process.execPath, [path.join(repoRoot, 'bin', 'sinter'), ...args],
-    { cwd: repoRoot, env: { ...process.env, NODE_ENV: 'test', DOTENV_CONFIG_QUIET: 'true' } })
+    // Provider resolution runs before the fragment gate: a keyless environment (CI) dies
+    // earlier with "Missing API key" instead of reaching the refusal under test. A dummy
+    // key lets boot proceed; the refusal still exits before any real provider call.
+    { cwd: repoRoot, env: { ...process.env, NODE_ENV: 'test', DOTENV_CONFIG_QUIET: 'true',
+      ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? 'dummy-key-for-refusal-tests' } })
     .then((r) => ({ code: 0, ...r }), (e) => ({ code: e.code as number, stdout: String(e.stdout), stderr: String(e.stderr) }));
 
   it('lists the fragment flags in --help', async () => {
@@ -173,5 +281,12 @@ describe('sinter CLI flag wiring', () => {
     const r = await run(['generate', 'a ribbon', '--domain', 'svg', '--tokens', 'art-red']);
     expect(r.code).toBe(1);
     expect(r.stderr).toContain('--tokens only apply with --output-mode fragment');
+  });
+
+  // Refused before any provider call, so this never spends.
+  it('still refuses fragment mode for a non-svg, non-custom domain', async () => {
+    const r = await run(['generate', 'a ribbon', '--domain', 'p5', '--output-mode', 'fragment']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('--output-mode fragment needs the svg domain. Add --domain svg.');
   });
 });

@@ -155,6 +155,37 @@ describe('loadRoleConfig with env vars', () => {
     expect(config.generator.baseUrl).toBe('https://api.minimax.io/v1');
   });
 
+  it('keeps the generic generator key off a dedicated endpoint', async () => {
+    vi.stubEnv('SINTER_GENERATOR_BASE_URL', 'https://dedicated-generator.invalid/v1');
+    vi.stubEnv('SINTER_LLM_BASE_URL', 'https://generic-generator.invalid/v1');
+    vi.stubEnv('SINTER_LLM_API_KEY', 'generic-test-key');
+    const roles = await loadRoleConfig('/tmp/nonexistent-sinter-test');
+    expect(roles.generator.baseUrl).toBe('https://dedicated-generator.invalid/v1');
+    expect(roles.generator.apiKey).toBeUndefined();
+  });
+
+  it('only shares the Harness key with Studio on the same configured endpoint', async () => {
+    vi.stubEnv('SINTER_HARNESS_BASE_URL', 'https://harness-role.invalid/v1');
+    vi.stubEnv('SINTER_HARNESS_API_KEY', 'harness-test-key');
+    vi.stubEnv('SINTER_STUDIO_BASE_URL', 'https://studio-role.invalid/v1');
+
+    const separate = await loadRoleConfig('/tmp/nonexistent-sinter-test');
+    expect(separate.studio.apiKey).toBeUndefined();
+    expect(separate.harness.apiKey).toBe('harness-test-key');
+
+    vi.stubEnv('SINTER_STUDIO_BASE_URL', 'https://HARNESS-ROLE.invalid:443/v1/');
+    const shared = await loadRoleConfig('/tmp/nonexistent-sinter-test');
+    expect(shared.studio.apiKey).toBe('harness-test-key');
+  });
+
+  it('keeps an unbound Studio key off the Harness fallback endpoint', async () => {
+    vi.stubEnv('SINTER_HARNESS_BASE_URL', 'https://harness-role.invalid/v1');
+    vi.stubEnv('SINTER_STUDIO_API_KEY', 'studio-only-key');
+    const roles = await loadRoleConfig('/tmp/nonexistent-sinter-test');
+    expect(roles.studio.baseUrl).toBe('https://harness-role.invalid/v1');
+    expect(roles.studio.apiKey).toBeUndefined();
+  });
+
   it('scopes generator-specific overrides away from non-generator roles', async () => {
     // Generic fixture roles (not current fleet models) prove the contract:
     // a GENERATOR_* env override cannot mutate evaluator/harness/studio.
@@ -328,9 +359,49 @@ describe('role defaults', () => {
     expect(config.generator.temperature).toBe(0.7);
     expect(config.generator.streaming).toBe(false);
     expect(config.generator.timeout).toBe(720000);
+    expect(config.generator.timeoutOverride).toBeUndefined();
     expect(config.evaluator.timeout).toBe(180000);
     expect(config.generator.maxTokens).toBe(4096);
     expect(config.generator.thinking).toEqual({ enabled: false });
+  });
+
+  it('retains an explicitly configured generator timeout even when it equals the provider default', async () => {
+    _hoisted.userConfig = JSON.stringify({ roles: { generator: {
+      baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o', timeout: 720_000,
+    } } });
+    try {
+      const config = await loadRoleConfig('/tmp/nonexistent-sinter-test');
+      expect(config.generator.timeoutOverride).toBe(720_000);
+      vi.stubEnv('SINTER_GENERATOR_TIMEOUT_MS', '7200000');
+      const envConfig = await loadRoleConfig('/tmp/nonexistent-sinter-test');
+      expect(envConfig.generator.timeoutOverride).toBe(7_200_000);
+    } finally {
+      _hoisted.userConfig = null;
+    }
+  });
+
+  it('uses the project generator deadline and inherits the user deadline when omitted', async () => {
+    const project = await fs.mkdtemp(path.join(os.tmpdir(), 'role-deadline-'));
+    const settings = path.join(project, 'config', 'sinter.json');
+    const endpoint = { baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o' };
+    _hoisted.userConfig = JSON.stringify({ roles: { generator: { ...endpoint, apiKey: 'test-only', timeout: 800_000 } } });
+    try {
+      await fs.mkdir(path.dirname(settings));
+      await fs.writeFile(settings, JSON.stringify({ llm: { timeout: 1_200_000 } }));
+      expect((await loadRoleConfig(project)).generator).toMatchObject({
+        ...endpoint, apiKey: 'test-only', timeoutOverride: 1_200_000,
+      });
+      await fs.writeFile(settings, JSON.stringify({ llm: endpoint }));
+      expect((await loadRoleConfig(project)).generator.timeoutOverride).toBe(800_000);
+      await fs.writeFile(settings, JSON.stringify({ llm: { baseUrl: 'https://other.test/v1', model: 'other' } }));
+      const other = (await loadRoleConfig(project)).generator;
+      expect(other.baseUrl).toBe('https://other.test/v1');
+      expect(other.apiKey).not.toBe('test-only');
+      expect(other.timeoutOverride).toBe(800_000);
+    } finally {
+      _hoisted.userConfig = null;
+      await fs.rm(project, { recursive: true, force: true });
+    }
   });
 
   it('evaluator defaults to temperature 0.2, streaming false', async () => {

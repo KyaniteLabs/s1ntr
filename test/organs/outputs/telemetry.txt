@@ -1,0 +1,15 @@
+## 05-query-telemetry.txt
+# organ: ledger | step: query-telemetry | data: real
+$ node <repo>/bin/sinter ledger query
+# cwd: <out>/_proj (repo: <repo>)
+# --- stdout
+{"schemaVersion":2,"ts":"2026-11-19T06:59:00.120Z","event":"infra.diskPressure","model":null,"provider":null,"role":null,"runId":null,"episodeId":null,"domain":null,"inputHash":null,"verdict":"warning
+{"schemaVersion":2,"ts":"2026-11-19T06:59:44.152Z","event":"infra.diskPressure","model":null,"provider":null,"role":null,"runId":null,"episodeId":null,"domain":null,"inputHash":null,"verdict":"warning
+{"schemaVersion":2,"ts":"2026-11-19T07:00:11.870Z","event":"infra.diskPressure","model":null,"provider":null,"role":null,"runId":null,"episodeId":null,"domain":null,"inputHash":null,"verdict":"warning
+{"schemaVersion":2,"ts":"2026-11-19T07:00:42.883Z","event":"infra.diskPressure","model":null,"provider":null,"role":null,"runId":null,"episodeId":null,"domain":null,"inputHash":null,"verdict":"warning
+{"schemaVersion":2,"ts":"2026-11-19T07:01:08.182Z","event":"infra.diskPressure","model":null,"provider":null,"role":null,"runId":null,"episodeId":null,"domain":null,"inputHash":null,"verdict":"warning
+{"schemaVersion":2,"ts":"2026-11-19T07:02:39.330Z","event":"infra.diskPressure","model":null,"provider":null,"role":null,"runId":null,"episodeId":null,"domain":null,"inputHash":null,"verdict":"warning
+{"schemaVersion":2,"ts":"2026-11-19T07:03:34.041Z","event":"infra.diskPressure","model":null,"provider":null,"role":null,"runId":null,"episodeId":null,"domain":null,"inputHash":null,"verdict":"warning
+# --- stderr
+# exit: 0
+

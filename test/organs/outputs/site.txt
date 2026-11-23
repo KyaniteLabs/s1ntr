@@ -1,0 +1,8 @@
+# organ: site | data: real command, fake provider
+$ sinter site seed --slots 2
+[CLI] Resolved provider: openai @ http://127.0.0.1:33991/v1 (model=gpt-5.4)
+Seeded slot "home-hero" (/, domain: p5)
+Seeded slot "home-about" (/, domain: p5)
+Seeded 2 slot(s) → <work><path>
+# exit: 0
+

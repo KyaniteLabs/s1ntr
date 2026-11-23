@@ -312,17 +312,20 @@ function loadSystemLessons(domain: string): HardeningHint[] {
     if (!existsSync(lessonsPath)) return [];
     const parsed = JSON.parse(readFileSync(lessonsPath, 'utf8')) as HardeningHint[];
     return parsed.filter(h => h.domains === 'all' || (Array.isArray(h.domains) && h.domains.includes(domain)));
-  } catch { return []; }
+  } catch (error) {
+    console.warn(`[teaching] system lessons file is invalid and was skipped: ${error instanceof Error ? error.message : String(error)}`);
+    return [];
+  }
 }
 
 const HARDENING_HINTS: HardeningHint[] = [
   { id: 'raw_code_only', text: 'Output only raw code. No prose, no markdown fences, no explanation.', domains: 'all' },
   { id: 'include_required_imports', text: 'Include all required import statements or CDN links for the target library.', domains: ['tone', 'strudel', 'hydra', 'revideo', 'p5'] },
-  { id: 'full_html_shell', text: 'Wrap output in a complete, runnable HTML document (doctype + html + head + body).', domains: ['tone', 'strudel', 'hydra', 'p5', 'kinetic'] },
+  { id: 'full_html_shell', text: 'Wrap output in a complete, runnable HTML document (doctype + html + head + body).', domains: ['tone', 'strudel', 'hydra', 'p5', 'kinetic', 'nbe'] },
   { id: 'p5_valid_syntax_no_shadowing', text: 'Emit syntactically valid JavaScript only — balanced braces/parens/brackets, complete statements. Never declare local variables or functions that shadow p5.js built-ins (pop, push, redraw, scale, rotate, translate, background, fill).', domains: ['p5'] },
-  { id: 'tone_transport_pattern', text: 'Use Tone.Transport.scheduleRepeat or Tone.Sequence for rhythmic patterns. Do not use Tone.start() without Transport.', domains: ['tone'] },
+  { id: 'tone_transport_pattern', text: 'Use Tone.Transport.scheduleRepeat or Tone.Sequence for rhythmic patterns. Do not use Tone.start() without Transport. Tone.Transport and Tone.Destination are ready-made objects: never write new Tone.Transport() or Tone.Destination(); waveforms are set with oscillator.type, not setValueAtTime.', domains: ['tone'] },
   { id: 'tone_synth_chain', text: 'Chain: Synth -> Channel/Effects -> toDestination(). Include Tone.Transport.start().', domains: ['tone'] },
-  { id: 'hydra_api_constraints', text: 'Hydra has NO .sin()/.cos()/.sqrt()/.pow()/.feedback() methods — never call JS math on sources. Build visuals from osc()/noise()/shape()/gradient() chained with .rotate()/.scale()/.modulate()/.kaleid()/.repeat()/.color(); math-like shaping via .mult()/.add() with other sources. ALWAYS end the chain with .out().', domains: ['hydra'] },
+  { id: 'hydra_api_constraints', text: 'Hydra has NO .sin()/.cos()/.sqrt()/.pow()/.feedback() methods — never call JS math on sources. Build visuals from osc()/noise()/shape()/gradient() chained with .rotate()/.scale()/.modulate()/.kaleid()/.repeat()/.color(); math-like shaping via .mult()/.add() with other sources. .modulate() and .mult()/.add()/.blend()/.diff()/.layer()/.mask() take a SOURCE first, then an amount: .modulate(noise(3), 0.1), .mult(osc(4), 0.5); never .modulate(0.5), .modulate(() => ...) or an empty .modulate(). Number transforms (.scale/.rotate/.scrollX) take numbers or () => ... directly. ALWAYS end the chain with .out().', domains: ['hydra'] },
   { id: 'strudel_stack', text: 'Wrap patterns in stack() to combine multiple voices. End with the bare stack(...) expression: no .out() (that is a Kabelsalat signal method; on a pattern it routes the sound away and the piece plays silence).', domains: ['strudel'] },
   { id: 'strudel_sound_note', text: 'Use s() for samples and note() for synthesized notes.', domains: ['strudel'] },
   { id: 'strudel_pattern_strings', text: 'Pass quoted pattern strings to s(), sound(), and note() — never raw numbers like s(100).', domains: ['strudel'] },

@@ -1,12 +1,13 @@
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { mkdir, readFile } from 'node:fs/promises';
+import { meetsQualityFloor } from '../aesthetic/qualityFloor.js';
+import { mkdir, readFile, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { productPurposeForRole, withLiminalProductTransportAuthority, withProviderAttemptGuard,
   type LiminalProductTransportGrant, type ProductTransportPurpose } from '../llm/LLMClient.js';
 import { fatalShaderEvidence } from './LiminalProductionEffects.js';
 import { writeFileAtomic } from '../utils/atomicWrite.js';
-import { classifyEffectFailure, LiminalEffectBroker } from './LiminalEffectBroker.js';
+import { UnsentTransportError, classifyEffectFailure, LiminalEffectBroker } from './LiminalEffectBroker.js';
 import { LiminalReceiptProjector, rebuildOperationTrace } from './LiminalReceiptProjector.js';
 import { LiminalOperationKernel } from './LiminalOperationKernel.js';
 import { liminalDurablePayloadDigest } from './LiminalPayloadDigest.js';
@@ -63,6 +64,10 @@ export interface RenderedObservation {
   readonly earlyFrameSize?: { readonly width: number; readonly height: number };
   readonly lateFrameSize?: { readonly width: number; readonly height: number };
   readonly runtimeErrors: readonly string[];
+  /** The renderer's own stamp that it ran the medium natively (Revideo stills, Blender); absent for browser pages. */
+  readonly rendered?: boolean;
+  /** Typed reason a failed render failed (renderer verdict, not a text match over the errors). */
+  readonly failureCause?: 'host-contention' | 'infra' | 'candidate';
   readonly timingMs?: number;
   readonly rendererEnvironmentDigest?: string;
   readonly containment?: {
@@ -89,6 +94,8 @@ export interface RenderedObservation {
     readonly silentShare?: number;
     readonly noisiness?: number | null;
     readonly floorFailure?: string;
+    /** Which capture code made these samples (AUDIO_CAPTURE_VERSION). Absent on records stored before the stamp: 2x-stretched tone audio cannot be told apart from good audio without it. */
+    readonly captureVersion?: number;
   };
 }
 
@@ -97,10 +104,18 @@ export interface EvaluatorResult {
   readonly confidence?: number;
   readonly failureClass?: string;
   readonly reasoning?: string;
+  /** Judge's 1-10 rating of how hard the brief is (not of this artifact). See GenerationEvaluation.difficulty. */
+  readonly difficulty?: number;
+  /** 'unscored' when the evaluator gave no verdict: `score` is then a placeholder, never a grade. */
+  readonly scoreState?: 'unscored';
+  /** Why no verdict was produced (evaluator, limit, parse problem). */
+  readonly unscoredReason?: string;
   readonly degraded: boolean;
   readonly identityValid: boolean;
   readonly evaluatorIdentity: string;
   readonly evidenceDigest: string | null;
+  /** Two-stage judge receipt (#1731): both seats, dials and raw stage output. */
+  readonly judgeReceipt?: unknown;
 }
 
 export interface LiminalCommandEffects {
@@ -166,7 +181,7 @@ export interface LiminalEffectReservation {
   readonly fence: number;
 }
 
-export type LiminalEffectOutcome = 'succeeded' | 'failed' | 'ambiguous';
+export type LiminalEffectOutcome = 'succeeded' | 'failed' | 'ambiguous' | 'unsent';
 
 export interface LiminalOperationEvent {
   readonly operationId: string;
@@ -183,6 +198,7 @@ export interface LiminalOperationAdmission {
 }
 
 export interface LiminalOperationJournal {
+  readAdmission?(key: string): Promise<LiminalOperationAdmission | null>;
   begin(key: string, proposed: LiminalOperationAdmission): Promise<LiminalOperationAdmission>;
   reserveTransportAttempt(operationId: string, maximum: number, payload: unknown): Promise<number>;
   /** Releases the attempt only when `reason` is a definite failure (#1323). */
@@ -209,6 +225,8 @@ export interface BoundRenderedEvidence {
   readonly rendererIdentity: string;
   readonly earlyFrameDigest: string | null;
   readonly lateFrameDigest: string | null;
+  readonly rendered?: boolean;
+  readonly failureCause?: RenderedObservation['failureCause'];
   readonly earlyFrameSize?: RenderedObservation['earlyFrameSize'];
   readonly lateFrameSize?: RenderedObservation['lateFrameSize'];
   readonly runtimeErrors: readonly string[];
@@ -243,6 +261,8 @@ export interface LiminalAuthorityReceipt {
   readonly disabledTeachingReaders: readonly string[];
   readonly empiricalContextDigests: readonly string[];
   readonly learningEligible: boolean;
+  /** Digest of the evaluation the receipt vouches for (score, judge, evidence); absent on historical receipts. */
+  readonly evaluationDigest?: string;
   readonly signature: string;
 }
 
@@ -300,10 +320,42 @@ function canonical(value: unknown): string {
   return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonical(record[key])}`).join(',')}}`;
 }
 
+/** Binds the judged result (score, judge identity, flags, failure class) into the signed receipt. */
+export function evaluationBindingDigest(evaluation: {
+  readonly score: number; readonly degraded: boolean; readonly identityValid: boolean;
+  readonly evaluatorIdentity: string; readonly evidenceDigest: string | null;
+  readonly failureClass?: string; readonly admissionEligible?: boolean;
+  readonly rejectionReasons?: readonly string[]; readonly scoreState?: 'unscored';
+}): string {
+  return digest({ score: evaluation.score, degraded: evaluation.degraded,
+    identityValid: evaluation.identityValid, evaluatorIdentity: evaluation.evaluatorIdentity,
+    evidenceDigest: evaluation.evidenceDigest, failureClass: evaluation.failureClass ?? null,
+    admissionEligible: evaluation.admissionEligible ?? false,
+    ...(evaluation.rejectionReasons?.length ? {
+      rejectionReasons: evaluation.rejectionReasons, scoreState: evaluation.scoreState ?? null,
+    } : {}) });
+}
+
+/**
+ * Which receipt scheme signed this Create. Builds before 0eff406b4 (2026-11-16, #1790) put no
+ * evaluationDigest in the receipt, so their score is unsigned: 'legacy-unbound'. A receipt that does
+ * carry the digest must match it ('bound'); a present-but-wrong digest is 'mismatch' and never admitted.
+ * The receipt signature and evidence link are checked separately in either scheme.
+ */
+export type EvaluationBinding = 'bound' | 'legacy-unbound' | 'mismatch';
+export function classifyEvaluationBinding(receipt: { readonly evaluationDigest?: string },
+  evaluation: Parameters<typeof evaluationBindingDigest>[0]): EvaluationBinding {
+  if (receipt.evaluationDigest === undefined) return 'legacy-unbound';
+  if (receipt.evaluationDigest === evaluationBindingDigest(evaluation)) return 'bound';
+  // Historical receipts signed the score and admission flag, before reasons were bound.
+  const legacyDigest = evaluationBindingDigest({ ...evaluation, rejectionReasons: undefined });
+  return receipt.evaluationDigest === legacyDigest ? 'bound' : 'mismatch';
+}
+
 function digest(value: unknown): string {
   const input = typeof value === 'string' || Buffer.isBuffer(value)
     ? value
-    : canonical(value);
+    : canonical(value ?? null);
   return createHash('sha256').update(input).digest('hex');
 }
 
@@ -318,6 +370,9 @@ function bindEvidence(observation: RenderedObservation): BoundRenderedEvidence {
     earlyFrameSize: observation.earlyFrameSize,
     lateFrameSize: observation.lateFrameSize,
     runtimeErrors: [...observation.runtimeErrors],
+    // Only when present: renders without these keep their existing evidence digests.
+    ...(observation.rendered !== undefined ? { rendered: observation.rendered } : {}),
+    ...(observation.failureCause ? { failureCause: observation.failureCause } : {}),
     timingMs: observation.timingMs,
     rendererEnvironmentDigest: observation.rendererEnvironmentDigest,
     containment: observation.containment ? { ...observation.containment } : undefined,
@@ -379,6 +434,10 @@ export class InMemoryLiminalOperationJournal implements LiminalOperationJournal 
   }>();
   private nextFence = 1;
 
+  readAdmission(key: string): Promise<LiminalOperationAdmission | null> {
+    return Promise.resolve(this.operations.get(key) ?? null);
+  }
+
   async begin(key: string, proposed: LiminalOperationAdmission): Promise<LiminalOperationAdmission> {
     const existing = this.operations.get(key);
     if (existing) {
@@ -396,7 +455,7 @@ export class InMemoryLiminalOperationJournal implements LiminalOperationJournal 
     const entry = [...this.operations.entries()].find(([, value]) => value.operationId === operationId);
     if (!entry) throw new Error('UNKNOWN_LIMINAL_OPERATION');
     const [key, operation] = entry;
-    if (operation.attemptsConsumed >= maximum) throw new Error('TRANSPORT_ATTEMPT_CAP_EXHAUSTED');
+    if (operation.attemptsConsumed >= maximum) throw new UnsentTransportError('TRANSPORT_ATTEMPT_CAP_EXHAUSTED');
     const attempt = operation.attemptsConsumed + 1;
     this.operations.set(key, Object.freeze({ ...operation, attemptsConsumed: attempt }));
     await this.append(operationId, 'transport-started', { ...payload as object, attempt });
@@ -434,10 +493,8 @@ export class InMemoryLiminalOperationJournal implements LiminalOperationJournal 
       effect.reservation.operationId === operationId && effect.reservation.kind === kind);
     if (prior) {
       if (prior.state === 'reserved') return prior.reservation;
-      // A prior attempt that failed should not permanently block retries.
-      // Drop the stale reservation and mint a fresh one; the audit trail
-      // for the failed attempt is preserved in the events log (#865).
-      if (prior.state !== 'failed') throw new Error('EFFECT_OUTCOME_UNRESOLVED');
+      // A legacy paid failure has no proof of non-dispatch. Local renders retain their retry behavior.
+      if (prior.state !== 'unsent' && !(kind === 'render' && prior.state === 'failed')) throw new Error('EFFECT_OUTCOME_UNRESOLVED');
       this.effects.delete(prior.reservation.effectId);
     }
     const reservation = Object.freeze({ operationId, kind,
@@ -608,9 +665,33 @@ export function createRotatingTestReceiptAuthority(input: {
     input.verificationSecrets, new Set(input.revokedKeyDigests ?? []));
 }
 
+export const TRUSTED_KEYS_FILE = 'trusted-verification-keys';
+
+/**
+ * Optional, off unless the file exists: other hosts' receipt keys this host may VERIFY with (receipts are
+ * HMAC, so verifying needs the owner's secret). The keys never sign here. The owner of each key places
+ * it; sinter never fetches, guesses or re-signs one. One 64-hex key per line, '#' comments allowed;
+ * the file must not be group or world readable.
+ */
+export async function readTrustedVerificationKeys(file: string): Promise<readonly string[]> {
+  let mode: number; let text: string;
+  try {
+    mode = (await stat(file)).mode;
+    text = await readFile(file, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+  if ((mode & 0o077) !== 0) throw new Error('TRUSTED_VERIFICATION_KEYS_FILE_PERMISSIONS');
+  const keys = text.split('\n').map(line => line.replace(/#.*/, '').trim()).filter(Boolean);
+  if (!keys.every(key => /^[0-9a-f]{64}$/.test(key))) throw new Error('TRUSTED_VERIFICATION_KEYS_FILE_INVALID');
+  return [...new Set(keys)];
+}
+
 /** Bootstrap the one host-held production authority; test helpers cannot upgrade tiers. */
 export async function bootstrapProductionReceiptAuthority(
   keyFile: string,
+  { readOnly = false }: { readonly readOnly?: boolean } = {},
 ): Promise<LiminalReceiptAuthority> {
   if (!path.isAbsolute(keyFile)) throw new Error('Production receipt key path must be absolute');
   const canonicalKeyFile = path.join(os.homedir(), '.sinter', 'authority',
@@ -622,13 +703,14 @@ export async function bootstrapProductionReceiptAuthority(
   try {
     secret = (await readFile(keyFile, 'utf8')).trim();
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    if (readOnly || (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     await mkdir(path.dirname(keyFile), { recursive: true });
     secret = randomBytes(32).toString('hex');
     await writeFileAtomic(keyFile, `${secret}\n`, { mode: 0o600 });
   }
   if (!/^[0-9a-f]{64}$/.test(secret)) throw new Error('Production receipt key is invalid');
-  return new HmacReceiptAuthority(secret, 'production', [secret], new Set(),
+  const trusted = await readTrustedVerificationKeys(path.join(path.dirname(keyFile), TRUSTED_KEYS_FILE));
+  return new HmacReceiptAuthority(secret, 'production', [secret, ...trusted.filter(k => k !== secret)], new Set(),
     await bootstrapProductionCreativeAdmissionSigner(keyFile));
 }
 
@@ -702,6 +784,7 @@ function decideAdmission(
   const reasons: string[] = [];
   if (mode === 'legacy' || evidence.evidenceDigest === null) reasons.push('rendered-evidence-required');
   if (evidence.status !== 'rendered') reasons.push(`rendered-evidence-${evidence.status}`);
+  if (evidence.failureCause === 'host-contention') reasons.push('render-host-contention');
   if (evaluation.degraded) reasons.push('evaluation-degraded');
   if (!evaluation.identityValid) reasons.push('evaluator-identity-invalid');
   if (evaluation.evaluatorIdentity !== expectedEvaluator) reasons.push('evaluator-identity-mismatch');
@@ -715,6 +798,8 @@ function decideAdmission(
   if (evaluation.evidenceDigest !== evidence.evidenceDigest) reasons.push('evidence-digest-mismatch');
   if (evidence.audio.relevant && evidence.audio.state !== 'audible') reasons.push('audio-playback-unproven');
   if (evidence.audio.relevant && evidence.audio.floorFailure) reasons.push('audio-floor-failed');
+  // The judge's own rubric calls a score this low poor or broken; a black frame scored 0.02 was being accepted (#1777).
+  if (!evaluation.degraded && !meetsQualityFloor(evaluation.score)) reasons.push('below-quality-floor');
   return Object.freeze({ ...evaluation, admissionEligible: reasons.length === 0,
     rejectionReasons: Object.freeze(reasons) });
 }
@@ -763,12 +848,14 @@ const INFRA_RENDER_ERROR = /failed to initialize headless browser|browser contex
  * Why a run that never reached the evaluator has no score: the render
  * machinery was unavailable (`infra`), or the piece did not render (`render`).
  * Both are existing LoopConfig classes; before this the line read
- * `failureClass=unknown` (#1603).
+ * `failureClass=unknown` (#1603). The renderer's typed verdict wins; only
+ * evidence from before the typed field falls back to reading the error text.
  */
 export function unscoredFailureClass(
-  evidence: Pick<BoundRenderedEvidence, 'status' | 'runtimeErrors'>,
+  evidence: Pick<BoundRenderedEvidence, 'status' | 'runtimeErrors'> & Partial<Pick<BoundRenderedEvidence, 'failureCause'>>,
 ): 'infra' | 'render' {
   if (evidence.status === 'missing') return 'infra';
+  if (evidence.failureCause) return evidence.failureCause === 'candidate' ? 'render' : 'infra';
   return evidence.runtimeErrors.some(error => INFRA_RENDER_ERROR.test(error)) ? 'infra' : 'render';
 }
 
@@ -784,7 +871,8 @@ function canEvaluateRenderedEvidence(
     && evidence.rendererIdentity === command.rendererIdentity
     && evidence.runtimeErrors.length === 0
     && containmentValid
-    && (!evidence.audio.relevant || evidence.audio.state === 'audible');
+    // Sol L3-08: a recording that already failed the audio floor is rejected on that measurement; it never buys a judge call.
+    && (!evidence.audio.relevant || (evidence.audio.state === 'audible' && !evidence.audio.floorFailure));
 }
 
 /** Thin product composition root; domain authorities remain behind injected ports. */
@@ -848,35 +936,52 @@ export class LiminalCommandService {
   }
 
   async runJudgmentEffect<T>(input: { idempotencyKey: string; binding: unknown;
-    identity: string; role: LiminalRole; maxTransportAttempts: 1;
-    effect: () => Promise<T> }): Promise<T> {
+    identity: string; role: LiminalRole; maxTransportAttempts: number;
+    countActualAttempts?: boolean; replayOnly?: boolean; effect: () => Promise<T> }): Promise<T> {
     const purpose = productPurposeForRole(input.role);
     if (!purpose) throw new Error('LIMINAL_PRODUCT_TRANSPORT_ROLE_INVALID');
-    const admission = await this.kernel.beginRoot(input.idempotencyKey, digest(input.binding));
-    return this.broker.invoke({ operationId: admission.operationId, kind: 'judgment',
-      authority: { identity: input.identity, bindingDigest: digest(input.binding) },
-      effect: reservation => withLiminalProductTransportAuthority(
-        createTransportGrant(this.options.authority, reservation, purpose, input.role), async () => {
-        await this.options.journal.reserveTransportAttempt(admission.operationId,
-          input.maxTransportAttempts, { kind: 'judgment', identity: input.identity });
-        try {
-          return await withProviderAttemptGuard(() => {
-            // Guard registered for diagnostics; true nesting protection is enforced
-            // by the executor attestation reservation/completion flow in LLMClient.
-          }, input.effect);
-        } catch (error) {
-          await this.options.journal.failTransportAttempt(admission.operationId, error);
-          throw error;
-        }
-      }) });
+    if (!Number.isSafeInteger(input.maxTransportAttempts) || input.maxTransportAttempts < 0) {
+      throw new Error('LIMINAL_PRODUCT_TRANSPORT_CAP_INVALID');
+    }
+    const bindingDigest = digest(input.binding);
+    if (input.replayOnly && !this.options.journal.readAdmission) throw new Error('JOURNAL_REPLAY_READ_UNSUPPORTED');
+    const admission = input.replayOnly ? await this.options.journal.readAdmission!(input.idempotencyKey)
+      : await this.kernel.beginRoot(input.idempotencyKey, bindingDigest);
+    if (!admission) throw new Error('LOOP_REPLAY_EFFECT_MISSING');
+    if (admission.commandDigest !== bindingDigest) throw new Error('IDEMPOTENCY_KEY_REBOUND');
+    const reserve = (requestDigest?: string) => this.options.journal.reserveTransportAttempt(
+      admission.operationId, input.maxTransportAttempts, { kind: 'judgment', identity: input.identity, ...(requestDigest ? { requestDigest } : {}) });
+    return this.broker.invoke({ operationId: admission.operationId, kind: 'judgment', replayOnly: input.replayOnly,
+      authority: { identity: input.identity, bindingDigest },
+      effect: async reservation => {
+        const grant = createTransportGrant(this.options.authority, reservation, purpose, input.role);
+        let attempted = false;
+        const countedGrant = input.countActualAttempts ? { ...grant, reserveAttempt: async (requestDigest: string) => {
+          await reserve(requestDigest);
+        } } : grant;
+        return withLiminalProductTransportAuthority(countedGrant, async () => {
+          if (!input.countActualAttempts) {
+            await reserve();
+            attempted = true;
+          }
+          try {
+            return await (input.countActualAttempts ? input.effect() : withProviderAttemptGuard(() => {}, input.effect));
+          } catch (error) {
+            // A later effect failure cannot establish that a counted request was unsent.
+            if (attempted) await this.options.journal.failTransportAttempt(admission.operationId, error);
+            throw error;
+          }
+        });
+      } });
   }
 
-  async readVerifiedArtifact(result: LiminalCommandResult): Promise<GeneratedArtifact> {
+  async readVerifiedArtifact(result: LiminalCommandResult,
+    store: Pick<LiminalArtifactStore, 'read'> = this.options.artifacts): Promise<GeneratedArtifact> {
     if (!this.verifyReceipt(result.receipt)
       || artifactRoot(result.artifacts) !== result.receipt.artifactDigest) {
       throw new Error('LIMINAL_ARTIFACT_RECEIPT_INVALID');
     }
-    const artifact = await this.options.artifacts.read(result.operationId);
+    const artifact = await store.read(result.operationId);
     if (!artifact || digest(artifact.source) !== result.artifacts.sourceDigest
       || digest(artifact.playable) !== result.artifacts.playableDigest
       || digest(artifact.provenance) !== result.artifacts.provenanceDigest) {
@@ -1030,6 +1135,9 @@ export class LiminalCommandService {
         score: 0,
         degraded: true,
         failureClass: unscoredFailureClass(evidence),
+        scoreState: 'unscored' as const,
+        unscoredReason: evidence.audio.relevant && evidence.audio.floorFailure
+          ? `audio floor failed before judging: ${evidence.audio.floorFailure}` : 'rendered evidence not evaluable',
         identityValid: true,
         evaluatorIdentity: roles.evaluator,
         evidenceDigest: evidence.evidenceDigest,
@@ -1057,6 +1165,7 @@ export class LiminalCommandService {
       // C0 proves perception only. Owner acceptance is a separate product action,
       // so this command can never authorize learning by itself.
       learningEligible: false,
+      evaluationDigest: evaluationBindingDigest(evaluation),
     });
     await this.options.journal.append(operationId, 'receipt-projected', {
       authorityTier: receipt.authorityTier,
@@ -1091,7 +1200,7 @@ export class LiminalCommandService {
     validateCommand(command);
     const roles = resolvedRoles(command);
     this.assertReevaluationParent(command, prior, evidenceSource, roles);
-    await this.readVerifiedArtifact(prior);
+    const parentArtifact = await this.readVerifiedArtifact(prior);
     if (!/^[0-9a-f]{64}$/.test(spec.actionAuthorityDigest)) {
       throw new Error('REEVALUATION_ACTION_AUTHORITY_INVALID');
     }
@@ -1110,7 +1219,7 @@ export class LiminalCommandService {
     await this.options.journal.authorizeDomain(admission.operationId, command.domain);
     await this.persistObservedEvidence(admission.operationId, observation, evidence);
     return this.judgeChild(command, prior, roles, spec, admission.operationId,
-      observation, evidence);
+      observation, evidence, parentArtifact.source);
   }
 
   /**
@@ -1155,11 +1264,13 @@ export class LiminalCommandService {
     });
     const evidence = bindEvidence(observation);
     if (!canEvaluateRenderedEvidence(command, evidence)) {
-      throw new Error('REEVALUATION_RENDERED_EVIDENCE_INVALID');
+      // Sol L3-14: keep the typed evidence of the failed fresh render, and name the class in the error.
+      await this.options.journal.append(admission.operationId, 'render-observed', evidence);
+      throw new Error(`REEVALUATION_RENDERED_EVIDENCE_INVALID: ${unscoredFailureClass(evidence)}`);
     }
     await this.persistObservedEvidence(admission.operationId, observation, evidence);
     return this.judgeChild(command, prior, roles, spec, admission.operationId,
-      observation, evidence);
+      observation, evidence, artifact.source);
   }
 
   private assertReevaluationParent(command: LiminalCreativeCommand,
@@ -1216,14 +1327,15 @@ export class LiminalCommandService {
   private async judgeChild(command: LiminalCreativeCommand, prior: LiminalCommandResult,
     roles: Readonly<Record<LiminalRole, string>>, spec: LiminalReevaluationSpec,
     operationId: string, observation: RenderedObservation,
-    evidence: ReturnType<typeof bindEvidence>): Promise<LiminalCommandResult> {
+    evidence: ReturnType<typeof bindEvidence>, source: string): Promise<LiminalCommandResult> {
     const rawEvaluation = await this.broker.invoke({
       operationId, kind: 'evaluation',
       authority: { identity: roles.evaluator },
       effect: reservation => withLiminalProductTransportAuthority(
         createTransportGrant(this.options.authority, reservation, 'evaluation', 'evaluator'),
         () => this.options.effects.evaluate({
-        observation, domain: command.domain, prompt: command.prompt, evidenceDigest: evidence.evidenceDigest,
+        // Sol L3-14: the child judges the same source the root did (audio and ASCII rubrics read it).
+        observation, domain: command.domain, source, prompt: command.prompt, evidenceDigest: evidence.evidenceDigest,
         identity: roles.evaluator,
         startTransport: payload => this.options.journal.reserveTransportAttempt(
           operationId, spec.maxTransportAttempts,
@@ -1253,6 +1365,7 @@ export class LiminalCommandService {
       empiricalContextDigests: prior.receipt.empiricalContextDigests,
       // Re-evaluation repairs evidence judgment; it does not manufacture owner acceptance.
       learningEligible: false,
+      evaluationDigest: evaluationBindingDigest(evaluation),
     });
     await this.options.journal.append(operationId, 'receipt-projected', {
       authorityTier: receipt.authorityTier, signature: receipt.signature,

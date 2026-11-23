@@ -14,7 +14,7 @@
 
 import { generatorRegistry, GeneratorEntry, type GeneratorResult } from './GeneratorRegistry.js';
 import type { TierBasedGenerator } from './TierBasedGenerator.js';
-import { revideoConfidence } from './revideo/revideoConfidence.js';
+import { nextDomainActive } from '../config/nextDomains.js';
 
 async function generateWithFitnessMetadata(
   generator: TierBasedGenerator,
@@ -83,23 +83,23 @@ const datavizConfidence = (prompt: string): number => {
 };
 
 /**
- * Confidence for the `meta` custom-domain catch-all generator.
+ * Confidence for the `custom` catch-all (formerly `meta`) generator.
  *
- * CRITICAL — `meta` is EXPLICIT-ONLY / LOW priority. It is the open-ended catch
+ * CRITICAL — `custom` is EXPLICIT-ONLY / LOW priority. It is the open-ended catch
  * for mediums OUTSIDE the 14 fixed domains, so it must NEVER outscore or hijack a
  * prompt that maps to a real domain (p5/three/dataviz/...), and it must NEVER be
  * the default/fallback for unknown prompts. It only fires on:
- *   1. The explicit `--domain meta` route (injected as "Target creative domain: meta"
+ *   1. The explicit `--domain custom` route (injected as "Target creative domain: custom"
  *      by the CLI/intent path — forced to confidence 1 by dispatchForRequestedDomain,
  *      but scored here too so detection agrees).
  *   2. Clear meta KEYWORDS that explicitly ask for a custom/arbitrary medium.
  * Everything else returns 0 so default routing is unchanged.
  */
-const metaConfidence = (prompt: string): number => {
+const customConfidence = (prompt: string): number => {
   const lower = prompt.toLowerCase();
-  // Explicit route: the CLI/intent layer injects this when --domain meta is used.
-  if (/target creative domain:\s*meta\b/.test(lower)) return 0.99;
-  // Explicit "use the meta/custom-domain generator" style asks.
+  // Explicit route: the CLI/intent layer injects this when --domain custom is used.
+  if (/target creative domain:\s*(?:custom|meta)\b/.test(lower)) return 0.99;
+  // Explicit "use the custom-domain generator" style asks.
   if (/\b(custom|arbitrary|invent(?:ed)?|made[-\s]?up|novel)\s+(creative\s+)?(domain|medium)\b/.test(lower)) return 0.95;
   if (/\b(any|some)\s+medium\b/.test(lower)) return 0.95;
   if (/\binvent\s+a\s+medium\b|\bmake\s+up\s+a\b|\ba\s+medium\s+where\b|\bmeta[-\s]?generator\b|\bcustom[-\s]?domain\b/.test(lower)) return 0.95;
@@ -108,7 +108,7 @@ const metaConfidence = (prompt: string): number => {
 
 /**
  * Confidence for the `blender` (bpy headless render) generator. Explicit-only
- * like meta: the --domain route, or a prompt that clearly names bpy / a
+ * like custom: the --domain route, or a prompt that clearly names bpy / a
  * Blender scene. A bare "blender" word (smoothies, metaphors) scores 0.
  */
 const blenderConfidence = (prompt: string): number => {
@@ -241,17 +241,6 @@ const nbeConfidence = (prompt: string): number => {
   return 0;
 };
 
-/** Confidence for HyperFrames asset compositing patterns */
-const hyperframesConfidence = (prompt: string): number => {
-  const lower = prompt.toLowerCase();
-  if (/\b(?:do not|don't|dont|never|avoid)\s+(?:use\s+)?hyperframes?\b/.test(lower)) return 0;
-  if (/\bhyperframes?\b/.test(lower)) return 0.95;
-  if (/\b(promo|trailer|slideshow|presentation|title\s*card|subtitle|caption|social\s*media)\b/.test(lower)) return 0.90;
-  if (/\b(composite|compose|assemble|overlay|watermark|intro|outro)\b/.test(lower)) return 0.85;
-  if (/\b(video|animation)\b/.test(lower) && /\b(images?|clips?|audio|music|narration)\b/.test(lower)) return 0.80;
-  return 0;
-};
-
 // --- Generator entries ---
 
 
@@ -276,23 +265,17 @@ const threeEntry: GeneratorEntry = {
   },
 };
 
-const revideoEntry: GeneratorEntry = {
-  name: 'revideo',
-  canHandle: revideoConfidence,
-  generate: async (prompt: string, params?: Record<string, unknown>) => {
-    const { RevideoGenerator } = await import('./revideo/RevideoGenerator.js');
-    const gen = new RevideoGenerator();
-    return generateWithFitnessMetadata(gen, () => gen.generate(prompt, params));
-  },
-};
+/** Datamosh routes only on an explicit target domain: the bare word never selects it. */
+export const datamoshConfidence = (prompt: string): number =>
+  /target creative domain:\s*datamosh\b/i.test(prompt) ? 0.99 : 0;
 
-const hyperframesEntry: GeneratorEntry = {
-  name: 'hyperframes',
-  canHandle: hyperframesConfidence,
-  generate: async (prompt: string, params?: Record<string, unknown>) => {
-    const { HyperFramesGenerator } = await import('./hyperframes/HyperFramesGenerator.js');
-    const gen = new HyperFramesGenerator();
-    return generateWithFitnessMetadata(gen, () => gen.generate(prompt, params));
+const datamoshEntry: GeneratorEntry = {
+  name: 'datamosh',
+  canHandle: datamoshConfidence,
+  generate: async (prompt: string) => {
+    const { DatamoshGenerator } = await import('./next/DatamoshGenerator.js');
+    const { LLMClient } = await import('../llm/LLMClient.js');
+    return { code: await new DatamoshGenerator(new LLMClient({ role: 'generator' })).generate(prompt) };
   },
 };
 
@@ -321,12 +304,12 @@ const datavizEntry: GeneratorEntry = {
   },
 };
 
-const metaEntry: GeneratorEntry = {
-  name: 'meta',
-  canHandle: metaConfidence,
+const customEntry: GeneratorEntry = {
+  name: 'custom',
+  canHandle: customConfidence,
   generate: async (prompt: string, params?: Record<string, unknown>) => {
-    const { MetaGenerator } = await import('./meta/MetaGenerator.js');
-    const gen = new MetaGenerator();
+    const { CustomGenerator } = await import('./custom/CustomGenerator.js');
+    const gen = new CustomGenerator();
     return generateWithFitnessMetadata(gen, () => gen.generate(prompt, params));
   },
 };
@@ -462,10 +445,8 @@ let pluginSummary: PluginLoadSummary = { loaded: 0, total: 0, failed: 0 };
 const staticGeneratorEntries: GeneratorEntry[] = [
   shaderEntry,
   threeEntry,
-  revideoEntry,
-  hyperframesEntry,
   datavizEntry,
-  metaEntry,
+  customEntry,
   blenderEntry,
   svgEntry,
   htmlEntry,
@@ -529,7 +510,9 @@ function registerMissingStaticGenerators(): number {
   const registeredNames = new Set(generatorRegistry.getAll().map((entry) => entry.name));
   let registered = 0;
 
-  for (const entry of staticGeneratorEntries) {
+  // Next-release domains stay unregistered until their flag is on (SINTER_NEXT_DOMAINS).
+  const entries = nextDomainActive('datamosh') ? [...staticGeneratorEntries, datamoshEntry] : staticGeneratorEntries;
+  for (const entry of entries) {
     if (registeredNames.has(entry.name)) continue;
     generatorRegistry.register(entry);
     registeredNames.add(entry.name);
@@ -602,7 +585,7 @@ export {
   svgConfidence,
   htmlConfidence,
   datavizConfidence,
-  metaConfidence,
+  customConfidence,
   blenderConfidence,
   asciiConfidence,
   textgenConfidence,
@@ -610,7 +593,6 @@ export {
   hydraConfidence,
   toneConfidence,
   kineticConfidence,
-  hyperframesConfidence,
   p5Confidence,
   nbeConfidence,
 };

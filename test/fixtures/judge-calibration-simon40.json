@@ -1,0 +1,247 @@
+{
+ "source": "learning/calibration-40.labeled.jsonl (S1NTR art batch, stratified 8 per score band, labelled by Simon 2026-11-17)",
+ "judge": "glm-5.3-flash (production)",
+ "n": 40,
+ "rows": [
+  {
+   "id": "out_hy4f_hydra-feedback-medium-r1-pf1",
+   "score": 0.02325,
+   "blindScore": 0.0,
+   "label": "bad"
+  },
+  {
+   "id": "out_ds0731_hydra-crt-medium-r2",
+   "score": 0.02625,
+   "blindScore": 0.0,
+   "label": "bad"
+  },
+  {
+   "id": "out_hy4f_v16-vhs-tunnel-r2",
+   "score": 0.04625,
+   "blindScore": 0.02,
+   "label": "bad"
+  },
+  {
+   "id": "out_ds1017_hydra-feedback-high-r2",
+   "score": 0.05775,
+   "blindScore": 0.25,
+   "label": "bad"
+  },
+  {
+   "id": "out_terra_v16-mainframe-boot",
+   "score": 0.09375,
+   "blindScore": 0.25,
+   "label": "bad"
+  },
+  {
+   "id": "out_solhi_v16-vhs-tunnel",
+   "score": 0.09375,
+   "blindScore": 0.28,
+   "label": "bad"
+  },
+  {
+   "id": "out_ds1017_hydra-crt-xhigh-r1",
+   "score": 0.0975,
+   "blindScore": 0.42,
+   "label": "bad"
+  },
+  {
+   "id": "out_terrax_v16-vhs-tunnel",
+   "score": 0.135,
+   "blindScore": 0.65,
+   "label": "bad"
+  },
+  {
+   "id": "out_terra_v16-vhs-tunnel",
+   "score": 0.2175,
+   "blindScore": 0.58,
+   "label": "bad"
+  },
+  {
+   "id": "out_ds1017_v16-mainframe-boot",
+   "score": 0.22875,
+   "blindScore": 0.42,
+   "label": "bad"
+  },
+  {
+   "id": "out_ds0731_hydra-organic-high-r1",
+   "score": 0.23125,
+   "blindScore": 0.34,
+   "label": "bad"
+  },
+  {
+   "id": "out_luna_v16-lsystem-grow",
+   "score": 0.2875,
+   "blindScore": 0.74,
+   "label": "good"
+  },
+  {
+   "id": "out_hy4f_v16-kiln-fuse-r7",
+   "score": 0.31125,
+   "blindScore": 0.58,
+   "label": "bad"
+  },
+  {
+   "id": "out_hy4f_hydra-crt-medium-r2",
+   "score": 0.36875,
+   "blindScore": 0.58,
+   "label": "good"
+  },
+  {
+   "id": "out_ds1017_hydra-mono-medium-r1",
+   "score": 0.38125,
+   "blindScore": 0.82,
+   "label": "good"
+  },
+  {
+   "id": "out_ds0731_hydra-kaleid-medium-r1",
+   "score": 0.4,
+   "blindScore": 0.62,
+   "label": "good"
+  },
+  {
+   "id": "out_glm_v16-mainframe-boot-r1",
+   "score": 0.43625,
+   "blindScore": 0.38,
+   "label": "good"
+  },
+  {
+   "id": "out_hy4f_v16-kiln-fuse-r4",
+   "score": 0.4625,
+   "blindScore": 0.65,
+   "label": "good"
+  },
+  {
+   "id": "out_opusmed_v16-lsystem-grow",
+   "score": 0.53125,
+   "blindScore": 0.4,
+   "label": "good"
+  },
+  {
+   "id": "out_luna_v16-crt-recursion",
+   "score": 0.55625,
+   "blindScore": 0.65,
+   "label": "good"
+  },
+  {
+   "id": "out_hy4f_hydra-buffers-xhigh-r1",
+   "score": 0.58,
+   "blindScore": 0.7,
+   "label": "good"
+  },
+  {
+   "id": "out_ds1017_hydra-buffers-xhigh-r2",
+   "score": 0.5875,
+   "blindScore": 0.6,
+   "label": "good"
+  },
+  {
+   "id": "out_ds1017_v16-phosphor-nebula",
+   "score": 0.59375,
+   "blindScore": 0.84,
+   "label": "good"
+  },
+  {
+   "id": "out_ds1017_hydra-organic-xhigh-r2",
+   "score": 0.595,
+   "blindScore": 0.62,
+   "label": "bad"
+  },
+  {
+   "id": "out_hy4f_dance-brutalist-r3-r1",
+   "score": 0.62,
+   "blindScore": 0.6,
+   "label": "good"
+  },
+  {
+   "id": "out_hy4f_dance-embers-r5",
+   "score": 0.6825,
+   "blindScore": 0.52,
+   "label": "good"
+  },
+  {
+   "id": "out_hy4f_dance-brutalist-r4-r1",
+   "score": 0.705,
+   "blindScore": 0.52,
+   "label": "good"
+  },
+  {
+   "id": "out_ds1017x_v16-kiln-fuse",
+   "score": 0.71,
+   "blindScore": 0.78,
+   "label": "good"
+  },
+  {
+   "id": "out_glmflash_v16-trace-router-r1",
+   "score": 0.71,
+   "blindScore": 0.58,
+   "label": "good"
+  },
+  {
+   "id": "out_ds0731_v16-phosphor-nebula",
+   "score": 0.71625,
+   "blindScore": 0.78,
+   "label": "good"
+  },
+  {
+   "id": "out_ds1017x_v16-five-seven-four",
+   "score": 0.7925,
+   "blindScore": 0.74,
+   "label": "bad"
+  },
+  {
+   "id": "out_sol_d9-kinetic",
+   "score": 0.79375,
+   "blindScore": 0.8,
+   "label": "good"
+  },
+  {
+   "id": "out_sol_reaction-city",
+   "score": 0.805,
+   "blindScore": 0.73,
+   "label": "good"
+  },
+  {
+   "id": "out_solhi_v16-crucible-ascii",
+   "score": 0.81125,
+   "blindScore": 0.82,
+   "label": "good"
+  },
+  {
+   "id": "out_solhi_v16-five-seven-four",
+   "score": 0.81625,
+   "blindScore": 0.58,
+   "label": "bad"
+  },
+  {
+   "id": "out_glm_v16-rain-drone-r1",
+   "score": 0.825,
+   "blindScore": 0.58,
+   "label": "bad"
+  },
+  {
+   "id": "out_terrax_v16-loop-ridgeline",
+   "score": 0.8275,
+   "blindScore": 0.89,
+   "label": "good"
+  },
+  {
+   "id": "out_terra_v16-rain-drone",
+   "score": 0.835,
+   "blindScore": 0.55,
+   "label": "bad"
+  },
+  {
+   "id": "out_solhi_v16-loop-ridgeline",
+   "score": 0.83625,
+   "blindScore": 0.8,
+   "label": "good"
+  },
+  {
+   "id": "out_ds1017x_v16-loop-ridgeline",
+   "score": 0.9025,
+   "blindScore": 0.88,
+   "label": "good"
+  }
+ ]
+}

@@ -1,0 +1,12 @@
+# organ: compost | data: real command, fake provider
+$ sinter compost status
+[CLI] Resolved provider: openai @ http://127.0.0.1:33991/v1 (model=gpt-5.4)
+[CompostCLI] Compost Mill Status:
+[CompostCLI]   Heap size: 0 bytes
+[CompostCLI]   Heap files: 0
+[CompostCLI]   Seeds: 0
+[CompostCLI]   Soup: stopped
+[CompostCLI]   Soup generation: 0
+[CompostCLI]   Seed reuse: 0/0 injected, verified helpful rate: n/a (no verified outcomes)
+# exit: 0
+

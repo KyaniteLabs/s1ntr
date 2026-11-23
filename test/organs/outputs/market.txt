@@ -1,0 +1,60 @@
+## 01-status.txt
+# organ: market | step: status | data: real
+$ node <repo>/bin/sinter market status
+# cwd: <repo> (repo: <repo>)
+# --- stdout
+{
+  "schemaVersion": 1,
+  "wave": 8,
+  "releaseRootDigest": "75a8b4b36fe989750d5e80eeddf905f39a6060365c31af120106b7bfbb898fb9",
+  "releaseHead": "bc8de6ba230c1664b57257030882f4633c86247d",
+  "sourceFingerprint": "54d64c73ea1ba4a3b6a2cdf241a7e8711cde2b565086b344bbe8562079c3dfb2",
+  "ownerReleaseReady": false,
+  "conjuncts": [
+    {
+      "id": "corpus-complete",
+      "passed": true,
+      "failures": []
+    },
+    {
+      "id": "product-complete",
+      "passed": false,
+      "failures": [
+        "product-campaign-origin-invalid"
+      ]
+    },
+    {
+      "id": "authority-complete",
+      "passed": true,
+      "failures": []
+    },
+    {
+      "id": "exact-evidence",
+      "passed": true,
+      "failures": []
+    },
+    {
+      "id": "graph-migration",
+      "passed": true,
+      "failures": []
+    },
+    {
+      "id": "idempotency",
+      "passed": true,
+      "failures": []
+    },
+    {
+      "id": "schema-implementation-invalidation",
+      "passed": true,
+      "failures": []
+    },
+    {
+      "id": "source-fingerprint",
+      "passed": false,
+      "failures": [
+        "source-fingerprint-drift"
+      ]
+    },
+    {
+      "id": "quality-and-install",
+      "passed": true,

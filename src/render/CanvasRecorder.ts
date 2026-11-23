@@ -6,18 +6,22 @@ import { VideoExporter } from '../export/VideoExporter.js';
 import { HTMLWrapper } from '../utils/htmlWrapper.js';
 import { Domain } from '../types/domains.js';
 import { Logger } from '../utils/Logger.js';
+import { ExportError } from '../errors/ExportError.js';
 import { ValidationError } from '../errors/ValidationError.js';
 import { getChromeArgs } from '../security/SandboxConfig.js';
 import { resolveChromiumExecutablePath } from '../utils/browserAssetFallbacks.js';
 import { missingChromiumError } from '../utils/browserPreflight.js';
 import { isAllowedRenderRequestUrl, RENDER_ORIGIN } from './HeadlessRenderer.js';
 import { hasVendorImportMap, inlineVendorAssets, isVendorAssetPath, readVendorAsset } from '../utils/vendorAssets.js';
+import { prepareBrowserScratch } from '../utils/scratchSpace.js';
 
 export interface RecordingOptions {
   fps: number;
   duration: number;  // seconds
   width: number;
   height: number;
+  /** One budget for browser capture, encode, and verification. */
+  timeoutMs?: number;
 }
 
 export interface RecordingConfig extends RecordingOptions {
@@ -34,11 +38,17 @@ export class CanvasRecorder {
     if (options.width <= 0) throw new ValidationError('width must be a positive number');
     if (options.height <= 0) throw new ValidationError('height must be a positive number');
 
+    if (options.timeoutMs !== undefined && (!Number.isSafeInteger(options.timeoutMs)
+      || options.timeoutMs <= 0 || options.timeoutMs > 2_147_483_647)) {
+      throw new ValidationError('timeoutMs must be a positive timer duration in milliseconds');
+    }
+
     this.config = {
       fps: options.fps,
       duration: options.duration,
       width: options.width,
       height: options.height,
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
       totalFrames: Math.floor(options.fps * options.duration),
     };
     this.exporter = new VideoExporter();
@@ -54,10 +64,19 @@ export class CanvasRecorder {
    * capture canvas screenshots, then stitch into MP4 via FFmpeg.
    */
   async record(code: string, domain: Domain, outputPath: string): Promise<string> {
+    const deadlineAt = this.config.timeoutMs ? Date.now() + this.config.timeoutMs : undefined;
+    const expired = () => new ExportError('Canvas recording exceeded the export deadline', { format: 'video' });
+    const remaining = (): number => {
+      if (deadlineAt === undefined) return Infinity;
+      const left = deadlineAt - Date.now();
+      if (left <= 0) throw expired();
+      return left;
+    };
     // Dynamic import to avoid loading Puppeteer at module level
     const puppeteer = await import('puppeteer');
 
     const framesDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sinter-frames-'));
+    let stagingDir: string | undefined;
 
     try {
       // Respect SandboxConfig: launch sandboxed by default; only pass
@@ -65,12 +84,15 @@ export class CanvasRecorder {
       const disableSandbox = process.env.LIMINAL_DISABLE_SANDBOX === 'true';
       const executablePath = resolveChromiumExecutablePath();
       if (!executablePath) throw missingChromiumError();
+      prepareBrowserScratch();   // profile dir off the data volume + free-space check
       const browser = await puppeteer.default.launch({
         headless: true,
         executablePath,
         args: getChromeArgs({ forceDisableSandbox: disableSandbox }),
+        ...(deadlineAt === undefined ? {} : { timeout: remaining() }),
       });
-      try {
+      let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+      const drive = async (): Promise<void> => {
         const page = await browser.newPage();
         await page.setViewport({ width: this.config.width, height: this.config.height });
 
@@ -149,22 +171,46 @@ export class CanvasRecorder {
 
         const failure = crashed();
         if (failure) throw failure;
-
-        // Stitch frames into video
-        await fs.mkdir(path.dirname(outputPath), { recursive: true });
-        await this.exporter.framesToVideo(framesDir, outputPath, this.config.fps);
-
-        return outputPath;
-      } finally {
-        await browser.close();
+      };
+      const captureAndClose = async (): Promise<void> => {
+        try { await drive(); } finally { await browser.close(); }
+      };
+      if (deadlineAt === undefined) await captureAndClose();
+      else {
+        try {
+          const pending = new Promise<never>((_, reject) => {
+            deadlineTimer = setTimeout(() => {
+              browser.process()?.kill('SIGKILL');
+              reject(expired());
+            }, remaining());
+          });
+          await Promise.race([captureAndClose(), pending]);
+          remaining();
+        } finally {
+          clearTimeout(deadlineTimer);
+          // If time ran out immediately after launch, no timer was installed.
+          if (deadlineTimer === undefined) browser.process()?.kill('SIGKILL');
+        }
       }
+
+      const exporter = deadlineAt === undefined ? this.exporter : new VideoExporter({ deadlineAt });
+      const outputDir = path.dirname(outputPath);
+      await fs.mkdir(outputDir, { recursive: true });
+      stagingDir = await fs.mkdtemp(path.join(outputDir, '.sinter-video-'));
+      const stagedPath = path.join(stagingDir, path.basename(outputPath));
+      await exporter.framesToVideo(framesDir, stagedPath, this.config.fps);
+      await exporter.probe(stagedPath);
+      remaining();
+      await fs.rename(stagedPath, outputPath);
+      return outputPath;
     } finally {
-      // Clean up frames
-      try {
-        await fs.rm(framesDir, { recursive: true, force: true });
-      } catch (error) {
-        const message = this.formatErrorMessage(error);
-        Logger.error('CanvasRecorder', 'Cleanup failed:', message);
+      for (const directory of [framesDir, stagingDir]) {
+        if (!directory) continue;
+        try {
+          await fs.rm(directory, { recursive: true, force: true });
+        } catch (error) {
+          Logger.error('CanvasRecorder', 'Cleanup failed:', this.formatErrorMessage(error));
+        }
       }
     }
   }

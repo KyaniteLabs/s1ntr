@@ -3,6 +3,7 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
+import { isolatedCliEnv } from '../helpers/isolatedCli.js';
 
 const execFileAsync = promisify(execFile);
 const servers: ReturnType<typeof createServer>[] = [];
@@ -32,7 +33,7 @@ describe('compiled campaign continuation CLI transport', () => {
       '--bridge-url', `http://127.0.0.1:${address.port}`, '--session', 'session-a',
       '--campaign-run-id', 'campaign-a'], {
       cwd: path.resolve(import.meta.dirname, '../..'),
-      env: { ...process.env, SINTER_OWNER_AUTHORIZATION: 'owner-proof' },
+      env: { ...isolatedCliEnv().env, SINTER_OWNER_AUTHORIZATION: 'owner-proof' },
     });
     expect(await request).toEqual({ method: 'POST',
       url: '/api/tui/session/session-a/governed-campaign/campaign-a/continuation',

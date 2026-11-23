@@ -1,221 +1,45 @@
 import { describe, it, expect } from 'vitest';
-import {
-  DOMAIN_ROUTING,
-  MODEL_IDS,
-  getBestModel,
-  getPreferredModels,
-  shouldAvoidModel,
-  getMinSizeForDomain,
-  getModelRanking,
-  getPromptHints,
-} from '../../../src/config/model-routing.js';
+import { existsSync, readFileSync, readdirSync, statSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { CodeValidator } from '../../../src/core/CodeValidator.js';
+import { aggregateFitnessObservations, buildFitnessObservationReport, createFitnessObservation } from '../../../src/quality/FitnessObservationStore.js';
 
-describe('MODEL_IDS', () => {
-  it('contains exactly 6 model identifiers', () => {
-    expect(Object.values(MODEL_IDS).length).toBe(6);
-  });
-
-  it('has expected model ID values', () => {
-    expect(MODEL_IDS.MINIMAX_M2_7).toBe('minimax-m2.7');
-    expect(MODEL_IDS.MINIMAX_M2_5).toBe('minimax-m2.5');
-    expect(MODEL_IDS.QWEN_35_9B).toBe('qwen3.5-9b');
-    expect(MODEL_IDS.QWEN_CODER_40B).toBe('qwen3-coder-40b');
-    expect(MODEL_IDS.GEMMA_3_4B).toBe('gemma3-4b');
-    expect(MODEL_IDS.KIMI_K2_5).toBe('kimi-k2.5');
-  });
-});
-
-describe('DOMAIN_ROUTING', () => {
-  it('defines routing for all 8 domains', () => {
-    const domains = Object.keys(DOMAIN_ROUTING).sort();
-    expect(domains).toEqual(['ascii', 'glsl', 'html', 'hydra', 'p5', 'revideo', 'strudel', 'three']);
-  });
-
-  it('every domain has required routing fields with valid data', () => {
-    for (const [, routing] of Object.entries(DOMAIN_ROUTING)) {
-      expect(Array.isArray(routing.preferred)).toBe(true);
-      expect(routing.preferred.length).toBeGreaterThan(0);
-      expect(Array.isArray(routing.avoid)).toBe(true);
-      expect(typeof routing.minSize).toBe('number');
-      expect(routing.minSize).toBeGreaterThan(0);
-      expect(Array.isArray(routing.rankings)).toBe(true);
-      expect(routing.rankings.length).toBeGreaterThan(0);
-      expect(Array.isArray(routing.promptHints)).toBe(true);
+// The deleted src/config/model-routing.ts held a hand-written March 2026 ranking of six retired models per
+// medium. It had zero importers (the old-API callers were: none). What it carried lives in live sources:
+//   min size -> CodeValidator.getMinSize; prompt hints -> the production brief (closeout-group-c test);
+//   best model -> the operator's own runs (report fitness). The operator's seat config alone chooses models.
+describe('model routing table is gone; its live replacements cover it', () => {
+  const walk = (d: string): string[] => readdirSync(d).flatMap(f => { const p = path.join(d, f); return statSync(p).isDirectory() ? walk(p) : p.endsWith('.ts') ? [p] : []; });
+  it('no source file re-introduces a hard-coded model id table or imports the old module', () => {
+    expect(existsSync('src/config/model-routing.ts')).toBe(false);
+    for (const f of walk('src')) {
+      const text = readFileSync(f, 'utf8');
+      expect(text, f).not.toMatch(/config\/model-routing/);
+      expect(text, f).not.toMatch(/MINIMAX_M2_5|QWEN_CODER_40B|GEMMA_3_4B/);
     }
   });
-
-  it('every ranking has complete fields with valid score ranges', () => {
-    for (const [, routing] of Object.entries(DOMAIN_ROUTING)) {
-      for (const ranking of routing.rankings) {
-        expect(typeof ranking.id).toBe('string');
-        expect(ranking.quality).toBeGreaterThanOrEqual(1);
-        expect(ranking.quality).toBeLessThanOrEqual(10);
-        expect(ranking.speed).toBeGreaterThanOrEqual(1);
-        expect(ranking.speed).toBeLessThanOrEqual(10);
-        expect(ranking.reliability).toBeGreaterThanOrEqual(1);
-        expect(ranking.reliability).toBeLessThanOrEqual(10);
-        expect(typeof ranking.avgTimeSeconds).toBe('number');
-        expect(typeof ranking.avgSizeBytes).toBe('number');
-        expect(Array.isArray(ranking.issues)).toBe(true);
-      }
+  it('minimum size per medium comes from the live validator for every medium the old table named', () => {
+    for (const d of ['p5', 'glsl', 'three', 'hydra', 'strudel', 'revideo', 'html', 'ascii']) {
+      expect(CodeValidator.getMinSize(d as never), d).toBeGreaterThan(0);
     }
   });
-
-  it('three avoid list includes qwen3.5-9b', () => {
-    expect(DOMAIN_ROUTING.three.avoid).toContain('qwen3.5-9b');
-  });
-
-  it('hydra avoid list includes 4 models that failed the audit', () => {
-    expect(DOMAIN_ROUTING.hydra.avoid).toEqual([
-      'qwen3.5-9b',
-      'qwen3-coder-40b',
-      'minimax-m2.5',
-      'kimi-k2.5',
-    ]);
-  });
-
-  it('p5 and glsl domains have empty avoid lists', () => {
-    expect(DOMAIN_ROUTING.p5.avoid).toEqual([]);
-    expect(DOMAIN_ROUTING.glsl.avoid).toEqual([]);
-  });
-});
-
-describe('getBestModel', () => {
-  it('returns first preferred model for each known domain', () => {
-    expect(getBestModel('p5')).toBe('minimax-m2.5');
-    expect(getBestModel('glsl')).toBe('kimi-k2.5');
-    expect(getBestModel('three')).toBe('minimax-m2.7');
-    expect(getBestModel('hydra')).toBe('minimax-m2.7');
-    expect(getBestModel('strudel')).toBe('qwen3-coder-40b');
-  });
-
-  it('is case-insensitive', () => {
-    expect(getBestModel('P5')).toBe('minimax-m2.5');
-    expect(getBestModel('GLSL')).toBe('kimi-k2.5');
-    expect(getBestModel('Three')).toBe('minimax-m2.7');
-  });
-
-  it('returns minimax-m2.5 as fallback for unknown domain', () => {
-    expect(getBestModel('unknown')).toBe('minimax-m2.5');
-    expect(getBestModel('')).toBe('minimax-m2.5');
-  });
-});
-
-describe('getPreferredModels', () => {
-  it('returns ordered list for a known domain', () => {
-    const preferred = getPreferredModels('p5');
-    expect(preferred[0]).toBe('minimax-m2.5');
-    expect(preferred.length).toBe(6);
-  });
-
-  it('is case-insensitive', () => {
-    expect(getPreferredModels('P5')).toEqual(getPreferredModels('p5'));
-  });
-
-  it('returns all model IDs for unknown domain', () => {
-    const preferred = getPreferredModels('nonexistent');
-    const allIds = Object.values(MODEL_IDS);
-    expect(preferred.sort()).toEqual(allIds.sort());
-  });
-});
-
-describe('shouldAvoidModel', () => {
-  it('returns true for qwen3.5-9b in three domain', () => {
-    expect(shouldAvoidModel('three', 'qwen3.5-9b')).toBe(true);
-  });
-
-  it('returns false for minimax-m2.7 in three domain', () => {
-    expect(shouldAvoidModel('three', 'minimax-m2.7')).toBe(false);
-  });
-
-  it('returns true for all hydra avoid list models', () => {
-    expect(shouldAvoidModel('hydra', 'qwen3.5-9b')).toBe(true);
-    expect(shouldAvoidModel('hydra', 'qwen3-coder-40b')).toBe(true);
-    expect(shouldAvoidModel('hydra', 'minimax-m2.5')).toBe(true);
-    expect(shouldAvoidModel('hydra', 'kimi-k2.5')).toBe(true);
-  });
-
-  it('returns false for good models in hydra', () => {
-    expect(shouldAvoidModel('hydra', 'minimax-m2.7')).toBe(false);
-    expect(shouldAvoidModel('hydra', 'gemma3-4b')).toBe(false);
-  });
-
-  it('is case-insensitive on domain', () => {
-    expect(shouldAvoidModel('THREE', 'qwen3.5-9b')).toBe(true);
-  });
-
-  it('returns false for unknown domain', () => {
-    expect(shouldAvoidModel('unknown', 'any-model')).toBe(false);
-  });
-});
-
-describe('getMinSizeForDomain', () => {
-  it('returns correct minimum sizes for all known domains', () => {
-    expect(getMinSizeForDomain('p5')).toBe(1000);
-    expect(getMinSizeForDomain('glsl')).toBe(800);
-    expect(getMinSizeForDomain('three')).toBe(1000);
-    expect(getMinSizeForDomain('hydra')).toBe(200);
-    expect(getMinSizeForDomain('strudel')).toBe(100);
-    expect(getMinSizeForDomain('revideo')).toBe(800);
-    expect(getMinSizeForDomain('html')).toBe(600);
-    expect(getMinSizeForDomain('ascii')).toBe(1500);
-  });
-
-  it('returns 500 for unknown domain', () => {
-    expect(getMinSizeForDomain('unknown')).toBe(500);
-  });
-
-  it('is case-insensitive', () => {
-    expect(getMinSizeForDomain('P5')).toBe(1000);
-  });
-});
-
-describe('getModelRanking', () => {
-  it('returns ranking with specific values for a known domain and model', () => {
-    const ranking = getModelRanking('p5', 'minimax-m2.5');
-    expect(ranking?.id).toBe('minimax-m2.5');
-    expect(ranking!.id).toBe('minimax-m2.5');
-    expect(ranking!.quality).toBe(9);
-    expect(ranking!.speed).toBe(10);
-    expect(ranking!.reliability).toBe(10);
-    expect(ranking!.avgTimeSeconds).toBe(18);
-    expect(ranking!.avgSizeBytes).toBe(4175);
-  });
-
-  it('returns undefined for unknown model in a known domain', () => {
-    expect(getModelRanking('p5', 'nonexistent-model')).toBeUndefined();
-  });
-
-  it('returns undefined for unknown domain', () => {
-    expect(getModelRanking('unknown', 'minimax-m2.7')).toBeUndefined();
-  });
-
-  it('returns correct low ranking for three.js qwen3.5-9b failure', () => {
-    const ranking = getModelRanking('three', 'qwen3.5-9b');
-    expect(ranking?.id).toBe('qwen3.5-9b');
-    expect(ranking!.quality).toBe(1);
-    expect(ranking!.reliability).toBe(3);
-    expect(ranking!.issues).toEqual(['FAILED - 66b empty output']);
-  });
-});
-
-describe('getPromptHints', () => {
-  it('returns hints for known domains', () => {
-    const hints = getPromptHints('p5');
-    expect(Array.isArray(hints)).toBe(true);
-    expect(hints.length).toBeGreaterThan(0);
-  });
-
-  it('hydra hints mention 50% failure rate', () => {
-    const hints = getPromptHints('hydra');
-    expect(hints.some(h => h.includes('50% failure rate'))).toBe(true);
-  });
-
-  it('returns empty array for unknown domain', () => {
-    expect(getPromptHints('unknown')).toEqual([]);
-  });
-
-  it('is case-insensitive', () => {
-    expect(getPromptHints('HYDRA')).toEqual(getPromptHints('hydra'));
+  it('best seat per medium is read from the operator own recorded runs, never a ranking', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'routing-seat-'));
+    try {
+      const rows = [
+        ...[0.9, 0.8, 0.85].map((score, i) => createFitnessObservation({ runId: `a${i}`, domain: 'p5', provider: 'zai', model: 'glm', sourceCode: 'x', score, confidence: 0.9, failureClass: 'none', durationMs: 4000 })),
+        ...[0.4, 0.5, 0.3].map((score, i) => createFitnessObservation({ runId: `b${i}`, domain: 'p5', provider: 'kilo', model: 'ds', sourceCode: 'y', score, confidence: 0.9, failureClass: 'none', durationMs: 2000 })),
+        createFitnessObservation({ runId: 'c0', domain: 'html', provider: 'zai', model: 'glm', sourceCode: 'z', score: 0.9, confidence: 0.9, failureClass: 'none' }),
+      ];
+      const file = path.join(dir, 'fitness.jsonl');
+      writeFileSync(file, rows.map(r => JSON.stringify(r)).join('\n') + '\n');
+      const best = (await buildFitnessObservationReport({ filePath: file })).bestSeatByMedium;
+      expect(best.p5).toBe('zai/glm');
+      expect(best.html).toBeNull(); // one run is not evidence
+      const report = aggregateFitnessObservations(rows);
+      expect(report.byMediumSeat.p5['kilo/ds'].meanDurationMs).toBe(2000);
+      expect(report.byMediumSeat.p5['zai/glm'].meanScore).toBeCloseTo(0.85, 5);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });

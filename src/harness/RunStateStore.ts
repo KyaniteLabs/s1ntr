@@ -23,6 +23,8 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { writeFileAtomic } from '../utils/atomicWrite.js';
+import { isEnoent } from '../utils/errors.js';
 import { Logger } from '../utils/Logger.js';
 import { Status, describeStatusLifecycle, formatStatusNextAction, isResumableStatus } from '../types/status.js';
 
@@ -147,7 +149,7 @@ export async function saveRunState(state: RunState, cwd?: string): Promise<void>
   const path = runStatePath(cwd);
   Logger.debug('RunStateStore', `Saving run state to ${path}`);
 
-  await writeFile(path, JSON.stringify(state, null, 2), 'utf-8');
+  await writeFileAtomic(path, JSON.stringify(state, null, 2));
 }
 
 /**
@@ -155,16 +157,20 @@ export async function saveRunState(state: RunState, cwd?: string): Promise<void>
  */
 export async function readRunState(cwd?: string): Promise<RunState | null> {
   const path = runStatePath(cwd);
+  let content: string;
   try {
-    const content = await readFile(path, 'utf-8');
+    content = await readFile(path, 'utf-8');
+  } catch (error) {
+    if (isEnoent(error)) return null;
+    throw error;
+  }
+  if (!content.trim()) return null; // Cleared checkpoints are empty tombstones.
+
+  try {
     const state = JSON.parse(content) as RunState;
-    if (isResumableStatus(state.status)) {
-      return state;
-    }
-    return null;
-  } catch {
-    // No run state file or invalid JSON - no resumable run
-    return null;
+    return isResumableStatus(state.status) ? state : null;
+  } catch (cause) {
+    throw new Error(`Corrupt run-state file at ${path}. Inspect it before resuming.`, { cause });
   }
 }
 
@@ -251,10 +257,14 @@ export async function validateWorkspaceFingerprint(
  * Check if there is a resumable run for a given task ID
  */
 export async function hasResumableRun(taskId?: string, cwd?: string): Promise<RunState | null> {
-  const state = await readRunState(cwd);
-  if (!state) return null;
-  if (taskId && state.taskId !== taskId) return null;
-  return state;
+  try {
+    const state = await readRunState(cwd);
+    if (taskId && state?.taskId !== taskId) return null;
+    return state;
+  } catch (error) {
+    Logger.warn('RunStateStore', `Could not read the checkpoint for task ${taskId ?? '(any)'}:`, error);
+    return null;
+  }
 }
 
 function formatVerificationSummary(lastVerification?: VerificationState): string | null {
@@ -279,14 +289,19 @@ export function formatResumeContext(state: RunState): string {
     ``,
     `A previous run of this task was suspended after ${state.stepsCompleted}/${state.maxSteps} steps.`,
     `Run ID: ${state.runId}`,
+    `Task ID: ${state.taskId}`,
     `Started: ${state.startedAt}`,
     `Suspended: ${state.suspendedAt}`,
     `Phase at suspension: ${state.phase}`,
     state.lastCheckpointHash ? `Last checkpoint: ${state.lastCheckpointHash.slice(0, 8)}` : 'No checkpoint was created',
-    state.hadMutations ? 'Mutations were made and checkpointed.' : 'No mutations were made.',
-    state.mutatedFiles.length > 0 ? `Files already mutated: ${state.mutatedFiles.join(', ')}` : '',
+    state.hadMutations
+      ? (state.lastCheckpointHash ? 'Mutations were made and checkpointed.' : 'Mutations were made without a recorded checkpoint. Inspect the existing changes.')
+      : 'No mutations were made.',
+    state.mutationApplied && !state.lastVerification?.passed ? 'Verify the applied changes before making another edit.' : '',
+    state.mutatedFiles.length > 0 ? `Files already mutated: ${state.mutatedFiles.join(', ')}. Do not re-apply these edits.` : '',
     state.exploredPaths.length > 0 ? `Paths already explored: ${state.exploredPaths.join(', ')}` : '',
     state.activeFocusFile ? `Active focus file: ${state.activeFocusFile}` : '',
+    state.focusStatus ? `Focus status: ${state.focusStatus}` : '',
     typeof state.focusInspectionBudgetRemaining === 'number' ? `Focus inspection reads remaining: ${state.focusInspectionBudgetRemaining}` : '',
     state.focusDecision ? `Last focus decision: ${state.focusDecision}${state.focusDecisionAt ? ` at ${state.focusDecisionAt}` : ''}` : '',
     verificationSummary ?? '',

@@ -8,6 +8,7 @@
  * Now with semantic similarity for seed retrieval.
  */
 
+import { VOICE_BRIEF_HEADER, describeVisualMapping } from '../audio/VoiceBrief.js';
 import { ContextAccumulation } from './ContextAccumulation.js';
 import type { IterationContext } from './LoopConfig.js';
 import { createHash } from 'node:crypto';
@@ -145,49 +146,7 @@ export function buildContextForInjection(
 
   // Append audio-derived visual parameters if provided
   if (options.visualMappingParams) {
-    const vp = options.visualMappingParams;
-    context += '\n\nAudio-derived visual parameters:\n';
-    if (vp.palette) {
-      context +=
-        '  Palette: hues=' +
-        JSON.stringify(vp.palette.hues) +
-        ', saturations=' +
-        JSON.stringify(vp.palette.saturations) +
-        ', lightness=' +
-        JSON.stringify(vp.palette.lightness) +
-        '\n';
-    }
-    if (vp.motion) {
-      context +=
-        '  Motion: speed=' +
-        vp.motion.speed +
-        ', turbulence=' +
-        vp.motion.turbulence +
-        ', rhythm=' +
-        vp.motion.rhythm +
-        '\n';
-    }
-    if (vp.form) {
-      context +=
-        '  Form: complexity=' +
-        vp.form.complexity +
-        ', sharpness=' +
-        vp.form.sharpness +
-        ', scale=' +
-        vp.form.scale +
-        '\n';
-    }
-    if (vp.dynamics) {
-      context += '  Dynamics: energy=' + vp.dynamics.energy + '\n';
-    }
-    if (vp.composition) {
-      context +=
-        '  Composition: focalWeight=' +
-        vp.composition.focalWeight +
-        ', balance=' +
-        vp.composition.balance +
-        '\n';
-    }
+    context += VOICE_BRIEF_HEADER + describeVisualMapping(options.visualMappingParams);
   }
 
   // Append archived examples if archives are provided

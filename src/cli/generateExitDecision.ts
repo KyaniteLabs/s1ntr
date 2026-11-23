@@ -47,7 +47,7 @@ export function isEmptySkeleton(result: GenerateExitInput): boolean {
  *
  * Degraded runs (evaluator offline / zeroed confidence) must NEVER print a
  * fabricated number — the score is not real fitness, so the line says
- * `degraded (no real score)` and carries the machine-parseable provenance
+ * `unscored (judge could not score)` and carries the machine-parseable provenance
  * suffix `(failureClass=…, confidence=…)` that the self-improve ledger
  * (scripts/quality/self-improve-domains.mjs parseScoreLine) reads.
  *
@@ -58,7 +58,7 @@ export function formatScoreLine(result: GenerateExitInput): string {
   if (isDegradedResult(result)) {
     const failureClass = result.evaluationFailureClass ?? 'unknown';
     const confidence = (result.evaluationConfidence ?? 0).toFixed(2);
-    return `⭐ Quality score: degraded (no real score) (failureClass=${failureClass}, confidence=${confidence})`;
+    return `⭐ Quality score: unscored (judge could not score) (failureClass=${failureClass}, confidence=${confidence})`;
   }
   return `⭐ Quality score: ${result.finalScore.toFixed(2)}`;
 }
@@ -112,4 +112,17 @@ export function formatGovernedHeadline(input: GovernedHeadlineInput): [string, s
     ? input.rejectionReasons.join(', ')
     : input.degraded ? 'the evaluator could not score it' : 'it did not pass the quality gate';
   return ['⚠️  Generated, but not accepted', `🎯 Reason: ${reasons}`];
+}
+
+/**
+ * Exit code for a generate run that saved files but was not accepted (admission
+ * failed, degraded evaluator, or invalid identity). Distinct from 0 (accepted)
+ * and 1 (error / empty skeleton) so batch tooling can tell "generated, rejected"
+ * from both success and a crash.
+ */
+export const NOT_ACCEPTED_EXIT_CODE = 3;
+
+/** 0 exactly when the headline prints "Generation complete!"; else NOT_ACCEPTED_EXIT_CODE. */
+export function governedExitCode(input: GovernedHeadlineInput): number {
+  return input.admissionEligible && !input.degraded && input.identityValid !== false ? 0 : NOT_ACCEPTED_EXIT_CODE;
 }

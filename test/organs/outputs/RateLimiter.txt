@@ -1,0 +1,16 @@
+## 02-rate-limiter.txt
+# organ: security | step: rate-limiter | data: real
+$ node -e 
+import('./dist/security/RateLimiter.js').then(m=>{const l=new m.IpRateLimiter('demo',{windowMs:60000,max:3});const req={socket:{remoteAddress:'10.0.0.1'}};const h={};const res={setHeader:(k,v)=>h[k]=v
+# cwd: <repo> (repo: <repo>)
+# --- stdout
+request 1 allowed remaining 2
+request 2 allowed remaining 1
+request 3 allowed remaining 0
+request 4 blocked remaining 0
+request 5 blocked remaining 0
+# --- stderr
+[RateLimiter] Rate limit exceeded for IP: 10.0.0.1 { path: undefined, method: undefined, limit: 3, windowMs: 60000 }
+[RateLimiter] Rate limit exceeded for IP: 10.0.0.1 { path: undefined, method: undefined, limit: 3, windowMs: 60000 }
+# exit: 0
+

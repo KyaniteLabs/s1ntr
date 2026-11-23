@@ -21,6 +21,7 @@ vi.mock('../../../src/llm/LLMClient.js', () => {
       iterations: 1, toolCallsMade: 0, success: true,
     });
     getConfig = mockGetConfig;
+    getTimeoutOverride = () => undefined;
   }
   (MockLLMClient as any).isConfigured = vi.fn().mockReturnValue(true);
   return { LLMClient: MockLLMClient };

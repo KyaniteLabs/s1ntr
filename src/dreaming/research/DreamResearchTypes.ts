@@ -27,7 +27,11 @@ export interface DreamFrozenContext {
     operationId: string; lineageId: string; createCommandDigest: string;
     createReceiptDigest: string; reviewCommandDigest: string;
     reviewDecisionDigest: string; reviewReceiptDigest: string;
-    artifactDigest: string; evidenceDigest: string }>;
+    artifactDigest: string; evidenceDigest: string;
+    /** What the parent artifact does (F09); absent when no source was readable. */
+    parentTechniqueDigest?: string; parentTechnique?: string;
+    /** Set when the judge's score, not an owner review, admitted this parent. */
+    provenance?: 'judge-scoring-evidence' }>;
 }
 
 export interface DreamExperimentPlan {

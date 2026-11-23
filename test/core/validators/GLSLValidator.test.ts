@@ -84,7 +84,24 @@ describe('GLSLValidator', () => {
       `;
 
       const result = GLSLValidator.validate(code);
-      expect(result.errors).toContain('GLSL shader should animate using u_time');
+      const animationError = result.errors.find(e => e.startsWith('GLSL shader should animate using u_time'));
+      expect(animationError ?? "").toContain("GLSL shader should animate using u_time");
+      expect(animationError).toContain('uniform float u_time;');
+    });
+
+    it('flags U_Time as not animating: the host supplies exactly u_time (case-sensitive)', () => {
+      const code = `
+        precision highp float;
+        uniform float U_Time;
+        void main() {
+          gl_FragColor = vec4(vec3(sin(U_Time)), 1.0);
+        }
+      `;
+
+      const result = GLSLValidator.validate(code);
+      const animationError = result.errors.find(e => e.startsWith('GLSL shader should animate using u_time'));
+      expect(animationError ?? "").toContain("GLSL shader should animate using u_time");
+      expect(animationError).toContain('uniform float u_time;');
     });
 
     it('should warn about shader without complexity', () => {
@@ -149,13 +166,13 @@ describe('GLSLValidator', () => {
       const code = `
         #version 120
         precision mediump float;
-        uniform float time;
+        uniform float u_time;
         uniform vec2 resolution;
 
         void main() {
           // Normalized pixel coordinates (0 to 1)
           vec2 uv = gl_FragCoord.xy / resolution.xy;
-          float plasma = sin(uv.x * 10.0 + time);
+          float plasma = sin(uv.x * 10.0 + u_time);
           vec3 color = vec3(
             sin(plasma * 3.14159),
             sin(plasma * 3.14159 + 2.09),
@@ -171,7 +188,7 @@ describe('GLSLValidator', () => {
       expect(result.errors).not.toContain('GLSL shader should use noise functions or multiple colors for complexity');
     });
 
-    it('accepts compact Shadertoy-style aliases when the shader is still runnable', () => {
+    it('flags Shadertoy iTime-only animation: iTime is never set by the host, so the frame would be static', () => {
       const code = `
         #version 300 es
         precision highp float;
@@ -191,8 +208,10 @@ describe('GLSLValidator', () => {
       `;
 
       const result = GLSLValidator.validate(code);
-      expect(result.valid).toBe(true);
-      expect(result.errors).toHaveLength(0);
+      const animationError = result.errors.find(e => e.startsWith('GLSL shader should animate using u_time'));
+      expect(animationError ?? "").toContain("GLSL shader should animate using u_time");
+      expect(animationError).toContain('uniform float u_time;');
+      expect(result.errors.filter(e => e.includes('Undefined function'))).toHaveLength(0);
     });
 
     it('accepts animated shaders that mix multiple vec3 color constructors inline', () => {

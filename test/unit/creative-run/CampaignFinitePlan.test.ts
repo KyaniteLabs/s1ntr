@@ -1600,8 +1600,10 @@ describe('W8C-05 shared Studio/CLI campaign service parity', () => {
     }
   });
 
+  // Nine candidates and three evidence packets share the full CI runner.
   it('closes one manifest-first three-brief campaign only after real CLI and host-authenticated Studio decisions', async () => {
     const campaignRunId = 'terminal-governed-real';
+    const cliTimeoutMs = 30_000;
     const manifest = createCampaignManifest(closureManifestInput(campaignRunId));
     expect(manifest.briefs.flatMap((brief) => brief.candidateSlots)).toHaveLength(9);
     const campaignGraphs = buildGraphs(manifest).map((binding) => {
@@ -1799,6 +1801,7 @@ describe('W8C-05 shared Studio/CLI campaign service parity', () => {
             '--session', status.sessionId, '--campaign-run-id', campaignRunId, '--brief-id', brief.id,
             '--revision-evidence-id', revisionEvidenceId], {
             cwd: path.resolve(import.meta.dirname, '../../..'),
+            timeout: cliTimeoutMs,
             env: { ...process.env, SINTER_OWNER_AUTHORIZATION: 'owner-auth' },
           });
           expect((JSON.parse(cliStart.stdout) as { candidates: readonly unknown[] }).candidates).toHaveLength(2);
@@ -1863,6 +1866,7 @@ describe('W8C-05 shared Studio/CLI campaign service parity', () => {
             'campaign-owner-decision', '--bridge-url', bridgeServer.address,
             '--session', status.sessionId, '--campaign-run-id', campaignRunId, '--brief-id', brief.id], {
             cwd: path.resolve(import.meta.dirname, '../../..'),
+            timeout: cliTimeoutMs,
             env: { ...process.env, SINTER_OWNER_AUTHORIZATION: 'owner-auth' },
           })).stdout) as Awaited<ReturnType<TuiBridgeService['finalizeGovernedCampaignOwnerDecision']>>
           : await (async () => {
@@ -1911,7 +1915,7 @@ describe('W8C-05 shared Studio/CLI campaign service parity', () => {
     } finally {
       await bridgeServer.stop();
     }
-  }, 20_000);
+  }, 240_000);
 
   it('sends the executable CLI owner decision command to the host-bound bridge route', async () => {
     const transport = vi.fn(async () => new Response(JSON.stringify({ closed: false }), { status: 200,
@@ -2083,7 +2087,8 @@ describe('W8C-05 shared Studio/CLI campaign service parity', () => {
   }, 30_000);
 });
 
-describe('W8C-06 shared Studio/CLI owner-review lifecycle parity', () => {
+// This suite renders offline assets and settles exact fake-provider debits for each candidate.
+describe('W8C-06 shared Studio/CLI owner-review lifecycle parity', { timeout: 90_000 }, () => {
   it('spawned shipped CLI rejects missing owner package before campaign or generation access', () => {
     const specPath = path.join(dir, 'spawn-spec.json');
     writeFileSync(specPath, JSON.stringify({ schema: 'sinter.composition-graph', schemaVersion: '2.0',
@@ -2361,7 +2366,7 @@ describe('W8C-06 shared Studio/CLI owner-review lifecycle parity', () => {
       const run = await execFileAsync(process.execPath, ['bin/sinter', 'compose', '--campaign-manifest', manifestPath,
         '--campaign-execution', executionPath, '--owner-review-package', packagePath,
         '--gallery', gallery, '--output', output], {
-        cwd: repoRoot, timeout: browser ? 150_000 : 45_000, maxBuffer: 2_000_000,
+        cwd: repoRoot, timeout: 150_000, maxBuffer: 2_000_000,
         env: { ...process.env, NODE_ENV: 'production', HOME: dir, SINTER_PROJECT_ROOT: dir, PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: browser ?? path.join(dir, 'no-chromium'),
           LIMINAL_ALLOW_LOCALHOST_LLM: 'true',
           SINTER_LLM_THINKING_EFFORT: 'medium',
@@ -2378,9 +2383,11 @@ describe('W8C-06 shared Studio/CLI owner-review lifecycle parity', () => {
           SINTER_CAMPAIGN_SEAT_KEY_HOLISTIC_REVIEW: holisticKey,
           SINTER_CAMPAIGN_SEAT_BASE_URL_HOLISTIC_REVIEW: holistic.baseUrl } });
       const browserDiagnostic = /^(\[browser-preflight\]|\[HeadlessRenderer\]|\s+at |\s+\[cause\]: Error: \[browser-preflight\]|\}$)/;
-      const sandboxOptOut = process.env.LIMINAL_DISABLE_SANDBOX === 'true' ? /^\[SandboxConfig\] Chrome sandbox is disabled\./ : null;
+      const sandboxDiagnostic = process.env.LIMINAL_DISABLE_SANDBOX === 'true'
+        ? /^\[SandboxConfig\] Chrome sandbox is disabled\./
+        : /^\[SandboxConfig\] Chromium has no usable OS sandbox on this host, so it runs unsandboxed\./;
       expect(run.stderr.split('\n')
-        .filter((line) => line.trim() && !browserDiagnostic.test(line) && !sandboxOptOut?.test(line))).toEqual([]);
+        .filter((line) => line.trim() && !browserDiagnostic.test(line) && !sandboxDiagnostic.test(line))).toEqual([]);
       expect(run.stderr.match(/\[HeadlessRenderer\] Failed to initialize browser/g)?.length ?? 0).toBe(browser ? 0 : 1);
       expect(run.stdout).toContain('Owner review: file:');
       const candidates = path.join(output, 'campaign-candidates');
@@ -2436,7 +2443,7 @@ describe('W8C-06 shared Studio/CLI owner-review lifecycle parity', () => {
       await Promise.all([generator.close(), specialist.close(), holistic.close()]);
       live.cleanup();
     }
-  }, realBrowser ? 180_000 : 60_000);
+  }, 180_000);
 
   it('production bootstrap installs the sole active host without the test seam', () => {
     expect(() => bootstrapProductionOwnerReviewHost()).not.toThrow();

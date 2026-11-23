@@ -104,20 +104,34 @@ export async function reflectOnSessionTurns(
  * source tags keep this distinguishable from (and subordinate to) real human pins.
  */
 export function recordTasteSignal(signal: SessionTasteSignal): void {
+  const prompt = `Studio session ${signal.sessionId} taste reflection`;
+  const recorded = harnessMemory.getEpisodesByDomain('session-taste');
+  if (recorded.some(episode => episode.type === 'feedback' && episode.prompt === prompt)) return;
   harnessMemory.recordEpisode({
     type: 'feedback',
     domain: 'session-taste',
-    prompt: `Studio session ${signal.sessionId} taste reflection`,
+    prompt,
     comment: signal.intentSummary,
     score: signal.satisfaction,
     tags: ['session-taste', 'studio-reflection', ...signal.likes.slice(0, 3)],
   });
+  if (signal.dislikes.length > 0) {
+    // Dislikes are first-class taste: persisted as their own low-score episode so guidance can steer away from them (F14).
+    harnessMemory.recordEpisode({
+      type: 'feedback',
+      domain: 'session-taste',
+      prompt: `Studio session ${signal.sessionId} taste reflection (dislikes)`,
+      comment: signal.intentSummary,
+      score: 0,
+      tags: ['session-taste', 'studio-reflection', 'dislike', ...signal.dislikes.slice(0, 3)],
+    });
+  }
 }
 
 export interface ReflectSessionsResult {
   reflected: number;
   skipped: number;
-  /** Sessions whose model call failed; left un-marked so the next run retries them. */
+  /** Sessions whose reflection or persistence failed and can be retried. */
   failed: number;
   errors: string[];
   signals: SessionTasteSignal[];
@@ -167,6 +181,13 @@ export async function reflectUnreflectedSessions(
     const signal = graph ? await reflectOnSessionTurns(id, graph.getTurns(), tracked) : null;
     if (signal) {
       recordTasteSignal(signal);
+      // Leave the session unmarked if its memory cannot be written.
+      const saved = await harnessMemory.save();
+      if (saved.isErr()) {
+        failed++;
+        errors.push(`${id}: memory save failed: ${saved.error.message}`);
+        continue;
+      }
       signals.push(signal);
       reflected++;
     } else if (transportError !== null) {
@@ -182,6 +203,5 @@ export async function reflectUnreflectedSessions(
     fs.writeManifest(`session/${id}/reflected`, { reflectedAt: new Date().toISOString() });
   }
 
-  if (reflected > 0) await harnessMemory.save();
   return { reflected, skipped, failed, errors, signals };
 }

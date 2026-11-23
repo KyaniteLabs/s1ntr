@@ -5,13 +5,15 @@
  * for cross-layer communication. Supports camera position exports and
  * mouse coordinate imports from p5 for camera control.
  *
- * SECURITY: generated Three.js code is untrusted. Block browser escape
- * hatches before the legacy eval path can execute.
+ * SECURITY: generated Three.js code is untrusted. It never runs in the host
+ * realm: it is mounted in a sandboxed iframe (see sandboxFrame.ts, #1533).
+ * GeneratedCodeGuard and the pattern list below are pre-checks that refuse to
+ * mount; the iframe is the boundary.
  *
  * @example
  * ```typescript
  * const adapter = new ThreeAdapter();
- * adapter.initialize();
+ * await adapter.initialize();
  * const instance = adapter.render(layer, container, context);
  * const exports = adapter.getExports(layer);
  * adapter.destroy(layer, instance);
@@ -21,59 +23,10 @@
 import type { Layer, GlobalSettings } from '../types.js';
 import type { LayerAdapter, Export, Import } from './index.js';
 import type { RenderContext } from '../CompositionEngine.js';
-import { getWebGLBlendFunc } from '../utils/blendModes.js';
 import { VENDOR_ASSETS } from '../../utils/vendorAssets.js';
-import { Logger } from '../../utils/Logger.js';
-import { compileGeneratedCode } from '../../guardrails/GeneratedCodeGuard.js';
+import { findGeneratedCodeViolations } from '../../guardrails/GeneratedCodeGuard.js';
+import { importsPrelude, loadSandboxLib, mountGuardedFrame, type SandboxedInstance } from './sandboxFrame.js';
 import { scriptSafe } from '../../utils/scriptEmbed.js';
-
-/** Three.js Scene type (simplified) */
-interface THREEScene {
-  add: (object: THREEObject) => void;
-  remove: (object: THREEObject) => void;
-  children: THREEObject[];
-}
-
-/** Three.js Camera type (simplified) */
-interface THREECamera {
-  position: { x: number; y: number; z: number };
-  lookAt: (x: number, y: number, z: number) => void;
-}
-
-/** Three.js Renderer type (simplified) */
-interface THREERenderer {
-  setSize: (width: number, height: number) => void;
-  render: (scene: THREEScene, camera: THREECamera) => void;
-  domElement: HTMLCanvasElement;
-  dispose: () => void;
-  setClearColor: (color: number, alpha: number) => void;
-}
-
-/** Three.js Object3D type (simplified) */
-interface THREEObject {
-  rotation: { x: number; y: number; z: number };
-}
-
-/** Three.js module interface */
-interface THREEModule {
-  Scene: new () => THREEScene;
-  PerspectiveCamera: new (fov: number, aspect: number, near: number, far: number) => THREECamera;
-  WebGLRenderer: new (params?: { alpha?: boolean }) => THREERenderer;
-  BoxGeometry: new () => unknown;
-  MeshBasicMaterial: new (params: { color: number }) => unknown;
-  Mesh: new (geometry: unknown, material: unknown) => THREEObject;
-  Color: new (color: string | number) => unknown;
-}
-
-/** Internal instance tracking for a Three.js layer */
-interface ThreeInstance {
-  container: HTMLElement;
-  scene: THREEScene;
-  camera: THREECamera;
-  renderer: THREERenderer;
-  animationId?: number;
-  objects: THREEObject[];
-}
 
 const DANGEROUS_THREE_CODE_PATTERNS: Array<{ pattern: RegExp; name: string }> = [
   { pattern: /\bwindow\s*[[.]/i, name: 'window access' },
@@ -108,202 +61,118 @@ function findDangerousThreeCodePatterns(code: string): string[] {
  * Adapter for rendering Three.js 3D scenes in a composition layer.
  *
  * Implements the LayerAdapter interface for the 'three' domain type.
- * Manages scene creation, rendering loop, and cleanup.
+ * The scene, camera and renderer live inside a sandboxed iframe; the host
+ * sees camera position and scene contents as mirrored plain data.
  */
 export class ThreeAdapter implements LayerAdapter {
-  private threeModule?: THREEModule;
-  private instances = new Map<string, ThreeInstance>();
+  private threeSource?: string;
+  private instances = new Map<string, SandboxedInstance>();
 
-  /**
-   * Capture the Three.js module supplied by the browser host.
-   *
-   * Checks for the global THREE object in the browser environment.
-   * Must be called before render().
-   *
-   */
-  initialize(): void {
-    if (!this.threeModule) {
-      // In browser, THREE is global
-      if (typeof window !== 'undefined' && (window as unknown as { THREE: THREEModule }).THREE) {
-        this.threeModule = (window as unknown as { THREE: THREEModule }).THREE;
-      }
-      // Note: Three.js is browser-only, no Node.js import
-    }
+  /** Load the vendored Three.js source that is inlined into each sandbox frame. */
+  async initialize(): Promise<void> {
+    if (!this.threeSource) this.threeSource = await loadSandboxLib(VENDOR_ASSETS.threeGlobal);
   }
 
   /**
    * Render the Three.js layer into a container.
    *
-   * Creates a scene, camera, and renderer. Starts the animation loop.
-   * Executes the layer's code in an eval context with THREE access.
-   *
-   * @param layer - The layer to render
-   * @param container - DOM element to render into
-   * @param context - Optional render context with settings and state
-   * @returns The Three.js instance with scene, camera, renderer, and objects
-   * @throws Error if Three.js is not loaded (call initialize() first)
+   * @throws Error if Three.js is not loaded (call initialize() first) or the
+   *   code is blocked by the pre-check (a rejected candidate must throw so a
+   *   working layer is kept).
    */
-  render(layer: Layer, container: HTMLElement, context?: RenderContext): ThreeInstance {
-    const THREE = this.threeModule;
-    if (!THREE) {
+  render(layer: Layer, container: HTMLElement, context?: RenderContext): SandboxedInstance {
+    const threeSource = this.threeSource;
+    if (!threeSource) {
       throw new Error('Three.js not loaded. Call initialize() first.');
     }
 
-    // Create canvas container
-    const canvasContainer = document.createElement('div');
-    canvasContainer.style.width = '100%';
-    canvasContainer.style.height = '100%';
-    container.appendChild(canvasContainer);
-    const cleanup: Array<() => void> = [() => canvasContainer.remove()];
-    try {
-      // Get settings from context
-      const settings = context?.settings;
-      const width = settings?.width || 800;
-      const height = settings?.height || 600;
+    const settings = context?.settings;
+    const width = settings?.width || 800;
+    const height = settings?.height || 600;
+    const isTransparent = Boolean(layer.config.transparentBackground);
 
-      // Transparent background support
-      const isTransparent = layer.config.transparentBackground;
-
-      // Create Three.js scene, camera, and renderer
-      const scene = new THREE.Scene();
-      const camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 1000);
-      const renderer = new THREE.WebGLRenderer({ alpha: isTransparent });
-      cleanup.push(() => renderer.dispose());
-
-      renderer.setSize(width, height);
-
-      // Transparent background: set clear color with alpha 0
-      if (isTransparent) {
-        renderer.setClearColor(0x000000, 0);
-      }
-
-      canvasContainer.appendChild(renderer.domElement);
-
-      // Track objects created by this layer
-      const objects: THREEObject[] = [];
-
-      // Set up import proxy if context exists
-      if (context) {
-        const imports = context.state.get<Record<string, unknown>>(`__imports_${layer.id}`);
-      
-        // Make imports available globally for the eval context
-        if (imports && typeof window !== 'undefined') {
-          Object.entries(imports).forEach(([key, value]) => {
-            (window as unknown as Record<string, unknown>)[`__import_${key}`] = value;
-          });
-        }
-      }
-
-      // Track meshes through a THREE view instead of rewriting the layer's
-      // source; the old regex rewrite turned every `new THREE.Mesh(` into a
-      // syntax error.
-      const RealMesh = THREE.Mesh;
-      const TrackedMesh = function (geometry: unknown, material: unknown): THREEObject {
-        const mesh = new RealMesh(geometry, material);
-        objects.push(mesh);
-        return mesh;
-      } as unknown as THREEModule['Mesh'];
-      TrackedMesh.prototype = RealMesh.prototype;
-      const trackedThree: THREEModule = { ...THREE, Mesh: TrackedMesh };
-
-      // A rejected or failing candidate must throw so a working layer is kept.
-      const blockedPatterns = findDangerousThreeCodePatterns(layer.code);
-      if (blockedPatterns.length > 0) {
-        throw new Error(`Blocked unsafe Three.js layer code: ${blockedPatterns.join(', ')}`);
-      }
-      {
-        try {
-          // GeneratedCodeGuard: AST denylist + runtime computed-key guard + strict mode.
-          compileGeneratedCode(layer.code, {
-            THREE: trackedThree, scene, camera, renderer, objects, width, height,
-          })();
-        } catch (error) {
-          Logger.error('ThreeAdapter', 'Error executing Three.js code:', error);
-          throw error;
-        }
-      }
-
-      // Apply WebGL blend mode if not normal
-      const gl = renderer.domElement.getContext('webgl');
-      if (gl && layer.config.blendMode !== 'normal') {
-        const { src, dst } = getWebGLBlendFunc(layer.config.blendMode);
-        gl.enable(gl.BLEND);
-        gl.blendFunc(src, dst);
-      }
-
-      const instanceInfo: ThreeInstance = { container: canvasContainer, scene, camera, renderer, objects };
-      cleanup.push(() => {
-        if (instanceInfo.animationId !== undefined) cancelAnimationFrame(instanceInfo.animationId);
-      });
-
-      // Start render loop
-      const animate = () => {
-        if (this.instances.get(layer.id) !== instanceInfo) return;
-        try {
-          renderer.render(scene, camera);
-          instanceInfo.animationId = requestAnimationFrame(animate);
-        } catch (error) {
-          this.destroy(layer);
-          throw error;
-        }
-      };
-      // Prove the replacement can draw before retiring the working layer.
-      renderer.render(scene, camera);
-      instanceInfo.animationId = requestAnimationFrame(animate);
-      this.destroy(layer);
-      this.instances.set(layer.id, instanceInfo);
-
-      return instanceInfo;
-    } catch (error) {
-      for (const release of cleanup.reverse()) release();
-      throw error;
+    const violations = [
+      ...findGeneratedCodeViolations(layer.code),
+      ...findDangerousThreeCodePatterns(layer.code),
+    ];
+    if (violations.length > 0) {
+      throw new Error(`Blocked unsafe Three.js layer code: ${violations.join(', ')}`);
     }
+
+    const imports = context?.state.get<Record<string, unknown>>(`__imports_${layer.id}`);
+    // The generated code runs inside a function so it may redeclare these names.
+    const script = `${importsPrelude(imports)}
+(function () {
+  var width = ${width}, height = ${height};
+  var scene = new THREE.Scene();
+  var camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 1000);
+  var renderer = new THREE.WebGLRenderer({ alpha: ${isTransparent} });
+  renderer.setSize(width, height);
+  ${isTransparent ? 'renderer.setClearColor(0x000000, 0);' : ''}
+  document.body.appendChild(renderer.domElement);
+  var objects = [];
+  var RealMesh = THREE.Mesh;
+  var TrackedMesh = function (geometry, material) { var m = new RealMesh(geometry, material); objects.push(m); return m; };
+  TrackedMesh.prototype = RealMesh.prototype;
+  var trackedThree = Object.assign({}, THREE, { Mesh: TrackedMesh });
+  (function (THREE, scene, camera, renderer, objects, width, height) {
+${layer.code}
+  })(trackedThree, scene, camera, renderer, objects, width, height);
+  function frame() {
+    renderer.render(scene, camera);
+    window.__s1ntrReport({
+      cameraX: camera.position.x, cameraY: camera.position.y, cameraZ: camera.position.z,
+      sceneObjects: scene.children.map(function (c) { return c.type || 'Object3D'; })
+    });
+    requestAnimationFrame(frame);
+  }
+  frame();
+})();`;
+
+    const instance = mountGuardedFrame(container, violations, {
+      libs: [threeSource],
+      script,
+      width,
+      height,
+      transparent: isTransparent,
+      title: `Three.js layer ${layer.id}`,
+    });
+    // Replacing a layer: the previous working frame stays mounted and exported
+    // until the new frame reports its first frame. A replacement that throws
+    // inside the frame is discarded and the working layer is kept (#1533 review).
+    const previous = this.instances.get(layer.id);
+    if (!previous) {
+      this.instances.set(layer.id, instance);
+      return instance;
+    }
+    if (instance.iframe) instance.iframe.style.visibility = 'hidden';
+    instance.whenSettled((ok) => {
+      if (this.instances.get(layer.id) !== previous) { instance.destroy(); return; }
+      if (ok) {
+        if (instance.iframe) instance.iframe.style.visibility = '';
+        previous.destroy();
+        this.instances.set(layer.id, instance);
+      } else {
+        instance.destroy();
+      }
+    });
+    return instance;
   }
 
   /**
-   * Get exports for this layer.
-   *
-   * Exports camera position (x, y, z), scene objects, and renderer
-   * for use by other layers in the composition.
-   *
-   * @param layer - The layer to get exports for
-   * @returns Array of export definitions with getters
+   * Get exports for this layer: camera position and scene contents, as data
+   * mirrored out of the sandbox frame.
    */
   getExports(layer: Layer): Export[] {
     const instance = this.instances.get(layer.id);
     if (!instance) return [];
+    const read = (key: string) => () => instance.state[key];
 
     return [
-      {
-        name: 'cameraX',
-        type: 'number',
-        getter: () => instance.camera.position.x,
-        description: 'Camera X position',
-      },
-      {
-        name: 'cameraY',
-        type: 'number',
-        getter: () => instance.camera.position.y,
-        description: 'Camera Y position',
-      },
-      {
-        name: 'cameraZ',
-        type: 'number',
-        getter: () => instance.camera.position.z,
-        description: 'Camera Z position',
-      },
-      {
-        name: 'sceneObjects',
-        type: 'object',
-        getter: () => instance.scene.children,
-        description: 'Array of objects in the scene',
-      },
-      {
-        name: 'renderer',
-        type: 'object',
-        getter: () => instance.renderer,
-        description: 'WebGL renderer instance',
-      },
+      { name: 'cameraX', type: 'number', getter: read('cameraX'), description: 'Camera X position' },
+      { name: 'cameraY', type: 'number', getter: read('cameraY'), description: 'Camera Y position' },
+      { name: 'cameraZ', type: 'number', getter: read('cameraZ'), description: 'Camera Z position' },
+      { name: 'sceneObjects', type: 'object', getter: read('sceneObjects'), description: 'Types of the objects in the scene' },
     ];
   }
 
@@ -335,10 +204,7 @@ export class ThreeAdapter implements LayerAdapter {
   }
 
   /**
-   * Destroy/cleanup layer instance.
-   *
-   * Cancels the animation frame, disposes the renderer,
-   * removes the canvas from the DOM, and cleans up the instance.
+   * Destroy/cleanup layer instance: removes the sandbox frame.
    *
    * @param layer - The layer to destroy
    * @param _instance - The instance to destroy (unused - retrieved from internal map)
@@ -346,24 +212,8 @@ export class ThreeAdapter implements LayerAdapter {
   destroy(layer: Layer, _instance?: unknown): void {
     const instance = this.instances.get(layer.id);
     if (instance) {
-      // Cancel animation frame
-      if (instance.animationId !== undefined) {
-        cancelAnimationFrame(instance.animationId);
-      }
-      
-      // Dispose renderer
-      if (instance.renderer) {
-        instance.renderer.dispose();
-        
-        // Remove canvas from DOM
-        const canvas = instance.renderer.domElement;
-        if (canvas && canvas.parentElement) {
-          canvas.parentElement.removeChild(canvas);
-        }
-      }
-      
+      instance.destroy();
       this.instances.delete(layer.id);
-      instance.container.remove();
     }
   }
 

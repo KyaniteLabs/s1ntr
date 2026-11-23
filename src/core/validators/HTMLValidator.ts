@@ -6,6 +6,7 @@
  */
 
 import { parse } from '@babel/parser';
+import { d3BundlesLoaded, nearestD3Exports, unknownD3Members } from './d3Api.js';
 
 export interface HTMLValidationResult {
   valid: boolean;
@@ -181,6 +182,7 @@ export class HTMLValidator {
     }
 
     // Validate JS inside executable inline <script> tags
+    const d3Bundles = d3BundlesLoaded(code);
     const scriptMatches = code.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi);
     for (const match of scriptMatches) {
       const scriptTag = match[0];
@@ -199,6 +201,10 @@ export class HTMLValidator {
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
           errors.push(`HTML Syntax: Invalid JavaScript inside <script> tag: ${msg}`);
+        }
+        for (const name of unknownD3Members(scriptContent, d3Bundles, sourceType)) {
+          const near = nearestD3Exports(name, d3Bundles);
+          errors.push(`HTML d3: d3.${name} does not exist in the d3 this page loads (it is undefined at runtime)${near.length ? `; real names nearby: ${near.map((n) => `d3.${n}`).join(', ')}` : ''}`);
         }
       }
     }

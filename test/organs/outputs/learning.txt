@@ -1,0 +1,60 @@
+## 05-eval-nonarchive-numpy.txt
+# organ: taste | step: eval-nonarchive-numpy | data: real
+$ node <repo>/bin/sinter taste eval
+# cwd: <out>/_proj (repo: <repo>)
+# --- stdout
+{
+ "rated_pieces_with_frames": 217,
+ "up": 127,
+ "down": 90,
+ "grouped_cv_auc_by_prompt_family": 0.866,
+ "cv_n": 217,
+ "learning_curve_heldout_auc_by_n_votes": {
+  "4": 0.738,
+  "8": 0.758,
+  "12": 0.777,
+  "16": 0.781,
+  "24": 0.795,
+  "32": 0.802,
+  "48": 0.83,
+  "64": 0.838,
+  "140": 0.845
+ },
+ "curve_train_pool": 140,
+ "curve_heldout": 77,
+ "auc_levels_off_at_n_votes": 48,
+ "judge_prompt_fit_auc_vs_votes_for_context": 0.563,
+ "ablation": {
+  "full": 0.866,
+  "drop": {
+   "edge_structure": 0.85,
+   "chroma": 0.831,
+   "palette": 0.864,
+   "value": 0.872,
+   "layout": 0.86,
+   "motion": 0.866
+  },
+  "alone": {
+   "edge_structure": 0.712,
+   "chroma": 0.748,
+   "palette": 0.616,
+   "value": 0.786,
+   "layout": 0.598,
+   "motion": 0.409
+  },
+  "within_edge_density_tercile": {
+   "low_edge": {
+    "n": 73,
+    "up_rate": 0.42,
+    "auc": 0.866
+   },
+   "mid_edge": {
+    "n": 72,
+    "up_rate": 0.5,
+    "auc": 0.815
+   },
+   "high_edge": {
+    "n": 72,
+    "up_rate": 0.83,
+    "auc": 0.858
+   }

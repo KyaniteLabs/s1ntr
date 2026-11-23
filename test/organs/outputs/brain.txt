@@ -1,0 +1,4 @@
+# organ: brain | ArtKnowledgeGraph seed data | data: real, in-process call
+techniques=112 p5=30 hydra=19
+first p5: Coordinate Systems, Shape Primitives, Color Modes, Perlin Noise, Animation Basics
+first hydra: Source Creation, Texture Modulation, Color Manipulation, Blending and Composition, Geometry and Shapes

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { audioCapturePageInit, HeadlessRenderer } from '../../../src/render/HeadlessRenderer.js';
 import { measureLength } from '../../../src/reverse/RenderFit.js';
-import { summarizeAudioCapture } from '../../../src/render/AudioEvidence.js';
+import { AUDIO_CAPTURE_VERSION, summarizeAudioCapture } from '../../../src/render/AudioEvidence.js';
 
 type Processor = { onaudioprocess?: (e: { inputBuffer: { getChannelData: () => Float32Array } }) => void };
 
@@ -149,6 +149,14 @@ describe('summarizeAudioCapture', () => {
     expect(summary?.peakAmplitude).toBe(0.75);
   });
 
+  it('stamps the capture version so old (2x-stretched) tone scores can be told apart', () => {
+    const summary = summarizeAudioCapture({
+      samples: Float32Array.from([0, 0.5]), sampleRate: 44_100, duration: 0.75, success: true, warnings: [],
+    });
+    expect(summary?.captureVersion).toBe(AUDIO_CAPTURE_VERSION);
+    expect(AUDIO_CAPTURE_VERSION).toBeGreaterThanOrEqual(2);
+  });
+
   it('returns undefined when there was no capture', () => {
     expect(summarizeAudioCapture(undefined)).toBe(undefined);
   });
@@ -212,5 +220,74 @@ describe('audio judging window (#1641)', () => {
   it('sizes the page-side buffer cap from the judging window', () => {
     const script = (HeadlessRenderer as unknown as { audioCaptureScript: (ms: number) => string }).audioCaptureScript(10_000);
     expect(script.endsWith(')(441000);</script>')).toBe(true);
+  });
+});
+
+describe('capture ownership with several contexts (strudel no-audio follow-up)', () => {
+  const g = globalThis as Record<string, unknown>;
+  const win = () => g.window as { __audioCaptureData: number[]; __audioCaptureRate?: number; AudioContext: new () => unknown };
+  beforeEach(() => { vi.useFakeTimers(); FakeAudioContext.processors = []; FakeAudioContext.rate = 44_100; g.window = { AudioContext: FakeAudioContext }; });
+  afterEach(() => { vi.useRealTimers(); delete g.window; delete g.bpm; delete g.setbpm; });
+
+  it('a context that only blipped does not hold the capture while another carries the piece', () => {
+    audioCapturePageInit(1_000);
+    new (win().AudioContext)(); // e.g. a shell context the real engine replaced
+    new (win().AudioContext)(); // the engine that actually plays
+    const [blip, engine] = FakeAudioContext.processors;
+    feed(blip, [0.5, 0, 0, 0]);
+    expect(win().__audioCaptureData).toEqual([0.5, 0, 0, 0]);
+    for (let n = 0; n < 5; n += 1) feed(engine, [0.5, -0.5, 0.5, -0.5]);
+    for (let n = 0; n < 5; n += 1) feed(blip, [0, 0, 0, 0]);
+    expect(win().__audioCaptureData.length).toBe(20);
+    expect(win().__audioCaptureData[1]).toBe(-0.5);
+    const state = g.window as { __audioCaptureIncomplete?: boolean };
+    expect(state.__audioCaptureIncomplete).not.toBe(true);
+    feed(blip, [0.5, 0.5]);
+    expect(state.__audioCaptureIncomplete).toBe(true);
+  });
+
+  it('two contexts carrying the same sound (Tone + hook) still read at 1x, owned by the first', () => {
+    audioCapturePageInit(1_000);
+    new (win().AudioContext)();
+    new (win().AudioContext)();
+    const [a, b] = FakeAudioContext.processors;
+    for (let n = 0; n < 20; n += 1) { feed(a, [0.25, 0.5, 0.25, 0.5]); feed(b, [0.25, 0.5, 0.25, 0.5]); }
+    expect(win().__audioCaptureData.length).toBe(80);
+  });
+});
+
+describe('captureAudio waits for an engine that has not started', () => {
+  const g = globalThis as Record<string, unknown>;
+  afterEach(() => { delete g.window; vi.useRealTimers(); });
+  type Capture = (p: unknown, o: { stabilizationTime: number }, d: string) => Promise<{ samples: Float32Array; success: boolean }>;
+  const run = async (contextState: string, soundAfterWaits: number | null) => {
+    const data: number[] = [];
+    g.window = { __audioCaptureData: data, __audioCaptureWarnings: [], __audioCaptureRate: 44_100,
+      __audioCaptureDestinations: [{ context: { state: contextState } }] };
+    vi.useFakeTimers({ toFake: ['Date'] });
+    let waits = 0;
+    const page = {
+      waitForTimeout: async (ms: number) => {
+        waits += 1;
+        vi.setSystemTime(Date.now() + ms);
+        if (soundAfterWaits !== null && waits >= soundAfterWaits) while (data.length < 44_100) data.push(0.25);
+      },
+      evaluate: async (fn: (d?: string) => unknown, arg?: string) => fn(arg),
+    };
+    const r = new HeadlessRenderer();
+    const result = await ((r as unknown as { captureAudio: Capture }).captureAudio).call(r, page, { stabilizationTime: 1000 }, 'tone');
+    return { result, waits };
+  };
+
+  it('keeps a cold engine whose first sound lands after the settle time', async () => {
+    const { result } = await run('suspended', 5);
+    expect(result.success).toBe(true);
+    expect(result.samples.some((s) => s !== 0)).toBe(true);
+  });
+
+  it('does not pay extra for an engine that is running and silent', async () => {
+    const { result, waits } = await run('running', null);
+    expect(result.success).toBe(false);
+    expect(waits).toBe(1);
   });
 });

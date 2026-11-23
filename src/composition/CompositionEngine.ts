@@ -132,6 +132,11 @@ export class CompositionEngine {
   /**
    * Load and validate a composition control recipe, migrating v1 recipes.
    */
+  /** The adapter registered for a domain, if any. */
+  getAdapter(type: DomainType): LayerAdapter | undefined {
+    return this.adapters.get(type);
+  }
+
   loadControlRecipe(input: ControlRecipe | LegacyControlRecipe): ControlRecipe {
     const recipe = migrateControlRecipe(input);
     const layers = controlRecipeLayers(recipe);

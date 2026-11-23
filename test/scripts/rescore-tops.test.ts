@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import { execSync } from 'child_process';
 import { join } from 'path';
-import { existsSync, mkdirSync, writeFileSync, rmSync, writeFileSync as writeSync } from 'fs';
+import { existsSync, mkdirSync, writeFileSync, rmSync, writeFileSync as writeSync, readFileSync } from 'fs';
 
 // ---------------------------------------------------------------------------
 // Test helper: build the project before running integration-style tests.
@@ -339,4 +339,43 @@ describe('rescore-cadence.sh surfaces non-zero from rescore-tops.mjs', () => {
     // Must NOT print "ok — N records" when the inner script failed.
     expect(combined).not.toMatch(/^.*rescore.*ok.*[0-9]+ records/s);
   });
+});
+
+// ---------------------------------------------------------------------------
+// Sol L3-03: --persist must never write a placeholder score back as a grade.
+// ---------------------------------------------------------------------------
+describe('rescore-tops --persist with an evaluator that gives no verdict', () => {
+  it('leaves the archive score alone, marks the row unscored, and exits non-zero', () => {
+    const archivePath = join(FIXTURES_DIR, 'archive-unscored.json');
+    // A mid-tone composition that passes the objective render gates, so only the evaluator can fail.
+    const svg = '<svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg"><rect width="200" height="200" fill="#223344"/><circle cx="70" cy="80" r="40" fill="#4a7a9a"/><rect x="100" y="90" width="70" height="70" fill="#8a5a6a" transform="rotate(20 135 125)"/><path d="M10 180 Q100 100 190 170" stroke="#d0b070" stroke-width="6" fill="none"/></svg>';
+    writeFileSync(archivePath, JSON.stringify({
+      lastUpdated: new Date().toISOString(),
+      archives: { svg: [{ id: 'svg-entry-1', domain: 'svg', prompt: 'a composition', output: svg,
+        qualityScore: 0.8, metadata: {}, createdAt: new Date().toISOString() }] },
+    }));
+    let rc = 0;
+    let stdout = '';
+    try {
+      stdout = execSync(
+        `node "${join(REPO_ROOT, 'scripts/quality/rescore-tops.mjs')}" --domain svg --all --persist`,
+        {
+          cwd: REPO_ROOT, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000,
+          // An evaluator that cannot answer: nothing listens on this port.
+          env: { ...process.env, QUALITY_ARCHIVE_PATH: archivePath, SINTER_LLM_BASE_URL: 'http://127.0.0.1:1/unreachable' },
+        },
+      );
+    } catch (err: unknown) {
+      const e = err as { status?: number; stdout?: string };
+      rc = e.status ?? 1;
+      stdout = e.stdout ?? '';
+    }
+    const records = stdout.trim().split('\n').filter(l => l.startsWith('{')).map(l => JSON.parse(l));
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ scoreState: 'unscored', fresh: null, delta: null, persisted: false });
+    expect(typeof records[0].failureClass).toBe('string');
+    expect(rc).toBe(1);
+    const stored = JSON.parse(readFileSync(archivePath, 'utf-8')).archives.svg[0];
+    expect(stored.qualityScore).toBe(0.8);
+  }, 95_000);
 });

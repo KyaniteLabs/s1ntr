@@ -15,13 +15,21 @@ const baseline: BaselineRow[] = JSON.parse(readFileSync(
   path.resolve(import.meta.dirname, '../../fixtures/production-authority-baseline-2026-11-14.json'), 'utf8'));
 
 describe('production authority inventory composition', () => {
-  it('keeps the 119 rows that existed before the per-area split, unchanged', () => {
+  it('keeps historical authority rows except for the retired direct-provider constructors', () => {
     expect(baseline).toHaveLength(119);
     const byLocator = new Map(productionAuthorityInventory.map(row => [row.locator, row]));
+    const retiredConstructors = new Set([
+      'src/generators/kinetic/KineticGenerator.ts:provider',
+      'src/generators/tone/ToneGenerator.ts:provider',
+    ]);
     for (const old of baseline) {
-      expect(byLocator.get(old.locator), old.locator).toMatchObject(old);
+      if (retiredConstructors.has(old.locator)) {
+        expect(byLocator.has(old.locator), old.locator).toBe(false);
+      } else {
+        expect(byLocator.get(old.locator), old.locator).toMatchObject(old);
+      }
     }
-    expect(productionAuthorityInventory.length).toBeGreaterThanOrEqual(baseline.length);
+    expect(productionAuthorityInventory.length).toBeGreaterThanOrEqual(baseline.length - retiredConstructors.size);
   });
 
   it('composes every area file exactly once with no duplicate locators', () => {

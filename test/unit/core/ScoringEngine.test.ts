@@ -16,6 +16,8 @@ import {
 import type { ScoringInput, ScoringStrategy, ScoringResult, FitnessInput } from '../../../src/core/ScoringEngine.js';
 import { Domain } from '../../../src/types/domains.js';
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { JUDGE_PASSING_THRESHOLD, meetsQualityFloor } from '../../../src/aesthetic/qualityFloor.js';
 
 // ---------------------------------------------------------------------------
 // vi.hoisted() — all mock variables referenced in vi.mock() factories
@@ -1109,6 +1111,34 @@ describe('ScoringEngine', () => {
       expect(mockLLMClientInstance.generateWithImages).not.toHaveBeenCalled();
     });
 
+    it('never grades audio on its player-shell pixels (L3-08): a clipped shell still reaches the judge unpenalised', async () => {
+      mockLLMClientInstance.generate.mockResolvedValue({
+        code: '{"score":0.85,"confidence":0.9,"reasoning":"Good"}',
+        success: true,
+      });
+      const fakeLLM = new (await import('../../../src/llm/LLMClient.js')).LLMClient({ role: 'evaluator' });
+      const result = await scoreRenderedEvidence({
+        timingMs: 200, infraUnavailable: false, candidateFailure: false,
+        audio: { success: true, durationSeconds: 2, peakAmplitude: 0.4, rmsAmplitude: 0.1 },
+        renderMeasure: { verdict: 'highlight-clipped', meanLuminance: 0.467, brightFraction: 0.388,
+          darkFraction: 0.147, clippedHighlightFraction: 0.186, brightnessStd: 86.39 },
+      }, 'Tone.Transport.start()', 'a slow arpeggio', fakeLLM, 'tone');
+      expect(result.score).toBe(0.85);
+      expect(result.failureClass).toBe('none');
+    });
+
+    it('L3-07: tells the judge how far piece time got when the arc budget ran out', async () => {
+      mockLLMClientInstance.generate.mockResolvedValue({
+        code: '{"score":0.7,"confidence":0.9,"reasoning":"ok"}', success: true,
+      });
+      const fakeLLM = new (await import('../../../src/llm/LLMClient.js')).LLMClient({ role: 'evaluator' });
+      await scoreRenderedEvidence({ timingMs: 200, infraUnavailable: false, candidateFailure: false,
+        arc: { horizonMs: 8000, reachedMs: 2500, wallMs: 3000 } }, 'function setup() {}', 'a sketch', fakeLLM);
+      const sent = JSON.stringify(mockLLMClientInstance.generate.mock.calls.at(-1));
+      expect(sent).toContain('piece time 2500 of 8000 ms');
+      expect(sent).toContain('arc budget ran out');
+    });
+
     it('uses provided LLM and parses JSON response', async () => {
       mockLLMClientInstance.generate.mockResolvedValue({
         code: '{"score":0.85,"confidence":0.9,"reasoning":"Good"}',
@@ -1196,6 +1226,32 @@ describe('ScoringEngine', () => {
       );
     });
 
+    it('caps a judge-praised overmixed frame and feeds painter-language repair advice back', async () => {
+      mockLLMClientInstance.generate.mockResolvedValue({
+        code: '{"score":0.9,"confidence":0.8,"reasoning":"Palette matches the brief"}',
+        success: true,
+      });
+      const fakeLLM = new (await import('../../../src/llm/LLMClient.js')).LLMClient({ role: 'evaluator' });
+      const result = await scoreRenderedEvidence(
+        {
+          timingMs: 200,
+          infraUnavailable: false,
+          candidateFailure: false,
+          renderMeasure: {
+            verdict: 'ok', meanLuminance: 0.3, brightFraction: 0.1, darkFraction: 0.2, brightnessStd: 30,
+            valueStructure: { lightP98: 0.5, lightP02: 0.2, chromaP95: 0.08, muddyHueShare: 0.9, overmixed: true },
+          },
+        },
+        'function setup() {}',
+        'make a visible sketch',
+        fakeLLM,
+      );
+
+      expect(result.score).toBeLessThanOrEqual(0.29);
+      expect(result.repairAdvice?.issue).toContain('Overmixed / lost value structure');
+      expect(result.reasoning).toContain('Overmixed / lost value structure');
+    });
+
     it('does not cap scores for ok render measures', async () => {
       mockLLMClientInstance.generate.mockResolvedValue({
         code: '{"score":0.9,"confidence":0.8,"reasoning":"Balanced frame"}',
@@ -1217,6 +1273,105 @@ describe('ScoringEngine', () => {
       expect(result.score).toBe(0.9);
       expect(result.repairAdvice).toBeUndefined();
       expect(result.renderMeasure?.verdict).toBe('ok');
+    });
+
+    describe('alive glitch is not broken (owner-thumbed mimo hydra pieces)', () => {
+      const b64 = (name: string) => readFileSync(
+        new URL(`../../fixtures/glitch-alive/${name}.png`, import.meta.url),
+      ).toString('base64');
+      const shot = (name: string) => ({ mimeType: 'image/png', dataBase64: b64(name), width: 640, height: 400 });
+      const score = async (take: string, judged: number) => {
+        const judge = {
+          code: `{"score":${judged},"confidence":0.8,"reasoning":"corrupted pixel static, broken feedback chain"}`,
+          success: true,
+        };
+        mockLLMClientInstance.generate.mockResolvedValue(judge);
+        mockLLMClientInstance.generateWithImages.mockResolvedValue(judge);
+        const fakeLLM = new (await import('../../../src/llm/LLMClient.js')).LLMClient({ role: 'evaluator' });
+        return scoreRenderedEvidence(
+          {
+            timingMs: 200, infraUnavailable: false, candidateFailure: false,
+            screenshot: shot(`${take}-early`), lateScreenshot: shot(`${take}-late`),
+          },
+          'noise().out()',
+          'a hydra piece',
+          fakeLLM,
+        );
+      };
+
+      it('lifts hydra-organic-xhigh-r2 (judged 0.10) out of the broken band', async () => {
+        const result = await score('organic-xhigh-r2-r3', 0.1);
+        expect(meetsQualityFloor(result.score)).toBe(true);
+        expect(result.score).toBeLessThan(JUDGE_PASSING_THRESHOLD);
+        expect(result.reasoning).toContain('Alive glitch');
+      });
+
+      it('lifts hydra-feedback-high-r2 (judged 0.31) out of the broken band', async () => {
+        const result = await score('feedback-high-r2-r3', 0.31);
+        expect(meetsQualityFloor(result.score)).toBe(true);
+      });
+
+      it('leaves a judged score above the floor untouched', async () => {
+        expect((await score('feedback-high-r2-r3', 0.72)).score).toBe(0.72);
+      });
+
+      it('still fails a real near-uniform frame from the same runs', async () => {
+        const result = await score('organic-xhigh-r2-r2', 0.1);
+        expect(meetsQualityFloor(result.score)).toBe(false);
+        expect(result.reasoning).not.toContain('Alive glitch');
+      });
+
+      it('still fails a frozen glitch frame', async () => {
+        const judge = { code: '{"score":0.1,"confidence":0.8,"reasoning":"static"}', success: true };
+        mockLLMClientInstance.generate.mockResolvedValue(judge);
+        mockLLMClientInstance.generateWithImages.mockResolvedValue(judge);
+        const fakeLLM = new (await import('../../../src/llm/LLMClient.js')).LLMClient({ role: 'evaluator' });
+        const frame = shot('organic-xhigh-r2-r3-late');
+        const result = await scoreRenderedEvidence(
+          { timingMs: 200, infraUnavailable: false, candidateFailure: false, screenshot: frame, lateScreenshot: frame },
+          'noise().out()', 'a hydra piece', fakeLLM,
+        );
+        expect(meetsQualityFloor(result.score)).toBe(false);
+      });
+    });
+
+    describe('judge-emitted brief difficulty', () => {
+      const run = async (reply: string) => {
+        mockLLMClientInstance.generate.mockResolvedValue({ code: reply, success: true });
+        const fakeLLM = new (await import('../../../src/llm/LLMClient.js')).LLMClient({ role: 'evaluator' });
+        return scoreRenderedEvidence(
+          { timingMs: 200, infraUnavailable: false, candidateFailure: false }, 'function setup() {}', 'a hard brief', fakeLLM);
+      };
+
+      it('carries the judge\'s difficulty as a named 1-10 integer field', async () => {
+        expect((await run('{"score":0.8,"confidence":0.8,"reasoning":"ok","difficulty":7}')).difficulty).toBe(7);
+      });
+
+      it('rounds and clamps to 1-10, and accepts a numeric string', async () => {
+        expect((await run('{"score":0.8,"confidence":0.8,"difficulty":9.6}')).difficulty).toBe(10);
+        expect((await run('{"score":0.8,"confidence":0.8,"difficulty":0}')).difficulty).toBe(1);
+        expect((await run('{"score":0.8,"confidence":0.8,"difficulty":42}')).difficulty).toBe(10);
+        expect((await run('{"score":0.8,"confidence":0.8,"difficulty":"4"}')).difficulty).toBe(4);
+      });
+
+      it('leaves difficulty absent when the judge gave none or a non-number, never a default', async () => {
+        expect('difficulty' in (await run('{"score":0.8,"confidence":0.8}'))).toBe(false);
+        expect('difficulty' in (await run('{"score":0.8,"confidence":0.8,"difficulty":"hard"}'))).toBe(false);
+        expect('difficulty' in (await run('{"score":0.8,"confidence":0.8,"difficulty":null}'))).toBe(false);
+      });
+
+      it('asks for it in both judge prompts, as a rating of the brief not the artwork', async () => {
+        await run('{"score":0.8,"confidence":0.8,"difficulty":3}');
+        const system = String(mockLLMClientInstance.generate.mock.calls.at(-1)?.[0]);
+        expect(system).toMatch(/difficulty/);
+        expect(system).toMatch(/BRIEF/);
+      });
+
+      it('does not change the score', async () => {
+        const a = await run('{"score":0.66,"confidence":0.8,"difficulty":9}');
+        const b = await run('{"score":0.66,"confidence":0.8}');
+        expect(a.score).toBe(b.score);
+      });
     });
 
     it('does not apply a render-measure penalty when measurement is unavailable', async () => {
@@ -1492,9 +1647,43 @@ describe('ScoringEngine', () => {
       expect(result.failureClass).toBe('parse');
       expect(result.repairAdvice).toEqual({
         issue: 'Evaluator LLM response could not be parsed',
-        fix: 'Retry the evaluation or verify the evaluator model returns valid JSON',
-        constraint: 'Evaluator must return a parseable JSON object',
+        fix: 'Retry the evaluation or verify the evaluator model returns the requested JSON verdict',
+        constraint: 'Evaluator must return a parseable JSON object with a score and a confidence',
       });
+      expect(result.scoreState).toBe('unscored');
+    });
+
+    // Sol L3-02: structurally valid JSON that carries no verdict used to become a healthy 0.5 / 0.5.
+    it.each([
+      ['an empty object', '{}'],
+      ['string-typed score', '{"score":"high","confidence":0.9}'],
+      ['a score without a confidence', '{"score":0.8}'],
+      ['a truncated object', '{"score":0.8,"confid'],
+    ])('leaves %s unscored, never a default grade', async (_label, reply) => {
+      mockLLMClientInstance.generate.mockResolvedValue({ code: reply, success: true });
+      const fakeLLM = new (await import('../../../src/llm/LLMClient.js')).LLMClient({ role: 'evaluator' });
+      const result = await scoreRenderedEvidence(
+        { timingMs: 200, infraUnavailable: false, candidateFailure: false },
+        'code', 'brief', fakeLLM,
+      );
+      expect(result.scoreState).toBe('unscored');
+      expect(result.confidence).toBe(0);
+      expect(result.failureClass).toBe('parse');
+      expect(result.unscoredReason).toMatch(/parse|verdict|JSON|score/i);
+    });
+
+    it('still grades a complete verdict as scored', async () => {
+      mockLLMClientInstance.generate.mockResolvedValue({
+        code: '{"score":0.8,"confidence":0.9,"reasoning":"ok"}', success: true,
+      });
+      const fakeLLM = new (await import('../../../src/llm/LLMClient.js')).LLMClient({ role: 'evaluator' });
+      const result = await scoreRenderedEvidence(
+        { timingMs: 200, infraUnavailable: false, candidateFailure: false },
+        'code', 'brief', fakeLLM,
+      );
+      expect(result.scoreState).toBeUndefined();
+      expect(result.score).toBeCloseTo(0.8, 5);
+      expect(result.confidence).toBeCloseTo(0.9, 5);
     });
 
     it('names a slow evaluator, not the network, when scoring times out', async () => {
@@ -1632,5 +1821,19 @@ describe('ScoringEngine', () => {
         expect.anything(),
       );
     });
+  });
+});
+
+describe('parseJudgeJson', () => {
+  it('accepts a verdict whose notes quote ASCII-art backslashes', async () => {
+    const { parseJudgeJson } = await import('../../../src/core/ScoringEngine.js');
+    const raw = '{"technical":0.7,"notes":"the crucible rim /\\_/ and |\\ edge look wrong"}';
+    expect(() => JSON.parse(raw)).toThrow();
+    expect(parseJudgeJson(raw).technical).toBe(0.7);
+  });
+  it('leaves valid escapes alone and still rejects real garbage', async () => {
+    const { parseJudgeJson } = await import('../../../src/core/ScoringEngine.js');
+    expect(parseJudgeJson('{"a":"x\\ny\\\\z\\u00e9"}').a).toBe('x\ny\\zé');
+    expect(() => parseJudgeJson('{"a":')).toThrow();
   });
 });

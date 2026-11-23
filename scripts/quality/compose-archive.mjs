@@ -3,6 +3,7 @@
 import fs from 'fs'; import os from 'os'; import path from 'path';
 import puppeteer from 'puppeteer';
 import { fileURLToPath } from 'url';
+import { prepareBrowserScratch } from '../lib/scratch-space.mjs';
 const ROOT=path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const { CompositionOrchestrator } = await import(path.join(ROOT,'dist/composition/CompositionOrchestrator.js'));
 const archive=JSON.parse(fs.readFileSync(path.join(os.homedir(),'.sinter/archive/quality_archive.json'),'utf-8'));
@@ -20,7 +21,7 @@ const gated=await CompositionOrchestrator.runRenderGate(title,bg,layers,html);
 console.log('gate:',JSON.stringify(gated.report??{},null,0).slice(0,300));
 fs.mkdirSync('.quality/showcase',{recursive:true});
 fs.writeFileSync('.quality/showcase/tide-pool-archive.html',gated.html);
-const browser=await puppeteer.launch({headless:'new',args:['--no-sandbox','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--enable-webgl']});
+prepareBrowserScratch();const browser=await puppeteer.launch({headless:'new',args:['--no-sandbox','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--enable-webgl']});
 const page=await browser.newPage();
 await page.setViewport({width:1200,height:800});
 await page.setContent(gated.html,{waitUntil:'load',timeout:30000});

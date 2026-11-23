@@ -88,6 +88,26 @@ describe('the renderer starts every audio shell with a real click', () => {
     expect(Tone.starts).toBeGreaterThan(0);
   });
 
+  // A piece with no play control at all schedules its score at load. The shell's
+  // own Start is the only control, so the renderer must still press it: Tone.start()
+  // unlocks the context and the Transport runs what the piece scheduled (#1784).
+  const controlless: Array<[string, string]> = [
+    ['plain Tone.js with no button and no play()', 'window.scheduled = true; Tone.Transport.schedule(() => {}, 0);'],
+    ['Tone HTML with no button and no play()', toneHtml('<script>window.scheduled = true; Tone.Transport.schedule(() => {}, 0);</script>')],
+  ];
+
+  it.each(controlless)('%s', async (_, code) => {
+    const Tone = fakeTone();
+    const { page, window } = shellPage(GenericWrapper.wrap(code, { domain: 'tone' }), { Tone });
+    const result = await trigger(page, 'tone');
+    await settle();
+    expect(window.scheduled).toBe(true);
+    expect(result.controlsAccessible).toBe(true);
+    expect(result.started).toBe(true);
+    expect(Tone.starts).toBeGreaterThan(0);
+    expect(Tone.Transport.state).toBe('started');
+  });
+
   it("presses the shell's Start button, not an artwork button that is also called #start", async () => {
     const Tone = fakeTone();
     const code = toneHtml(`<button id="start">Go</button>

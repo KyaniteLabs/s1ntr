@@ -20,6 +20,12 @@ function decide(overrides: Partial<Parameters<CreativeIterationGate['decide']>[0
 }
 
 describe('CreativeIterationGate', () => {
+  it('does not infer the removed revideo domain from video-ish prompts', () => {
+    for (const prompt of ['render an mp4 title sequence', 'a revideo motion graphics piece']) {
+      expect(decide({ prompt }).domain).toBe(Domain.P5);
+    }
+  });
+
   it('keeps the first iteration alive even below the quality threshold', () => {
     expect(decide({ iteration: 1, score: 0.2 }).shouldBreak).toBe(false);
   });

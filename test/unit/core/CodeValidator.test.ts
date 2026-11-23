@@ -833,12 +833,12 @@ function setup() {
 
     it('should auto-detect Shadertoy mainImage shaders as GLSL instead of p5', () => {
       const code = `precision mediump float;
-uniform float iTime;
-uniform vec2 iResolution;
+uniform float u_time;
+uniform vec2 u_resolution;
 
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
-  vec2 uv = fragCoord / iResolution.xy;
-  float wave = sin(uv.x * 12.0 + iTime) * 0.5 + 0.5;
+  vec2 uv = fragCoord / u_resolution.xy;
+  float wave = sin(uv.x * 12.0 + u_time) * 0.5 + 0.5;
   fragColor = vec4(mix(vec3(0.1, 0.2, 0.9), vec3(1.0, 0.4, 0.2), wave), 1.0);
 }`;
       const result = CodeValidator.validate(code);
@@ -1134,5 +1134,14 @@ describe('S4 completion — theory assessment consumer chain', () => {
     const { CodeValidator } = await import('../../../src/core/CodeValidator.js');
     const result = CodeValidator.validate('function setup(){}\nfunction draw(){}', 'p5');
     expect(result.theoryAssessment).toBeUndefined();
+  });
+});
+
+describe('dataviz mount message', () => {
+  it('shows how to create the svg when the page selects a div and never makes one', () => {
+    const page = '<!DOCTYPE html><html><head><script src="/vendor/d3/d3.min.js"></script></head><body><div id="chart"></div><script>const svg = d3.select("#chart"); svg.attr("width", 800);</script></body></html>';
+    const message = CodeValidator.validate(page, 'dataviz').errors.find((error) => error.includes('visualization mount')) ?? '';
+    expect(message).toContain(".append('svg')");
+    expect(CodeValidator.validate(page.replace('d3.select("#chart")', 'd3.select("#chart").append("svg")'), 'dataviz').errors.join(' ')).not.toContain('visualization mount');
   });
 });

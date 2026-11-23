@@ -116,7 +116,7 @@ export abstract class TierBasedGenerator {
    * ~/.sinter/config.json) are properly wired without requiring env vars.
    * Uses a promise to prevent race conditions during concurrent calls.
    */
-  private async resolveConfigIfNeeded(): Promise<void> {
+  protected async resolveConfigIfNeeded(): Promise<void> {
     if (!this._configNeedsResolution) return;
     
     // Race-safe lazy initialization: only first caller creates the promise
@@ -126,7 +126,7 @@ export abstract class TierBasedGenerator {
     
     return this._configResolutionPromise;
   }
-  
+
   private async doResolveConfig(): Promise<void> {
     // Resolve the GENERATOR ROLE explicitly. Previously this used
     // getEffectiveConfig() (the default provider) and passed its baseUrl/model/
@@ -150,6 +150,7 @@ export abstract class TierBasedGenerator {
         model: gen.model,
         apiKey: gen.apiKey,
         temperature: gen.temperature,
+        timeout: gen.timeoutOverride,
         thinking: gen.thinking,
         role: 'generator',
       });
@@ -945,19 +946,11 @@ export abstract class TierBasedGenerator {
    * Opt-in: call this when you have a concept graph to incorporate spatial prompt engineering.
    */
   async enrichWithConceptGraph(prompt: string, graphPath: string): Promise<string> {
-    const { readFileSync } = await import('node:fs');
-    const { synthesizePrompt } = await import('../nodeprompt/index.js');
-
-    const graphJson = readFileSync(graphPath, 'utf-8');
-    const graph = JSON.parse(graphJson);
-
-    if (!graph.nodes || !graph.edges || !graph.originalPrompt) {
-      throw new GenerationError(
-        `${this.constructor.name}: Graph JSON must contain { nodes, edges, originalPrompt }`,
-        this.domain,
-      );
+    const { enrichPromptFromGraphFile } = await import('../nodeprompt/index.js');
+    try {
+      return enrichPromptFromGraphFile(prompt, graphPath);
+    } catch (error) {
+      throw new GenerationError(`${this.constructor.name}: ${error instanceof Error ? error.message : String(error)}`, this.domain);
     }
-
-    return synthesizePrompt(prompt ?? graph.originalPrompt, graph.nodes, graph.edges);
   }
 }

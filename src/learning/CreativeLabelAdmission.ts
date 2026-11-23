@@ -4,7 +4,8 @@ import { sealCreativeAdmission, verifyCreativeAdmission,
   '../runtime-core/CreativeAdmissionAuthority.js';
 
 export type CreativeLabelTrustKind =
-  | 'owner-preference' | 'universal-criterion' | 'transfer-principle';
+  | 'owner-preference' | 'universal-criterion' | 'transfer-principle' | 'judge-scoring'
+  | 'legacy-backfill-judge';
 export type CreativeLabelUse = 'few-shot' | 'evaluator-training' | 'hard-negative';
 
 export interface CreativeLabelAdmission {
@@ -15,6 +16,8 @@ export interface CreativeLabelAdmission {
   readonly artifactDigest: string;
   readonly evidenceDigest: string;
   readonly decisionDigest: string;
+  /** Signed archive projection for evaluator training from a governed Create. */
+  readonly trainingEvidence?: { readonly operationDigest: string; readonly quality: number };
   readonly rendered: true;
   readonly identityValid: true;
   readonly digestMatched: true;
@@ -34,16 +37,24 @@ const stable = (value: unknown): string => {
 const digest = (value: unknown): string =>
   createHash('sha256').update(stable(value)).digest('hex');
 
+function validTrainingEvidence(input: Pick<CreativeLabelAdmission, 'trainingEvidence' | 'trustKind' | 'allowedUses'>): boolean {
+  const evidence = input.trainingEvidence;
+  return evidence === undefined || Boolean(evidence && DIGEST.test(evidence.operationDigest)
+    && Number.isFinite(evidence.quality) && evidence.quality >= 0 && evidence.quality <= 1
+    && input.trustKind === 'judge-scoring'
+    && input.allowedUses.length === 1 && input.allowedUses[0] === 'evaluator-training');
+}
+
 export function createCreativeLabelAdmission(input: Omit<CreativeLabelAdmission,
   'schema' | 'schemaVersion' | 'authorityProof' | 'labelDigest'>,
 authority?: CreativeAdmissionSigner): CreativeLabelAdmission {
   if (input.rendered !== true || input.identityValid !== true
-    || input.digestMatched !== true || input.degraded !== false
+    || input.digestMatched !== true || input.degraded !== false || !validTrainingEvidence(input)
     || ![input.artifactDigest, input.evidenceDigest,
       input.decisionDigest].every(value => DIGEST.test(value))) {
     throw new Error('CREATIVE_LABEL_EVIDENCE_INVALID');
   }
-  if (!['owner-preference', 'universal-criterion', 'transfer-principle']
+  if (!['owner-preference', 'universal-criterion', 'transfer-principle', 'judge-scoring', 'legacy-backfill-judge']
     .includes(input.trustKind) || input.allowedUses.length === 0
     || input.allowedUses.some(use =>
       !['few-shot', 'evaluator-training', 'hard-negative'].includes(use))) {
@@ -51,6 +62,7 @@ authority?: CreativeAdmissionSigner): CreativeLabelAdmission {
   }
   const body = Object.freeze({ schema: 'sinter.creative-label-admission' as const,
     schemaVersion: 1 as const, ...input,
+    ...(input.trainingEvidence ? { trainingEvidence: Object.freeze({ ...input.trainingEvidence }) } : {}),
     allowedUses: Object.freeze([...new Set(input.allowedUses)]) });
   const authorityProof = sealCreativeAdmission(body, authority);
   const admitted = Object.freeze({ ...body, authorityProof });
@@ -64,7 +76,7 @@ export function validateCreativeLabelAdmission(value: CreativeLabelAdmission,
     || labelDigest !== digest({ ...body, authorityProof })
     || !verifyCreativeAdmission(body, authorityProof) || value.rendered !== true
     || value.identityValid !== true || value.digestMatched !== true
-    || value.degraded !== false) throw new Error('CREATIVE_LABEL_ADMISSION_INVALID');
+    || value.degraded !== false || !validTrainingEvidence(value)) throw new Error('CREATIVE_LABEL_ADMISSION_INVALID');
   if (!value.allowedUses.includes(use)) throw new Error('CREATIVE_LABEL_USE_NOT_ADMITTED');
   return value;
 }

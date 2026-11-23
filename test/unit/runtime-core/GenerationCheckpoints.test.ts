@@ -13,22 +13,19 @@ vi.mock('../../../src/generators/DomainTeaching.js', () => ({ buildDomainTeachin
 // timed out and the whole run failed with the first answer thrown away. Each
 // completed provider reply is saved before the next call; a rerun resumes.
 
-const source = `<!doctype html><html><head></head><body>
-<div data-composition-id="layers"><div class="clip">Foreground</div></div>
-<script>const tl = gsap.timeline({paused:true});
-tl.to('.clip', {x:100,duration:2}); window.__timelines = {layers:tl};</script>
-</body></html>`;
-const repaired = source.replace('</head>', '<script src="/vendor/gsap/3.15.0/gsap.min.js"></script></head>');
+const source = `<p>not an svg</p>`;
+const repaired = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100"><circle cx="50" cy="50" r="40" fill="#4ee6c8"/></svg>`;
 
-function effectsWith(generate: ReturnType<typeof vi.fn>, checkpoints: FileGenerationCheckpointStore) {
+function effectsWith(generate: ReturnType<typeof vi.fn>, checkpoints: FileGenerationCheckpointStore,
+  seat: Record<string, unknown> = {}) {
   return createLiminalProductionEffects({
-    generator: { getConfig: () => ({ provider: 'fake', model: 'generator' }), generate } as never,
+    generator: { getConfig: () => ({ provider: 'fake', model: 'generator', ...seat }), generate } as never,
     evaluator: {} as never, renderer: {} as never,
     generatorIdentity: 'fake/generator', evaluatorIdentity: 'fake/evaluator', rendererIdentity: 'fake/renderer',
     checkpoints,
   });
 }
-const request = () => ({ identity: 'fake/generator', domain: 'hyperframes', prompt: 'Layered parallax',
+const request = () => ({ identity: 'fake/generator', domain: 'svg', prompt: 'Layered parallax',
   startTransport: vi.fn(async () => 1), failTransport: vi.fn(async () => {}) });
 
 describe('generation checkpoints', () => {
@@ -44,7 +41,7 @@ describe('generation checkpoints', () => {
     const second = vi.fn().mockResolvedValueOnce({ success: true, code: repaired });
     const artifact = await effectsWith(second, store).generate(request());
     expect(second).toHaveBeenCalledTimes(1);
-    expect(second.mock.calls[0][1]).toContain('HyperFrames must load GSAP');
+    expect(second.mock.calls[0][1]).toContain('svg');
     expect(artifact.source).toBe(repaired);
     expect(JSON.parse(artifact.provenance).acceptedFrom).toBe('repair');
   });
@@ -84,5 +81,36 @@ describe('generation checkpoints', () => {
     const { writeFileSync } = await import('node:fs');
     writeFileSync(join(dir, 'k.json'), '{not json');
     await expect(store.load('k')).resolves.toBeNull();
+  });
+
+  // Sol G05: the same provider/model label under a changed endpoint or thinking budget is a different request.
+  it.each([
+    ['endpoint', { baseUrl: 'http://127.0.0.1:1111/v1' }, { baseUrl: 'http://127.0.0.1:2222/v1' }],
+    ['thinking', { thinking: { enabled: true, budgetTokens: 1000 } }, { thinking: { enabled: false } }],
+    ['max tokens', { maxTokens: 2000 }, { maxTokens: 9000 }],
+  ])('a changed %s never reuses the old reply', async (_name, before, after) => {
+    const dir = mkdtempSync(join(tmpdir(), 'gen-ckp-'));
+    const store = new FileGenerationCheckpointStore(dir);
+    const first = vi.fn()
+      .mockResolvedValueOnce({ success: true, code: source })
+      .mockRejectedValueOnce(new Error('timed out'));
+    await expect(effectsWith(first, store, before).generate(request())).rejects.toThrow('timed out');
+
+    const second = vi.fn()
+      .mockResolvedValueOnce({ success: true, code: source })
+      .mockResolvedValueOnce({ success: true, code: repaired });
+    await effectsWith(second, store, after).generate(request());
+    expect(second).toHaveBeenCalledTimes(2); // the primary was asked again under the new settings
+  });
+
+  it('identical settings still resume (the checkpoint feature is intact)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gen-ckp-'));
+    const store = new FileGenerationCheckpointStore(dir);
+    const seat = { baseUrl: 'http://127.0.0.1:1111/v1', maxTokens: 2000 };
+    const first = vi.fn().mockResolvedValueOnce({ success: true, code: source }).mockRejectedValueOnce(new Error('timed out'));
+    await expect(effectsWith(first, store, seat).generate(request())).rejects.toThrow('timed out');
+    const second = vi.fn().mockResolvedValueOnce({ success: true, code: repaired });
+    await effectsWith(second, store, seat).generate(request());
+    expect(second).toHaveBeenCalledTimes(1);
   });
 });

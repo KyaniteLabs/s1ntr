@@ -116,7 +116,11 @@ export async function nameChampions(
 
   // domain-bests without plates
   try {
-    const bests = JSON.parse(readFileSync(join(cwd, '.omx', 'atelier', 'best-per-domain.json'), 'utf8')) as Record<string, { dir?: string; mean?: number }>;
+    const readBests = (file: string): Record<string, { dir?: string; mean?: number }> => {
+      try { return JSON.parse(readFileSync(join(cwd, '.omx', 'atelier', file), 'utf8')); } catch { return {}; }
+    };
+    // Promotion-gated champions win; governed generates (GovernedProjectRecord) fill the domains the gate has not seen.
+    const bests = { ...readBests('governed-best.json'), ...readBests('best-per-domain.json') };
     for (const [domain, entry] of Object.entries(bests)) {
       const key = `best:${domain}`;
       if (plated.has(key) || !entry?.dir) continue;

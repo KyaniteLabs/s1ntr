@@ -24,6 +24,18 @@ describe('full-page network policy', () => {
     expect(found[0]).not.toMatch(/img-src[^;]*\*/);
   });
 
+  it('keeps library grants when the renderer re-wraps a holospot playable (v9: blob worker blocked)', () => {
+    const page = '<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>'
+      + '<script type="module">import * as THREE from "three";\nimport { Holo, shotCamera } from "holospot";\n'
+      + 'const holo = new Holo(renderer);</script></body></html>';
+    const playable = HTMLWrapper.wrap(page, { domain: 'three', libraries: ['holospot'] });
+    const rendered = HTMLWrapper.wrap(playable, { domain: 'three' });
+    const found = policies(rendered);
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatch(/worker-src[^;]*blob:/);
+    expect(rendered).toContain('"holospot": "/vendor/holospot/');
+  });
+
   it('places the policy first in <head>, before anything the page loads', () => {
     const html = HTMLWrapper.wrap(PAGE, { domain: 'html' });
     expect(html.indexOf('Content-Security-Policy')).toBeLessThan(html.indexOf('<meta charset="utf-8">'));
@@ -67,7 +79,7 @@ describe('full-page network policy', () => {
 });
 
 describe('pass-through mediums without a document shell', () => {
-  it.each(['html', 'dataviz', 'meta'])('%s: a bare body still gets one policy ahead of its content', (domain) => {
+  it.each(['html', 'dataviz', 'custom', 'meta'])('%s: a bare body still gets one policy ahead of its content', (domain) => {
     const html = HTMLWrapper.wrap('<div><img src="https://outside.invalid/p.png"></div>', { domain: domain as never });
     expect(html.indexOf('Content-Security-Policy')).toBeLessThan(html.indexOf('<div>'));
     expect(policies(html)).toHaveLength(1);

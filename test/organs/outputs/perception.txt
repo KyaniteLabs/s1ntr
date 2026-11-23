@@ -1,0 +1,9 @@
+## 01-exports.txt
+# organ: perception | step: exports | data: real
+$ node -e import('./dist/perception/index.js').then(m=>console.log(Object.keys(m).join(', ')))
+# cwd: <repo> (repo: <repo>)
+# --- stdout
+HUMAN_AUDIBLE_RANGE_HZ, HUMAN_PERCEPTION_LAYER, MAX_COMFORTABLE_LINE_LENGTH, MAX_SAFE_FLICKER_HZ, MIN_CAPTION_SECONDS, MIN_LEGIBLE_CONTRAST_RATIO, MIN_LEGIBLE_FONT_SIZE_PX, USEFUL_FRAME_RATE_RANGE, US
+# --- stderr
+# exit: 0
+

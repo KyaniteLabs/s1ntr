@@ -1,0 +1,20 @@
+## 01-provider-status.txt
+# organ: config | step: provider-status | data: real
+$ node <repo>/bin/sinter provider status
+# cwd: <out>/_proj (repo: <repo>)
+# --- stdout
+
+Sinter provider readiness:
+  anthropic  missing key (set with: sinter provider set-key anthropic <KEY>)
+  lmstudio   not reachable at http://localhost:1234/v1
+  ollama     not reachable at http://localhost:11434
+  openai     missing key (set with: sinter provider set-key openai <KEY>)
+  minimax    missing key (set with: sinter provider set-key minimax <KEY>)
+  glm        missing key (set with: sinter provider set-key glm <KEY>)
+  openrouter missing key (set with: sinter provider set-key openrouter <KEY>)
+
+Set a key with `sinter provider set-key <name> <KEY> --use`.
+
+# --- stderr
+# exit: 0
+

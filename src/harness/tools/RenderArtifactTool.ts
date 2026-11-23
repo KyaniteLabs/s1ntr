@@ -22,7 +22,7 @@ const MAX_TIMEOUT_MS = 120_000;
 
 const RENDER_DOMAINS: ReadonlySet<string> = new Set([
   'p5', 'three', 'glsl', 'hydra', 'strudel', 'tone', 'svg', 'html',
-  'dataviz', 'meta', 'ascii', 'kinetic', 'textgen', 'unknown',
+  'dataviz', 'custom', 'ascii', 'kinetic', 'textgen', 'nbe', 'unknown',
 ]);
 
 /** Injectable subset of HeadlessRenderer so tests can fake the render path. */

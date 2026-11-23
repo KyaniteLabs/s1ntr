@@ -38,7 +38,9 @@ function classifyDomain(domain?: string): CompletionFamily {
     case 'svg':
     case 'html':
     case 'dataviz':
-    case 'meta':
+    case 'custom':
+    case 'meta': // deprecated alias (renamed custom)
+    case 'nbe':
       return 'markup';
     case 'ascii':
     case 'textgen':

@@ -82,7 +82,7 @@
       "sha256": "effd682665d000035c72c378e9b6338ab996c0a13d847910caaaef0fec20984a",
       "bytes": 1251,
       "license": "AGPL-3.0-or-later",
-      "$comment": "Loaded relatively by strudel-web.js (new Worker(new URL('assets/clockworker-...', scriptURL))) \u2014 must sit next to the bundle."
+      "$comment": "Loaded relatively by strudel-web.js (new Worker(new URL('assets/clockworker-...', scriptURL))) — must sit next to the bundle."
     },
     {
       "id": "d3",
@@ -154,13 +154,14 @@
     },
     {
       "id": "tonaljs",
-      "file": "tonaljs/4.10.0/index.js",
+      "file": "tonaljs/4.10.0/index.mjs",
       "url": "https://registry.npmjs.org/@tonaljs/tonal/-/tonal-4.10.0.tgz",
       "version": "4.10.0",
-      "sha256": "d6722c14ef2a373feb8ae4c27a2c8716aa4dece1af089dc8d3d110c9b9f7b601",
-      "bytes": 4036,
+      "sha256": "d0bcafce53275b1f4524a1ed5ea337ac158b18453524e62ff80de10f0c9bcc8a",
+      "bytes": 64037,
       "license": "MIT",
-      "load": "module"
+      "load": "module",
+      "build": "esbuild 0.24.2 bundle of the npm package (browser-loadable; the raw CJS dist cannot load in a page)"
     },
     {
       "id": "matter-js",
@@ -184,13 +185,14 @@
     },
     {
       "id": "fontkit",
-      "file": "fontkit/2.0.4/browser.cjs",
+      "file": "fontkit/2.0.4/fontkit.min.js",
       "url": "https://registry.npmjs.org/fontkit/-/fontkit-2.0.4.tgz",
       "version": "2.0.4",
-      "sha256": "799c5e068e08e29b002924e272ea9e816c9c56a8512b267d3bf978e94ef3fbf0",
-      "bytes": 566022,
+      "sha256": "6d29c88af4205322bbb5175485bd480d92bc2c8ed7a77ab615d09767fd85c01c",
+      "bytes": 366014,
       "license": "MIT",
-      "load": "script"
+      "load": "script",
+      "build": "esbuild 0.24.2 bundle of the npm package (browser-loadable; the raw CJS dist cannot load in a page)"
     },
     {
       "id": "d3-geo",
@@ -254,25 +256,47 @@
     },
     {
       "id": "three-webgpu",
-      "file": "three-webgpu/0.182.0/three.webgpu.min.js",
-      "url": "https://registry.npmjs.org/three/-/three-0.182.0.tgz",
-      "version": "0.182.0",
+      "file": "three-webgpu/0.185.1/three.webgpu.min.js",
+      "url": "https://registry.npmjs.org/three/-/three-0.185.1.tgz",
+      "version": "0.185.1",
       "sha256": "9deb9cc8943f215f77c27b2cc86bacb83dbd5ab92ef8a7e172437a9e2dff819c",
       "bytes": 667861,
       "license": "MIT",
       "load": "module",
-      "note": "additive opt-in; default three stays 0.160.0 for the legacy byte-tie"
+      "note": "three@0.185.1 bytes (build/); additive opt-in; default three stays 0.160.0 for the legacy byte-tie"
+    },
+    {
+      "id": "three-webgpu-core",
+      "file": "three-webgpu/0.185.1/three.core.min.js",
+      "url": "https://registry.npmjs.org/three/-/three-0.185.1.tgz",
+      "version": "0.185.1",
+      "sha256": "05b2609338c76cd65daf74f3ac515bc9a5045e1b3b33edc07d8c9bd55250fa90",
+      "bytes": 385386,
+      "license": "MIT",
+      "load": "module",
+      "note": "three@0.185.1 bytes (build/); imported by three.webgpu.min.js / three.tsl.min.js"
+    },
+    {
+      "id": "three-webgpu-module",
+      "file": "three-webgpu/0.185.1/three.module.min.js",
+      "url": "https://registry.npmjs.org/three/-/three-0.185.1.tgz",
+      "version": "0.185.1",
+      "sha256": "86bcee248b64f44bcfc23c331ae74619061957d59cab040171dcb6fb5900beb6",
+      "bytes": 365552,
+      "license": "MIT",
+      "load": "module",
+      "note": "three@0.185.1 bytes (build/); imported by three.webgpu.min.js / three.tsl.min.js"
     },
     {
       "id": "three-tsl",
-      "file": "three-tsl/0.182.0/three.tsl.min.js",
-      "url": "https://registry.npmjs.org/three/-/three-0.182.0.tgz",
-      "version": "0.182.0",
+      "file": "three-tsl/0.185.1/three.tsl.min.js",
+      "url": "https://registry.npmjs.org/three/-/three-0.185.1.tgz",
+      "version": "0.185.1",
       "sha256": "93e864a9adf5eea21fe35ac7fe69403bdd35ad7dc8e393248ee214ba3a815a65",
       "bytes": 23676,
       "license": "MIT",
       "load": "module",
-      "note": "additive opt-in; default three stays 0.160.0 for the legacy byte-tie"
+      "note": "three@0.185.1 bytes (build/); additive opt-in; default three stays 0.160.0 for the legacy byte-tie"
     },
     {
       "id": "three-gpu-pathtracer",
@@ -289,7 +313,7 @@
         "three-mesh-bvh": ">=0.7.4",
         "xatlas-web": "^0.1.0"
       },
-      "pairing": "request with three-webgpu (auto-remaps bare three to 0.182 for the piece); module-graph smoke PENDING renderer lane"
+      "pairing": "request with three-webgpu (auto-remaps bare three to 0.185.1 for the piece); module-graph smoke PENDING renderer lane"
     },
     {
       "id": "xatlas-web",
@@ -323,6 +347,21 @@
       "license": "MIT",
       "load": "module",
       "note": "pathtracer companion peer"
+    },
+    {
+      "id": "holospot",
+      "file": "holospot/0.1.0/dist/holo.js",
+      "url": "https://github.com/dmitrykurash/holospot/archive/refs/tags/v0.1.0.tar.gz",
+      "version": "0.1.0",
+      "sha256": "183ce8515c4e0aadd1eb147c93664c7adc39863081a0233dd6b65697a174fb02",
+      "bytes": 1284228,
+      "license": "MIT",
+      "load": "module",
+      "note": "holographic foils for three.js meshes; peer three >=0.170 — pair with three-webgpu so bare three remaps to 0.185.1; assets load from /vendor/holospot/0.1.0/assets/, which is holo.js default ../assets/ (keep dist/ layout)",
+      "peers": {
+        "three": ">=0.170.0"
+      },
+      "pairing": "request with three-webgpu (auto-remaps bare three to 0.185.1 for the piece)"
     },
     {
       "id": "thing-adjacency",
@@ -908,6 +947,199 @@
       "license": "Apache-2.0",
       "load": "module-tree",
       "note": "thi.ng umbrella monorepo package (Karsten Schmidt); ESM tree, relative imports preserved; importmap id maps the package entry"
+    },
+    {
+      "id": "holospot.asset.bumps.brushed",
+      "file": "holospot/0.1.0/assets/bumps/brushed.png",
+      "url": "https://github.com/dmitrykurash/holospot/archive/refs/tags/v0.1.0.tar.gz",
+      "version": "0.1.0",
+      "sha256": "bf5ec1e4cd0681f9111a2baf8e7ee3a5ea11462d226cd532c08a5fbf2d1845c5",
+      "bytes": 251711,
+      "license": "MIT",
+      "$comment": "Loaded by holo.js from ../assets/ next to the bundle (src/assets/bumps/brushed.png in the tarball)."
+    },
+    {
+      "id": "holospot.asset.bumps.crinkle",
+      "file": "holospot/0.1.0/assets/bumps/crinkle.png",
+      "url": "https://github.com/dmitrykurash/holospot/archive/refs/tags/v0.1.0.tar.gz",
+      "version": "0.1.0",
+      "sha256": "de1b0f62ab5889a1fbcea2070c439df246745bc5d613d3e298c5bfc42dd737c6",
+      "bytes": 378285,
+      "license": "MIT",
+      "$comment": "Loaded by holo.js from ../assets/ next to the bundle (src/assets/bumps/crinkle.png in the tarball)."
+    },
+    {
+      "id": "holospot.asset.bumps.fingerprint",
+      "file": "holospot/0.1.0/assets/bumps/fingerprint.png",
+      "url": "https://github.com/dmitrykurash/holospot/archive/refs/tags/v0.1.0.tar.gz",
+      "version": "0.1.0",
+      "sha256": "224f551cea848b686ce4f6ae900d841669d9b43bf08a4ad00f7fb681ed7f48c8",
+      "bytes": 369054,
+      "license": "MIT",
+      "$comment": "Loaded by holo.js from ../assets/ next to the bundle (src/assets/bumps/fingerprint.png in the tarball)."
+    },
+    {
+      "id": "holospot.asset.bumps.hammered",
+      "file": "holospot/0.1.0/assets/bumps/hammered.png",
+      "url": "https://github.com/dmitrykurash/holospot/archive/refs/tags/v0.1.0.tar.gz",
+      "version": "0.1.0",
+      "sha256": "fe65e629caa648fee26d025dca0d11f91cedf774ee21e96bf0119e82de6f1690",
+      "bytes": 114207,
+      "license": "MIT",
+      "$comment": "Loaded by holo.js from ../assets/ next to the bundle (src/assets/bumps/hammered.png in the tarball)."
+    },
+    {
+      "id": "holospot.asset.bumps.linen",
+      "file": "holospot/0.1.0/assets/bumps/linen.png",
+      "url": "https://github.com/dmitrykurash/holospot/archive/refs/tags/v0.1.0.tar.gz",
+      "version": "0.1.0",
+      "sha256": "a3c042d4628653e705b0fa286297b21033167dbf0faeda6e88d0d46d11475579",
+      "bytes": 353798,
+      "license": "MIT",
+      "$comment": "Loaded by holo.js from ../assets/ next to the bundle (src/assets/bumps/linen.png in the tarball)."
+    },
+    {
+      "id": "holospot.asset.bumps.sandblast",
+      "file": "holospot/0.1.0/assets/bumps/sandblast.png",
+      "url": "https://github.com/dmitrykurash/holospot/archive/refs/tags/v0.1.0.tar.gz",
+      "version": "0.1.0",
+      "sha256": "6e1db3f1a2f3f53cbee36b1bfddbe596430924a34b506226e931cc24d19f0c72",
+      "bytes": 179764,
+      "license": "MIT",
+      "$comment": "Loaded by holo.js from ../assets/ next to the bundle (src/assets/bumps/sandblast.png in the tarball)."
+    },
+    {
+      "id": "holospot.asset.bumps.scratches",
+      "file": "holospot/0.1.0/assets/bumps/scratches.jpg",
+      "url": "https://github.com/dmitrykurash/holospot/archive/refs/tags/v0.1.0.tar.gz",
+      "version": "0.1.0",
+      "sha256": "00668ea93fc5f98891882903d740ce8583694b322b68df487ea29b545ba1642c",
+      "bytes": 241013,
+      "license": "MIT",
+      "$comment": "Loaded by holo.js from ../assets/ next to the bundle (src/assets/bumps/scratches.jpg in the tarball)."
+    },
+    {
+      "id": "holospot.asset.holo3d.chip",
+      "file": "holospot/0.1.0/assets/holo3d/chip.sdf",
+      "url": "https://github.com/dmitrykurash/holospot/archive/refs/tags/v0.1.0.tar.gz",
+      "version": "0.1.0",
+      "sha256": "b8cf2d277736423fa43c662b540bedfa1c147bd4722157253dcd11d733a3b1fc",
+      "bytes": 463621,
+      "license": "MIT",
+      "$comment": "Loaded by holo.js from ../assets/ next to the bundle (src/assets/holo3d/chip.sdf in the tarball)."
+    },
+    {
+      "id": "holospot.asset.holo3d.eagle",
+      "file": "holospot/0.1.0/assets/holo3d/eagle.sdf",
+      "url": "https://github.com/dmitrykurash/holospot/archive/refs/tags/v0.1.0.tar.gz",
+      "version": "0.1.0",
+      "sha256": "7659090bd7cdee1479bfb475a2395041188f0d7e6ee20b948ef561069c595f17",
+      "bytes": 431226,
+      "license": "MIT",
+      "$comment": "Loaded by holo.js from ../assets/ next to the bundle (src/assets/holo3d/eagle.sdf in the tarball)."
+    },
+    {
+      "id": "holospot.asset.holo3d.falcon",
+      "file": "holospot/0.1.0/assets/holo3d/falcon.sdf",
+      "url": "https://github.com/dmitrykurash/holospot/archive/refs/tags/v0.1.0.tar.gz",
+      "version": "0.1.0",
+      "sha256": "10d0c0677474b659d084686fff2dca95da8e4a9e06d3a317d26b9a826e722eba",
+      "bytes": 1270331,
+      "license": "MIT",
+      "$comment": "Loaded by holo.js from ../assets/ next to the bundle (src/assets/holo3d/falcon.sdf in the tarball)."
+    },
+    {
+      "id": "holospot.asset.holo3d.globe",
+      "file": "holospot/0.1.0/assets/holo3d/globe.sdf",
+      "url": "https://github.com/dmitrykurash/holospot/archive/refs/tags/v0.1.0.tar.gz",
+      "version": "0.1.0",
+      "sha256": "9c9a2362d9a85a7ac3d9dba61e87d75c808d8b1d34e4dc8fd470d09f122e04f9",
+      "bytes": 788989,
+      "license": "MIT",
+      "$comment": "Loaded by holo.js from ../assets/ next to the bundle (src/assets/holo3d/globe.sdf in the tarball)."
+    },
+    {
+      "id": "holospot.asset.holo3d.wolf",
+      "file": "holospot/0.1.0/assets/holo3d/wolf.sdf",
+      "url": "https://github.com/dmitrykurash/holospot/archive/refs/tags/v0.1.0.tar.gz",
+      "version": "0.1.0",
+      "sha256": "d09fba7acf164174fe142c489ae29f2d8040b7b2741286d2f732eeb4b461c8aa",
+      "bytes": 1012223,
+      "license": "MIT",
+      "$comment": "Loaded by holo.js from ../assets/ next to the bundle (src/assets/holo3d/wolf.sdf in the tarball)."
+    },
+    {
+      "id": "holospot.asset.logos.facets",
+      "file": "holospot/0.1.0/assets/logos/facets.svg",
+      "url": "https://github.com/dmitrykurash/holospot/archive/refs/tags/v0.1.0.tar.gz",
+      "version": "0.1.0",
+      "sha256": "69861754fcb51437700c092a515eecbf15fe6e3d8b7f671e95cef7aba97c2045",
+      "bytes": 663,
+      "license": "MIT",
+      "$comment": "Loaded by holo.js from ../assets/ next to the bundle (src/assets/logos/facets.svg in the tarball)."
+    },
+    {
+      "id": "holospot.asset.logos.koru",
+      "file": "holospot/0.1.0/assets/logos/koru.svg",
+      "url": "https://github.com/dmitrykurash/holospot/archive/refs/tags/v0.1.0.tar.gz",
+      "version": "0.1.0",
+      "sha256": "cb772d4ab90413edbdaf35446b0a6d057cca5752b3aa5b4d738889d32d3a327b",
+      "bytes": 8349,
+      "license": "MIT",
+      "$comment": "Loaded by holo.js from ../assets/ next to the bundle (src/assets/logos/koru.svg in the tarball)."
+    },
+    {
+      "id": "holospot.asset.logos.leaf",
+      "file": "holospot/0.1.0/assets/logos/leaf.svg",
+      "url": "https://github.com/dmitrykurash/holospot/archive/refs/tags/v0.1.0.tar.gz",
+      "version": "0.1.0",
+      "sha256": "d71a6df50b89d0aff6b67b979eaca8b03489567b31db7da5fdf3dd00e717801b",
+      "bytes": 1779,
+      "license": "MIT",
+      "$comment": "Loaded by holo.js from ../assets/ next to the bundle (src/assets/logos/leaf.svg in the tarball)."
+    },
+    {
+      "id": "holospot.asset.logos.rosette",
+      "file": "holospot/0.1.0/assets/logos/rosette.svg",
+      "url": "https://github.com/dmitrykurash/holospot/archive/refs/tags/v0.1.0.tar.gz",
+      "version": "0.1.0",
+      "sha256": "f069bae2042e87f1b483c39e12c140df1dbb472b517c914f225efebd491ceffa",
+      "bytes": 5178,
+      "license": "MIT",
+      "$comment": "Loaded by holo.js from ../assets/ next to the bundle (src/assets/logos/rosette.svg in the tarball)."
+    },
+    {
+      "id": "sinter-look",
+      "file": "sinter-kits/1.0.0/sinter-look.js",
+      "url": "in-repo:vendor/sinter-kits/1.0.0/sinter-look.js",
+      "version": "1.0.0",
+      "sha256": "e42265cf5e0b4db20014b3808dc61e40b88fdbca28e6c2e6aa95a6471cf4b568",
+      "bytes": 3326,
+      "license": "BUSL-1.1 (own code)",
+      "load": "script",
+      "note": "CRT/phosphor/grain overlay ported from the launch-reel look"
+    },
+    {
+      "id": "sinter-flow",
+      "file": "sinter-kits/1.0.0/sinter-flow.js",
+      "url": "in-repo:vendor/sinter-kits/1.0.0/sinter-flow.js",
+      "version": "1.0.0",
+      "sha256": "0349959e7026b6f9b83bee9fd715d9ec0e855f2047f050c80b13b0c64909e01b",
+      "bytes": 3417,
+      "license": "BUSL-1.1 (own code)",
+      "load": "script",
+      "note": "seeded noise, curl fields, canvas flow particles"
+    },
+    {
+      "id": "sinter-music",
+      "file": "sinter-kits/1.0.0/sinter-music.js",
+      "url": "in-repo:vendor/sinter-kits/1.0.0/sinter-music.js",
+      "version": "1.0.0",
+      "sha256": "608e4bc9bd35703a4fbbc958bb040dbb78bd60d07bdc3b8baa1abbb2b0af118f",
+      "bytes": 2693,
+      "license": "BUSL-1.1 (own code)",
+      "load": "script",
+      "note": "Euclid/arp/Markov/structure pattern helpers"
     }
   ],
   "notVendored": [

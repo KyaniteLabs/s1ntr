@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 
-import { runGenerationRegression, type RegressionDomain } from '../../src/quality/GenerationRegressionHarness.js';
+import { runGenerationRegression, normalizeRegressionDomain } from '../../src/quality/GenerationRegressionHarness.js';
 
 function parseArgs() {
   const [provider, model, domain, ...rest] = process.argv.slice(2);
@@ -24,7 +24,7 @@ function parseArgs() {
     }
   }
 
-  return { provider, model, domain: domain as RegressionDomain | 'remotion', prompt, baseUrl, outputRoot };
+  return { provider, model, domain: normalizeRegressionDomain(domain), prompt, baseUrl, outputRoot };
 }
 
 async function main() {

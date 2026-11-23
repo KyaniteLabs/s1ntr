@@ -16,6 +16,7 @@ import {
   DOMAIN_ROUTING_DATA,
   DOMAIN_KEYWORDS,
   OVERALL_FITNESS,
+  getOptimalModelBandit,
 } from '../routing/RoutingData.js';
 import type {
   DomainType,
@@ -301,6 +302,18 @@ class GeneratorRegistryClass {
       confidence = Math.max(0.6, confidence - 0.15);
     }
 
+    // Learned routing (organ audit 2026-11-19): once the Thompson bandit has enough ADMITTED outcomes for this
+    // domain it may overrule the static A/B table. Off by default; LIMINAL_ROUTING_BANDIT=1 turns it on.
+    let learnedNote = '';
+    if (process.env.LIMINAL_ROUTING_BANDIT === '1') {
+      const learned = getOptimalModelBandit(domain);
+      if (learned) {
+        if (learned !== optimalModel) learnedNote = ` [bandit overrides static ${optimalModel}]`;
+        optimalModel = learned;
+        confidence = Math.max(confidence, 0.7);
+      }
+    }
+
     if (fallbackToHybrid && complexity === 'complex' && confidence < (minConfidence ?? 0.5)) {
       optimalModel = 'hybrid';
       confidence = 0.65;
@@ -323,7 +336,7 @@ class GeneratorRegistryClass {
       reason = `${domainName} - ${modelNames.hybrid} for complex task`;
     }
 
-    return { model: optimalModel, reason, confidence, localFitness: local, cloudFitness: cloud, domain };
+    return { model: optimalModel, reason: reason + learnedNote, confidence, localFitness: local, cloudFitness: cloud, domain };
   }
 
   /**

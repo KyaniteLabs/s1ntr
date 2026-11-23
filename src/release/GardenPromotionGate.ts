@@ -5,6 +5,7 @@
  * Requires positive metrics delta and no regressions.
  */
 
+import { comparablePolicyMetrics } from './PolicyChangeManifest.js';
 import type { RuntimeCandidate } from './CreativeRuntimeCandidateBuilder.js';
 
 export interface PromotionResult {
@@ -37,10 +38,16 @@ export class GardenPromotionGate {
   check(candidate: RuntimeCandidate): PromotionResult {
     const regressions: string[] = [];
     const improvements: string[] = [];
+    let complete = candidate.changes.length > 0;
 
     for (const change of candidate.changes) {
-      for (const key of Object.keys(change.metricsAfter)) {
-        const before = change.metricsBefore[key] ?? 0;
+      const names = comparablePolicyMetrics(change.metricsBefore, change.metricsAfter);
+      if (!names) {
+        complete = false;
+        break;
+      }
+      for (const key of names) {
+        const before = change.metricsBefore[key];
         const after = change.metricsAfter[key];
         const delta = after - before;
 
@@ -52,14 +59,14 @@ export class GardenPromotionGate {
       }
     }
 
-    const passed = candidate.passed && regressions.length <= this.maxRegressions;
+    const passed = complete && candidate.passed && regressions.length <= this.maxRegressions;
 
     return {
       candidateId: candidate.id,
       passed,
       regressions,
       improvements,
-      summary: passed
+      summary: !complete ? 'Blocked: missing or invalid comparison metrics' : passed
         ? `Passed with ${improvements.length} improvements`
         : `Blocked: ${regressions.length} regressions detected`,
     };

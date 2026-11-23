@@ -18,6 +18,22 @@ export interface VideoRenderOptions {
    * When false (default), render() fails fast with a clear message.
    */
   allowUpstreamRenderer?: boolean;
+  /**
+   * Wall-clock budget for the whole render. When it runs out the render fails
+   * with VideoRenderError code RENDER_TIMEOUT and the renderer's process group
+   * is killed. Each backend has its own default.
+   */
+  timeoutMs?: number;
+}
+
+/** Stable failure codes for a video render. A failed render never carries a stand-in result. */
+export type VideoRenderErrorCode = 'RENDER_TIMEOUT';
+
+export class VideoRenderError extends Error {
+  constructor(readonly code: VideoRenderErrorCode, message: string) {
+    super(`${code}: ${message}`);
+    this.name = 'VideoRenderError';
+  }
 }
 
 export interface VideoRenderResult {

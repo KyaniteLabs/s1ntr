@@ -214,7 +214,7 @@ describe('CliProvider hermes seat (fake hermes binary)', () => {
       + `echo '${RESULT_OK}'\n`);
     chmodSync(py, 0o755);
     fakeHermes(`if [ "$1" = "--print-runtime-command" ]; then shift; `
-      + `printf '["${py}", "-I", "-c", "import os; runpy.run_module(\\"hermes_cli.main\\")"]'; exit 0; fi; echo unpatched >&2; exit 9`);
+      + `printf '%s' '["${py}", "-I", "-c", "import os; runpy.run_module(\\"hermes_cli.main\\")"]'; exit 0; fi; echo unpatched >&2; exit 9`);
     const provider = new CliProvider({ baseUrl: 'cli://hermes/anthropic/high', model: 'claude-opus-5-5', timeout: 10_000 });
     const result = await provider.generate({ userPrompt: 'Score it', imageInputs: FRAMES });
     expect(result.isOk() && result.value.content).toBe('PONG');

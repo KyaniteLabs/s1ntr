@@ -140,8 +140,11 @@ describe('Dream knowledge activation', () => {
       const restarted = new FileActivatedKnowledgeStore(file);
       expect(restarted.read(snapshot.snapshotDigest)).toEqual(snapshot);
       expect(restarted.isActive(snapshot.snapshotDigest)).toBe(true);
+      expect(restarted.latestActive('visual')).toEqual(snapshot);
+      expect(restarted.latestActive('motion')).toBeUndefined();
       restarted.rollback(snapshot.snapshotDigest, 'owner rollback');
       expect(new FileActivatedKnowledgeStore(file).isActive(snapshot.snapshotDigest)).toBe(false);
+      expect(new FileActivatedKnowledgeStore(file).latestActive('visual')).toBeUndefined();
     } finally {
       await rm(root, { recursive: true, force: true });
     }

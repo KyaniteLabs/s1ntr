@@ -211,12 +211,8 @@ export function createWave8LiveProtocolFixture(
   const now = new Date();
   const frozenAt = now.toISOString();
   const approvedAt = new Date(now.getTime() - 1_000).toISOString();
-  // Attestations must outlive the slowest consumer of this fixture: the spawned
-  // CLI validates them against its own wall clock deep inside a governed campaign
-  // (deadline up to 150s in real-browser mode), long after mint. Keep the TTL
-  // finite so `authorityFailures` still rejects stale attestations, but bounded
-  // above every consumer's maximum runtime instead of a fixed 60s that the
-  // campaign can outlive. 10 minutes = 4x the largest child deadline.
+  // Outlive the slowest consumer: the W8C-06 real-browser test has a 180 s budget, and on a slow CPU its
+  // child passed 60 s, so the attestations expired mid-test (LiveProtocol rejects expiresAt <= now).
   const expiresAt = new Date(now.getTime() + 600_000).toISOString();
   const owner = generateKeyPairSync('ed25519');
   const price = generateKeyPairSync('ed25519');

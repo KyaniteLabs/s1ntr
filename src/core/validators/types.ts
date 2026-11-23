@@ -1,7 +1,7 @@
 /**
  * Shared types and constants for validators
  */
-import type { DomainString } from '../../types/domains.js';
+import type { EngineDomainString } from '../../types/domains.js';
 import { hasThinkTags, fencedBlocks, splitThinking } from '../../llm/ModelOutput.js';
 
 export interface ValidationResult {
@@ -22,10 +22,10 @@ export interface DomainValidationResult {
 }
 
 export type Domain = Extract<
-  DomainString,
+  EngineDomainString,
   | 'p5' | 'shader' | 'glsl' | 'three' | 'revideo' | 'hyperframes' | 'music'
-  | 'hydra' | 'strudel' | 'tone' | 'svg' | 'kinetic' | 'html' | 'dataviz' | 'meta' | 'ascii'
-  | 'textgen' | 'blender' | 'unknown'
+  | 'hydra' | 'strudel' | 'tone' | 'svg' | 'kinetic' | 'html' | 'dataviz' | 'custom' | 'ascii'
+  | 'textgen' | 'blender' | 'nbe' | 'unknown'
 >;
 
 // -----------------------------------------------------------------------------

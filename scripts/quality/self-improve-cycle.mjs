@@ -11,7 +11,7 @@
 // and ledger accumulate. Honest fitness signal = Sinter's own evaluator score;
 // guard against Goodhart with periodic human/vision audits of the gallery.
 
-import { execSync } from 'child_process';
+import { execSync, execFileSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -28,9 +28,13 @@ import {
   readPerDomainTopQuality,
   classifyFailure,
   parseScoreLine,
+  buildGovernedGenerateArgs,
+  governedGeneratorEnv,
 } from './self-improve-domains.mjs';
 import { appendLedgerRecord, resolveLedgerWritePath } from './self-improve-ledger.mjs';
 import { DreamQueue } from '../../dist/dreaming/DreamQueue.js';
+import { PROVIDER_DEFAULTS } from '../../dist/config/ProviderRuntime.js';
+import { resolveDreamQueuePath } from '../../dist/dreaming/dreamQueuePath.js';
 
 const COUNT = Math.max(1, parseInt(process.argv[2] || '6', 10));
 // Per-gen wall clock budget. Slow domains (hydra measured ~8min for a single
@@ -38,7 +42,7 @@ const COUNT = Math.max(1, parseInt(process.argv[2] || '6', 10));
 // logged misleadingly as garbled stdout tails. Tunable per environment.
 const GEN_TIMEOUT_MS = Math.max(60_000, parseInt(process.env.SINTER_GEN_TIMEOUT_MS || '480000', 10));
 const ARCHIVE = path.join(os.homedir(), '.sinter', 'archive', 'quality_archive.json');
-const DREAM_QUEUE_PATH = path.join(os.homedir(), '.sinter', 'dreams', 'queue.json');
+const DREAM_QUEUE_PATH = resolveDreamQueuePath();
 const LEDGER = resolveLedgerWritePath();
 const OUTROOT = '.quality/rsi';
 fs.mkdirSync(OUTROOT, { recursive: true });
@@ -70,7 +74,9 @@ const readArchive = () => {
 };
 const gardenHealth = () => {
   try {
-    const out = execSync('node bin/sinter garden status', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
+    const out = execFileSync(process.execPath, ['bin/sinter', 'garden', 'status'], {
+      encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'],
+    });
     const m = out.match(/Health:\s*([\d.]+)%/); return m ? parseFloat(m[1]) : null;
   } catch { return null; }
 };
@@ -136,26 +142,24 @@ for (let i = 0; i < COUNT; i++) {
   const tag = `${OUTROOT}/g_${Date.now()}_${i + 1}`;
   // Per-domain generator routing (Simon-approved 2026-06-12): MiniMax-M3
   // composes three scenes measurably better than GLM (judge-swap lanes C/D:
-  // cathedral B+/A-, orrery A-/A vs GLM's flat meadows). --provider sets the
-  // LIMINAL_LLM_* env that getEffectiveConfig honors for the GENERATOR;
-  // the evaluator role stays config-pinned (GLM) because role config outranks
-  // env in the LLMClient constructor.
-  const generatorFlags = domain === 'three' ? ' --provider minimax --model MiniMax-M3' : '';
-  // B8: run the dedicated AestheticCritic "soul" critic in the autonomous loop.
-  // Without --aesthetic the critic contributed ZERO to autonomous fitness (the
-  // useAestheticGuardrails default is false). The 'free' preset enables the
-  // critic with permissive constraints so it scores every domain without
-  // over-constraining the diverse RSI prompt pool.
+  // cathedral B+/A-, orrery A-/A vs GLM's flat meadows). The governed generator
+  // reads its route from the environment. The evaluator remains config-pinned.
   try {
-    const out = execSync(
-      `node bin/sinter --prompt ${JSON.stringify(prompt)} --learn --intuition --aesthetic free${generatorFlags} -o ${JSON.stringify(tag)}`,
+    const out = execFileSync(
+      'node',
+      buildGovernedGenerateArgs(prompt, domain, tag),
       {
         encoding: 'utf-8',
         stdio: ['ignore', 'pipe', 'pipe'],
         timeout: GEN_TIMEOUT_MS,
         // Surface info-level [stage-timing] probes so a timeout kill's stdout
         // tail names the stage that was in flight when the budget expired.
-        env: { ...process.env, LIMINAL_LOG_LEVEL: process.env.LIMINAL_LOG_LEVEL || 'info' },
+        env: {
+          ...process.env,
+          ...governedGeneratorEnv(domain, PROVIDER_DEFAULTS.minimax),
+          SINTER_TEACH_STRICT: '1',
+          LIMINAL_LOG_LEVEL: process.env.LIMINAL_LOG_LEVEL || 'info',
+        },
       },
     );
     // Parse the score AND its degradation status from the same line, so a
@@ -174,7 +178,7 @@ for (let i = 0; i < COUNT; i++) {
     console.log(`  [${i + 1}/${COUNT}] domain=${domain} score=${s ?? 'n/a'}${degTag}${dreamTask ? ` dream=${dreamTask.id}` : ''}  "${idea.slice(0, 32)}…"`);
   } catch (e) {
     if (dreamTask) dreamQueue.fail(dreamTask.id);
-    // execSync reports a timeout kill as SIGTERM with null status; name it
+    // execFileSync reports a timeout kill as SIGTERM with null status; name it
     // instead of dumping a mid-run stdout tail. Real errors arrive on stderr,
     // which the old logging ignored entirely.
     const timedOut = e.signal === 'SIGTERM' && e.status == null;

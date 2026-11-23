@@ -6,13 +6,14 @@ export const PRESERVED_CREATIVE_DOMAINS: readonly string[] = [
   'Hydra',
   'Strudel',
   'Tone.js',
-  'Revideo',
-  'HyperFrames',
   'ASCII',
   'Kinetic',
   'TextGen',
   'HTML',
   'DataViz',
+  'NBE',
+  'Blender',
+  'Custom',
 ] as const;
 
 export interface RepoIndexLiteContext {
@@ -64,8 +65,10 @@ const DEFAULT_RUNTIME_PROFILE: RepoIndexLiteProfile = {
   expansionBudget: 2,
   localizationConfidence: 'medium',
   verificationTargets: [
-    { tool: 'typeCheck', reason: 'Fast first-pass verification for runtime-core TypeScript changes', priority: 1 },
-    { tool: 'runBuild', reason: 'Full TypeScript build after runtime-core edits', priority: 2 },
+    { tool: 'runFocusedTests', pattern: 'SelfImprovementRuntime', reason: 'Verify the runtime focus in its suite', priority: 1 },
+    { tool: 'runFocusedTests', pattern: 'LLMModeAgent', reason: 'Verify the bounded agent loop in its suite', priority: 1 },
+    { tool: 'typeCheck', reason: 'Fast first-pass verification for runtime-core TypeScript changes', priority: 2 },
+    { tool: 'runBuild', reason: 'Full TypeScript build after runtime-core edits', priority: 3 },
   ],
 };
 
@@ -104,6 +107,7 @@ const LOCALIZATION_PACKET_PROFILE: RepoIndexLiteProfile = {
   localizationConfidence: 'high',
   verificationTargets: [
     { tool: 'runFocusedTests', pattern: 'RepoIndexLite', reason: 'RepoIndexLite packet-shaping changes should hit focused runtime tests first', priority: 1 },
+    { tool: 'runFocusedTests', pattern: 'SelfImprovementRuntime', reason: 'Verify packet integration in the runtime suite', priority: 1 },
     { tool: 'runBuild', reason: 'Full TypeScript build after packet-shaping edits', priority: 2 },
   ],
 };
@@ -201,14 +205,45 @@ function buildContext(profile: RepoIndexLiteProfile): RepoIndexLiteContext {
     expansionBudget: profile.expansionBudget,
     expansionStatus: deferredSecondaryFiles.length > 0 ? 'allowed' : 'exhausted',
     localizationConfidence: profile.localizationConfidence,
-    verificationTargets: profile.verificationTargets,
+    verificationTargets: profile.verificationTargets.map(target => ({ ...target })),
     creativeDomains,
     preservationClause,
   };
 }
 
+// Repo paths a brief names outright ("Files likely involved: src/llm/LLMClient.ts, ...").
+const NAMED_REPO_FILE = /\b(?:src|test|bin|scripts)\/[\w./-]*\w\.(?:ts|tsx|js|mjs|cjs|py|json)\b/g;
+
 export function localizeBoundedSelfImprovement(description: string): RepoIndexLiteContext {
+  // A replayed brief can already contain learned guidance, including file names.
+  const request = description.split('\n').filter(line => !/^\s*-\s*\[adaptation:/.test(line)).join('\n');
+  const keywordContext = localizeByKeyword(request);
+  const named = dedupeFiles(request.match(NAMED_REPO_FILE) ?? []);
+  if (named.length === 0) return keywordContext;
+  // Files the brief names win over keyword profiles: a word like "provider" in an
+  // LLMClient brief must not lock the focus gate onto unrelated config files (#1736 turns 31, 39, 40).
+  return buildContext({
+    domain: keywordContext.domain,
+    intro: 'Start in the files this task names. Only expand beyond them if the requested fix cannot be completed there:',
+    primaryFiles: named,
+    secondaryCandidates: [...keywordContext.primaryFiles, ...keywordContext.secondaryFiles].filter((file) => !named.includes(file)),
+    expansionBudget: keywordContext.expansionBudget,
+    localizationConfidence: 'high',
+    verificationTargets: [
+      { tool: 'runFocusedTests', pattern: named.map((file) => file.replace(/^.*\//, '').replace(/\.[^.]+$/, '')).join('|'), reason: 'Tests for the files this task names run first', priority: 1 },
+      { tool: 'typeCheck', reason: 'Fast TypeScript verification after the named-file edit', priority: 2 },
+    ],
+    creativeDomains: keywordContext.creativeDomains,
+    preservationClause: keywordContext.preservationClause,
+  });
+}
+
+function localizeByKeyword(description: string): RepoIndexLiteContext {
   const normalized = description.toLowerCase();
+
+  if (/\b(?:repoindexlite|selfimprovementruntime|task packet|packet shaping)\b/.test(normalized)) {
+    return buildContext(LOCALIZATION_PACKET_PROFILE);
+  }
 
   if (/checkpoint|resume|fingerprint|workspace drift|suspend|run state/.test(normalized)) {
     return buildContext(CHECKPOINT_RESUME_PROFILE);

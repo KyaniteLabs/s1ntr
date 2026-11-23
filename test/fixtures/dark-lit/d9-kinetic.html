@@ -1,0 +1,777 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta http-equiv="X-Content-Type-Options" content="nosniff"><meta http-equiv="Referrer-Policy" content="strict-origin-when-cross-origin"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'none'; font-src 'self';">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Orrery</title>
+<style>
+@property --light {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+:root {
+  --size: min(88vw, 91svh, 980px);
+  --gold: #ba995d;
+  --tilt: 34deg;
+  --bearing: -18deg;
+  --index-period: 180s;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background: #141a17;
+}
+
+.gallery {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  isolation: isolate;
+  background:
+    radial-gradient(ellipse at 27% 13%, #65715b33, transparent 49%),
+    radial-gradient(ellipse at 73% 80%, #020705a6, transparent 63%),
+    linear-gradient(145deg, #303930, #1b231e 43%, #101613);
+}
+
+.gallery::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(117deg, #b5b39a03 0 1px, transparent 1px 4px),
+    repeating-linear-gradient(27deg, #00000008 0 1px, transparent 1px 7px);
+  box-shadow: inset 0 0 15vmin 5vmin #050a0780;
+}
+
+.scene {
+  position: relative;
+  width: var(--size);
+  height: var(--size);
+  perspective: 1600px;
+  transform: translateY(-1.5%);
+}
+
+.scene::before {
+  content: "";
+  position: absolute;
+  width: 104%;
+  height: 70%;
+  left: -2%;
+  top: 28%;
+  border-radius: 50%;
+  background: #020503;
+  filter: blur(calc(var(--size) * .045));
+  opacity: .8;
+  transform: rotate(-11deg);
+}
+
+.world,
+.world *,
+.world *::before,
+.world *::after {
+  transform-style: preserve-3d;
+}
+
+.world {
+  position: absolute;
+  inset: 0;
+  transform: rotateX(var(--tilt)) rotateZ(var(--bearing));
+}
+
+.foundation {
+  position: absolute;
+  inset: 1.4%;
+  border-radius: 50%;
+  transform: translateZ(-22px);
+  background:
+    radial-gradient(circle, transparent 65.5%, #151a15 66%, #373b2e 67%, #11170f 69%, transparent 70%),
+    conic-gradient(from 35deg, #625437, #242b20, #7c704b, #1c251c, #675f40, #242b20, #625437);
+  mask: radial-gradient(circle, transparent 65%, #000 65.3%);
+  filter: drop-shadow(0 13px 5px #0008);
+}
+
+.bezel {
+  position: absolute;
+  inset: 0;
+  border: 1px solid #b5a67566;
+  border-radius: 50%;
+  background:
+    conic-gradient(from 20deg, #8d7747, #f0dc9b 10%, #70603d 19%, #2b3025 39%, #9f8954 62%, #d3bd7b 76%, #5c5032 92%, #8d7747);
+  mask: radial-gradient(circle, transparent 66.5%, #000 66.7%, #000 70%, transparent 70.2%);
+  transform: translateZ(-4px);
+}
+
+.chapter {
+  position: absolute;
+  inset: 2%;
+  border-radius: 50%;
+  background:
+    repeating-conic-gradient(from -1deg, #ead9a6b3 0deg .32deg, transparent .32deg 6deg),
+    repeating-conic-gradient(from -.2deg, #bda67480 0deg .15deg, transparent .15deg 1deg);
+  mask: radial-gradient(circle, transparent 66.7%, #000 66.9%, #000 69.8%, transparent 70%);
+  transform: translateZ(2px);
+}
+
+.inner-lip {
+  position: absolute;
+  inset: 5%;
+  border: 1px solid #d0b97b75;
+  border-radius: 50%;
+  box-shadow:
+    0 2px 0 #10150f,
+    0 4px 0 #7b694833,
+    inset 0 2px 0 #0a100c;
+}
+
+.spider {
+  position: absolute;
+  inset: 0;
+  transform: translateZ(-12px);
+}
+
+.strut {
+  position: absolute;
+  left: 48.9%;
+  top: 5.5%;
+  width: 2.2%;
+  height: 44.5%;
+  transform-origin: 50% 100%;
+  transform: rotate(var(--a));
+  background:
+    linear-gradient(90deg, #161c14, #b4a06a 9%, #67603c 20%, #343b29 45%, #665b36 81%, #c1ab6e 91%, #20271b);
+  clip-path: polygon(0 0, 100% 0, 75% 76%, 100% 100%, 0 100%, 25% 76%);
+  filter: drop-shadow(5px 8px 3px #0009);
+}
+
+.strut::after {
+  content: "";
+  position: absolute;
+  width: 35%;
+  height: 72%;
+  top: 9%;
+  left: 32.5%;
+  border-radius: 999px;
+  background: #111a12;
+  box-shadow: 1px 0 #c3aa6838, inset 1px 0 2px #000;
+}
+
+.screw {
+  position: absolute;
+  width: 1.7%;
+  height: 1.7%;
+  left: 49.15%;
+  top: 3.25%;
+  border-radius: 50%;
+  transform-origin: 50% calc(var(--size) * .4675);
+  transform: rotate(var(--a)) translateZ(6px);
+  background:
+    linear-gradient(32deg, transparent 43%, #161a12 45% 54%, #d7c78c 56%, transparent 58%),
+    radial-gradient(circle at 32% 23%, #ecdaa1, #948252 46%, #3c3c28 74%, #11170e 79%);
+  box-shadow: 1px 2px 2px #000b;
+}
+
+.indexed-system {
+  position: absolute;
+  inset: 0;
+  animation: index-system var(--index-period) steps(180, end) infinite;
+}
+
+@keyframes index-system {
+  from { transform: rotateZ(0deg); }
+  to { transform: rotateZ(360deg); }
+}
+
+@keyframes cancel-index {
+  from { transform: rotateZ(0deg); }
+  to { transform: rotateZ(-360deg); }
+}
+
+.annulus {
+  position: absolute;
+  inset: 8%;
+  border-radius: 50%;
+  background:
+    repeating-conic-gradient(#b49c62 0deg .8deg, transparent .8deg 3deg);
+  mask: radial-gradient(circle, transparent 68%, #000 68.2%, #000 70%, transparent 70.2%);
+  opacity: .7;
+  transform: translateZ(-7px);
+}
+
+.orbit {
+  position: absolute;
+  inset: var(--inset);
+  border: 1px solid #c4b17c8c;
+  border-radius: 50%;
+  transform: rotateZ(var(--phase));
+  animation: orbit var(--period) linear infinite;
+  box-shadow:
+    0 1px 0 #e1cd9166,
+    0 3px 0 #171e13,
+    0 5px 0 #7b724235,
+    inset 0 1px 0 #e4d59a24;
+}
+
+.orbit::before {
+  content: "";
+  position: absolute;
+  inset: -1.8%;
+  border-radius: 50%;
+  background:
+    repeating-conic-gradient(from 0deg, #c9b47a99 0deg .4deg, transparent .4deg 10deg),
+    conic-gradient(from 30deg, #f3d89c88, #4f4a2a11 20%, #bba86d77 45%, #302e2011 65%, #ebd99a88);
+  mask: radial-gradient(circle, transparent 68.9%, #000 69.1%, #000 70%, transparent 70.2%);
+}
+
+.orbit::after {
+  content: "";
+  position: absolute;
+  width: 50%;
+  height: max(1px, calc(var(--size) * .0018));
+  left: 50%;
+  top: 50%;
+  transform: translateZ(-4px);
+  background: linear-gradient(90deg, #93824d, #494b2d 23%, #b2a370 78%, #ebd9a4);
+  box-shadow: 0 3px 3px #0009;
+}
+
+.o1 {
+  --inset: 35%;
+  --period: 32s;
+  --phase: 224deg;
+  --planet-size: calc(var(--size) * .032);
+}
+
+.o2 {
+  --inset: 25.5%;
+  --period: 76s;
+  --phase: 42deg;
+  --planet-size: calc(var(--size) * .054);
+}
+
+.o3 {
+  --inset: 15.5%;
+  --period: 132s;
+  --phase: 166deg;
+  --planet-size: calc(var(--size) * .065);
+}
+
+.o4 {
+  --inset: 6.7%;
+  --period: 218s;
+  --phase: 305deg;
+  --planet-size: calc(var(--size) * .079);
+}
+
+@keyframes orbit {
+  from { transform: rotateZ(var(--phase)); }
+  to { transform: rotateZ(calc(var(--phase) + 360deg)); }
+}
+
+@keyframes counter-orbit {
+  from { transform: rotateZ(calc(-1 * var(--phase))); }
+  to { transform: rotateZ(calc(-1 * var(--phase) - 360deg)); }
+}
+
+.seat,
+.counter-orbit,
+.counter-index,
+.center-seat {
+  position: absolute;
+  width: 0;
+  height: 0;
+}
+
+.seat {
+  left: 100%;
+  top: 50%;
+}
+
+.seat::before {
+  content: "";
+  position: absolute;
+  width: calc(var(--planet-size) * .9);
+  height: calc(var(--planet-size) * .9);
+  left: calc(var(--planet-size) * -.45);
+  top: calc(var(--planet-size) * -.45);
+  border-radius: 50%;
+  background: radial-gradient(circle at 30% 22%, #e3ca85, #81713f 30%, #242c1a 63%, #b7a36a 66%, #323c25 74%);
+  box-shadow: 3px 7px 5px #0008;
+  transform: translateZ(3px);
+}
+
+.counter-orbit {
+  transform: rotateZ(calc(-1 * var(--phase)));
+  animation: counter-orbit var(--period) linear infinite;
+}
+
+.counter-index {
+  animation: cancel-index var(--index-period) steps(180, end) infinite;
+}
+
+.planet {
+  position: absolute;
+  width: var(--planet-size);
+  height: var(--planet-size);
+  left: calc(var(--planet-size) * -.5);
+  top: calc(var(--planet-size) * -.5);
+  border-radius: 50%;
+  transform: rotateZ(18deg) rotateX(-34deg) translateZ(10px);
+}
+
+.orb {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: 50%;
+  overflow: hidden;
+  box-shadow:
+    inset -2px -3px 5px #0007,
+    inset 1px 1px 1px #ffffdd70,
+    5px 9px 9px #0005;
+}
+
+.orb::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background:
+    radial-gradient(ellipse at 29% 20%, #ffffff70, transparent 22%),
+    radial-gradient(circle at 34% 28%, transparent 33%, #0000003d 65%, #000000b0 100%);
+}
+
+.copper .orb {
+  background:
+    radial-gradient(ellipse at 36% 27%, #ebc89a, #bd7c49 29%, #7f482a 52%, #3b2c1b 76%, #151c13);
+}
+
+.jade .orb {
+  background:
+    radial-gradient(ellipse at 62% 61%, #183e34cc 0 12%, transparent 38%),
+    repeating-linear-gradient(163deg, #b1cfaf22 0 2px, transparent 2px 7px),
+    radial-gradient(circle at 29% 22%, #d2e0bc, #88aa86 23%, #49785f 47%, #263e30 73%, #142017);
+}
+
+.slate .orb {
+  background:
+    repeating-linear-gradient(13deg, transparent 0 5%, #d7d8ba18 6% 7%, transparent 8% 14%),
+    radial-gradient(circle at 30% 23%, #c3ccc1, #7c9893 26%, #405d59 50%, #24342e 73%, #0d1c14);
+}
+
+.ivory .orb {
+  background:
+    repeating-linear-gradient(174deg, transparent 0 9%, #8a6e4333 10% 13%, #f2e3bc33 14% 16%, transparent 17% 24%),
+    radial-gradient(circle at 30% 23%, #fff7d9, #dfd1a6 27%, #a89c76 52%, #625e43 75%, #242d1d);
+}
+
+.planet-ring {
+  position: absolute;
+  z-index: 0;
+  width: 194%;
+  height: 53%;
+  left: -47%;
+  top: 23.5%;
+  border-radius: 50%;
+  transform: rotate(-26deg);
+  background: radial-gradient(ellipse,
+    transparent 47%,
+    #655d3b 48%,
+    #c6b88a 51%,
+    #665f40 53%,
+    transparent 54%,
+    transparent 56%,
+    #bdb18b 57%,
+    #e8d8a7 59%,
+    #756d49 62%,
+    transparent 63%);
+}
+
+.planet-ring.front {
+  z-index: 2;
+  clip-path: inset(50% -10% -10%);
+}
+
+.moon-track {
+  position: absolute;
+  width: calc(var(--planet-size) * 2.7);
+  height: calc(var(--planet-size) * 2.7);
+  left: calc(var(--planet-size) * -1.35);
+  top: calc(var(--planet-size) * -1.35);
+  border: 1px solid #c7b68040;
+  border-radius: 50%;
+  transform: translateZ(10px);
+}
+
+.moon-rotor {
+  position: absolute;
+  inset: -1px;
+  border-radius: 50%;
+  animation: moon-orbit var(--moon-period, 11s) linear infinite;
+}
+
+.moon-counter {
+  position: absolute;
+  left: 100%;
+  top: 50%;
+  width: 0;
+  height: 0;
+  animation: moon-counter var(--moon-period, 11s) linear infinite;
+}
+
+.moon {
+  position: absolute;
+  width: calc(var(--planet-size) * .2);
+  height: calc(var(--planet-size) * .2);
+  left: calc(var(--planet-size) * -.1);
+  top: calc(var(--planet-size) * -.1);
+  border-radius: 50%;
+  transform: rotateZ(18deg) rotateX(-34deg);
+  background: radial-gradient(circle at 28% 22%, #f4eccb, #b3ae88 31%, #6c7053 57%, #1c291b 82%);
+  box-shadow: 2px 3px 3px #0006;
+}
+
+@keyframes moon-orbit {
+  from { transform: rotateZ(0deg); }
+  to { transform: rotateZ(360deg); }
+}
+
+@keyframes moon-counter {
+  from { transform: rotateZ(0deg); }
+  to { transform: rotateZ(-360deg); }
+}
+
+.hub-gear {
+  position: absolute;
+  inset: 40.7%;
+  border-radius: 50%;
+  transform: translateZ(7px);
+  background:
+    repeating-conic-gradient(from -1deg, #c2a567 0deg 4deg, #665b32 4deg 6deg, transparent 6deg 10deg);
+  mask: radial-gradient(circle, transparent 53%, #000 53.5%);
+  filter: drop-shadow(1px 4px 2px #0008);
+}
+
+.hub-bezel {
+  position: absolute;
+  inset: 42.6%;
+  border: 1px solid #e7cf8c;
+  border-radius: 50%;
+  transform: translateZ(11px);
+  background:
+    repeating-conic-gradient(#d4ba77 0deg .8deg, transparent .8deg 15deg),
+    conic-gradient(#dcc38a, #635f38, #dec68c, #363f25, #dcc38a);
+  box-shadow:
+    0 2px 0 #2e3520,
+    0 5px 0 #807345,
+    0 9px 7px #0008;
+  mask: radial-gradient(circle, transparent 54%, #000 55%);
+}
+
+.center-seat {
+  left: 50%;
+  top: 50%;
+  --planet-size: calc(var(--size) * .105);
+}
+
+.sun .orb {
+  background:
+    radial-gradient(circle at 31% 25%, #fffce6, #f0dca0 27%, #d1a458 50%, #916a30 72%, #4d4825);
+  box-shadow:
+    inset 1px 1px 2px #fff8d6,
+    inset -3px -5px 9px #65521b60,
+    0 0 19px #efd58a16,
+    5px 9px 10px #0005;
+}
+
+.escapement {
+  position: absolute;
+  left: 40%;
+  top: 73%;
+  width: 20%;
+  height: 20%;
+  transform: translateZ(20px);
+}
+
+.escape-bed {
+  position: absolute;
+  inset: -9%;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle, #172115 0 56%, #958348 57%, #454c2b 59%, #182211 61%, #b09a5d 63%, #313d22 65%, transparent 66%);
+  filter: drop-shadow(3px 8px 4px #0009);
+}
+
+.escape-wheel {
+  position: absolute;
+  inset: 3%;
+  border-radius: 50%;
+  animation: escapement 30s steps(30, end) infinite;
+  background:
+    repeating-conic-gradient(from -3deg,
+      #dcc082 0deg 5deg,
+      #9c8246 5deg 8deg,
+      #4b4d2a 8deg 9deg,
+      transparent 9deg 12deg);
+  mask: radial-gradient(circle, transparent 24%, #000 24.5%, #000 70%, transparent 70.4%);
+  filter: drop-shadow(0 2px 1px #000b);
+}
+
+.escape-wheel::before {
+  content: "";
+  position: absolute;
+  inset: 12%;
+  border-radius: 50%;
+  background:
+    repeating-conic-gradient(from 5deg, #bba069 0deg 10deg, #6e633a 10deg 15deg, transparent 15deg 60deg);
+  border: 2px solid #d0b476;
+  box-shadow: inset 0 1px 0 #f7dfa4;
+}
+
+.escape-wheel::after {
+  content: "";
+  position: absolute;
+  inset: 28%;
+  border: 1px solid #e0c686;
+  border-radius: 50%;
+  background: conic-gradient(#8b7941, #dbbc77, #564e2a, #8b7941);
+  box-shadow: 1px 3px 2px #0007;
+}
+
+@keyframes escapement {
+  from { transform: rotateZ(0deg); }
+  to { transform: rotateZ(360deg); }
+}
+
+.escape-axle {
+  position: absolute;
+  width: 11%;
+  height: 11%;
+  left: 44.5%;
+  top: 44.5%;
+  border-radius: 50%;
+  background:
+    linear-gradient(30deg, transparent 44%, #2d311b 45% 54%, transparent 55%),
+    radial-gradient(circle at 28% 20%, #fff0b5, #a88e51 45%, #454a29 76%);
+  box-shadow: 1px 2px 2px #0009;
+  transform: translateZ(6px);
+}
+
+.pallet {
+  position: absolute;
+  width: 78%;
+  height: 52%;
+  left: 11%;
+  top: -18%;
+  transform-origin: 50% 12%;
+  animation: pallet-rock 2s linear infinite;
+  filter: drop-shadow(2px 4px 2px #0009);
+}
+
+.pallet::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(110deg, #474b2c, #f1d69a 18%, #a38b50 35%, #655e35 60%, #d6bc7b 81%, #4b4c2c);
+  clip-path: polygon(
+    44% 0, 56% 0, 56% 34%, 91% 67%,
+    100% 91%, 85% 100%, 78% 80%, 50% 54%,
+    22% 80%, 15% 100%, 0 91%, 9% 67%, 44% 34%
+  );
+}
+
+.pallet::after {
+  content: "";
+  position: absolute;
+  width: 12%;
+  aspect-ratio: 1;
+  left: 44%;
+  top: 1%;
+  border-radius: 50%;
+  background: radial-gradient(circle at 30% 20%, #e4d49b, #66613d 46%, #202a19 75%);
+  box-shadow: 1px 2px 2px #0009;
+}
+
+@keyframes pallet-rock {
+  0%, 41% { transform: translateZ(9px) rotateZ(-7deg); }
+  50%, 91% { transform: translateZ(9px) rotateZ(7deg); }
+  100% { transform: translateZ(9px) rotateZ(-7deg); }
+}
+
+.bridge {
+  position: absolute;
+  width: 37%;
+  height: 7%;
+  left: 31.5%;
+  top: 65.2%;
+  border-radius: 40% 40% 20% 20% / 70% 70% 30% 30%;
+  background:
+    linear-gradient(180deg, #ddc78c, #807744 12%, #465032 35%, #6b6840 72%, #b4a06a 85%, #303d24);
+  box-shadow: 0 6px 3px #0008, inset 0 1px #e1d39d;
+  transform: translateZ(30px);
+  clip-path: polygon(0 25%, 8% 5%, 92% 5%, 100% 25%, 95% 100%, 82% 100%, 80% 52%, 20% 52%, 18% 100%, 5% 100%);
+}
+
+.bridge-pin {
+  position: absolute;
+  width: 1.5%;
+  height: 1.5%;
+  top: 67%;
+  border-radius: 50%;
+  background:
+    linear-gradient(15deg, transparent 44%, #28301c 45% 55%, transparent 56%),
+    radial-gradient(circle at 25% 20%, #ead69a, #9c8d57 46%, #344326 78%);
+  box-shadow: 1px 2px 2px #0009;
+  transform: translateZ(33px);
+}
+
+.glass-light {
+  position: absolute;
+  inset: -.7%;
+  border-radius: 50%;
+  border: 1px solid #e9efcd0d;
+  background:
+    linear-gradient(127deg, transparent 19%, #efffe00a 25%, transparent 33%, transparent 70%, #e9e6b905 79%, transparent 84%);
+  transform: translateZ(45px);
+  pointer-events: none;
+}
+
+@media (max-width: 600px) {
+  :root { --size: min(99vw, 84svh); }
+  .scene { transform: translateY(-3%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important;
+  }
+  .pallet { transform: translateZ(9px) rotateZ(-7deg); }
+}
+</style>
+</head>
+<body>
+<main class="gallery" role="img" aria-label="A brass mechanical orrery suspended above dark stone. Four mineral planets and their moons turn within nested engraved rings. A rocking escapement advances the entire assembly one measured step each second.">
+  <div class="scene" aria-hidden="true">
+    <div class="world">
+      <div class="foundation"></div>
+      <div class="spider">
+        <div class="strut" style="--a:0deg"></div>
+        <div class="strut" style="--a:60deg"></div>
+        <div class="strut" style="--a:120deg"></div>
+        <div class="strut" style="--a:180deg"></div>
+        <div class="strut" style="--a:240deg"></div>
+        <div class="strut" style="--a:300deg"></div>
+      </div>
+
+      <div class="bezel"></div>
+      <div class="chapter"></div>
+      <div class="inner-lip"></div>
+
+      <div class="screw" style="--a:0deg"></div>
+      <div class="screw" style="--a:60deg"></div>
+      <div class="screw" style="--a:120deg"></div>
+      <div class="screw" style="--a:180deg"></div>
+      <div class="screw" style="--a:240deg"></div>
+      <div class="screw" style="--a:300deg"></div>
+
+      <div class="indexed-system">
+        <div class="annulus"></div>
+
+        <div class="orbit o4">
+          <div class="seat">
+            <div class="counter-orbit">
+              <div class="counter-index">
+                <div class="moon-track" style="--moon-period:19s">
+                  <div class="moon-rotor">
+                    <div class="moon-counter"><div class="moon"></div></div>
+                  </div>
+                </div>
+                <div class="planet ivory">
+                  <div class="planet-ring"></div>
+                  <div class="orb"></div>
+                  <div class="planet-ring front"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="orbit o3">
+          <div class="seat">
+            <div class="counter-orbit">
+              <div class="counter-index">
+                <div class="moon-track" style="--moon-period:13s">
+                  <div class="moon-rotor">
+                    <div class="moon-counter"><div class="moon"></div></div>
+                  </div>
+                </div>
+                <div class="planet slate"><div class="orb"></div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="orbit o2">
+          <div class="seat">
+            <div class="counter-orbit">
+              <div class="counter-index">
+                <div class="moon-track" style="--moon-period:9s">
+                  <div class="moon-rotor">
+                    <div class="moon-counter"><div class="moon"></div></div>
+                  </div>
+                </div>
+                <div class="planet jade"><div class="orb"></div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="orbit o1">
+          <div class="seat">
+            <div class="counter-orbit">
+              <div class="counter-index">
+                <div class="planet copper"><div class="orb"></div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="hub-gear"></div>
+        <div class="hub-bezel"></div>
+        <div class="center-seat">
+          <div class="counter-index">
+            <div class="planet sun"><div class="orb"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="escapement">
+        <div class="escape-bed"></div>
+        <div class="escape-wheel"></div>
+        <div class="escape-axle"></div>
+        <div class="pallet"></div>
+      </div>
+      <div class="bridge"></div>
+      <div class="bridge-pin" style="left:34.8%"></div>
+      <div class="bridge-pin" style="left:63.7%"></div>
+      <div class="glass-light"></div>
+    </div>
+  </div>
+</main>
+</body>
+</html>

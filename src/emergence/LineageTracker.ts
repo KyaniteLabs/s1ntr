@@ -10,6 +10,7 @@ import { dirname, join } from 'path';
 import { homedir } from 'os';
 import { randomUUID } from 'node:crypto';
 import { Logger } from '../utils/Logger.js';
+import { writeFileAtomic } from '../utils/atomicWrite.js';
 import type { LineageRecord, Provenance } from './types.js';
 
 export interface LineageTrackerConfig {
@@ -41,6 +42,7 @@ export class LineageTracker {
     seed?: string;
     runParams?: Record<string, unknown>;
     runId?: string;
+    createdAt?: string;
   }): Promise<LineageRecord> {
     await this.ensureLoaded();
 
@@ -51,7 +53,7 @@ export class LineageTracker {
       seed: params.seed,
       params: params.runParams,
       runId: params.runId,
-      createdAt: new Date().toISOString(),
+      createdAt: params.createdAt ?? new Date().toISOString(),
     };
 
     this.cache.set(record.artifactId, record);
@@ -262,6 +264,6 @@ export class LineageTracker {
   private async persist(record: LineageRecord): Promise<void> {
     const filePath = join(this.lineageDir, `${record.artifactId}.json`);
     await fs.mkdir(dirname(filePath), { recursive: true });
-    await fs.writeFile(filePath, JSON.stringify(record, null, 2), 'utf-8');
+    await writeFileAtomic(filePath, JSON.stringify(record, null, 2));
   }
 }

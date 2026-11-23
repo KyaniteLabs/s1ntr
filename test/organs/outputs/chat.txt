@@ -1,0 +1,3 @@
+# organ: chat | buildCreativeBrief | data: real, in-process call
+calm flock -> {"intent":"a flock of particles following a flow field","context":"","mood":"calm","constraints":[],"references":[],"domain":"p5","techniques":[{"name":"Particle Systems","description":"Systems of particles that move and interact","keywords":["particle"],"domain":"p5"},{"name":"Flow Fields","description":"Vector fields that guide movement","keywords":["flow"],"domain":"p5"}],"complexity":"medium"}
+tense noise -> {"intent":"a pulsing noise texture","context":"","mood":"tense","constraints":[],"references":[],"domain":"shader","techniques":[{"name":"Perlin Noise","description":"Gradient noise for organic textures","keywords":["noise"],"domain":"shader"}],"complexity":"medium"}

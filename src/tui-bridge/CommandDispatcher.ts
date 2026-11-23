@@ -14,6 +14,7 @@ import { PRODUCT_MODES } from '../agent/ProductMode.js';
 import type { ProductMode, ModeConfig } from '../agent/ProductMode.js';
 import type { SkillRunner } from '../agent/SkillRunner.js';
 import type { SkillCatalog } from '../agent/SkillCatalog.js';
+import { IllegalReviewTransitionError } from '../agent/ReviewLifecycle.js';
 import type { ReviewManager } from '../agent/ReviewManager.js';
 import type { DiffRenderer } from '../agent/DiffRenderer.js';
 import type { OnboardingWizard } from '../agent/OnboardingWizard.js';
@@ -25,6 +26,7 @@ import type { AutonomyController } from '../agent/AutonomyController.js';
 import type { ModeRegistry } from '../agent/ModeRegistry.js';
 import type { SessionGraph } from '../agent/SessionGraph.js';
 import type { TuiSessionStore } from './TuiSessionStore.js';
+import { IllegalGoalTransitionError } from '../cortex/GoalLifecycle.js';
 import type { GoalStore } from '../cortex/GoalStore.js';
 import type { SinterCortex } from '../cortex/SinterCortex.js';
 import type { CortexPerceptionBus } from '../cortex/CortexPerceptionBus.js';
@@ -371,7 +373,14 @@ async function handleReview(ctx: CommandContext, sessionId: string, input: strin
       ctx.emitCommandResponse(sessionId, 'Usage: /accept <candidate-id>');
       return { reviewRequired: false };
     }
-    const candidate = ctx.reviewManager.accept(candidateId);
+    let candidate: ReturnType<ReviewManager['accept']>;
+    try {
+      candidate = ctx.reviewManager.accept(candidateId);
+    } catch (err) {
+      if (!(err instanceof IllegalReviewTransitionError)) throw err;
+      ctx.emitCommandResponse(sessionId, err.message);
+      return { reviewRequired: false };
+    }
     if (!candidate) {
       ctx.emitCommandResponse(sessionId, `Candidate ${candidateId} not found.`);
     } else {
@@ -387,7 +396,14 @@ async function handleReview(ctx: CommandContext, sessionId: string, input: strin
       ctx.emitCommandResponse(sessionId, 'Usage: /reject <candidate-id>');
       return { reviewRequired: false };
     }
-    const candidate = ctx.reviewManager.reject(candidateId);
+    let candidate: ReturnType<ReviewManager['reject']>;
+    try {
+      candidate = ctx.reviewManager.reject(candidateId);
+    } catch (err) {
+      if (!(err instanceof IllegalReviewTransitionError)) throw err;
+      ctx.emitCommandResponse(sessionId, err.message);
+      return { reviewRequired: false };
+    }
     if (!candidate) {
       ctx.emitCommandResponse(sessionId, `Candidate ${candidateId} not found.`);
     } else {
@@ -748,7 +764,14 @@ function handleGoal(ctx: CommandContext, sessionId: string, input: string): { re
       return { reviewRequired: false };
     }
 
-    const removed = store.removeGoal(goalId);
+    let removed: boolean;
+    try {
+      removed = store.removeGoal(goalId);
+    } catch (err) {
+      if (!(err instanceof IllegalGoalTransitionError)) throw err;
+      ctx.emitCommandResponse(sessionId, err.message);
+      return { reviewRequired: false };
+    }
     if (!removed) {
       ctx.emitCommandResponse(sessionId, `Goal "${goalId}" not found.`);
     } else {
@@ -770,7 +793,14 @@ function handleGoal(ctx: CommandContext, sessionId: string, input: string): { re
       return { reviewRequired: false };
     }
 
-    const completed = store.completeGoal(goalId);
+    let completed: ReturnType<typeof store.completeGoal>;
+    try {
+      completed = store.completeGoal(goalId);
+    } catch (err) {
+      if (!(err instanceof IllegalGoalTransitionError)) throw err;
+      ctx.emitCommandResponse(sessionId, err.message);
+      return { reviewRequired: false };
+    }
     if (!completed) {
       ctx.emitCommandResponse(sessionId, `Goal "${goalId}" not found.`);
     } else {

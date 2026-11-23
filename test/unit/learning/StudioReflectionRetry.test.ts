@@ -7,7 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const memory = vi.hoisted(() => ({
   episodes: [] as unknown[],
   initialize: async () => {},
-  save: async () => {},
+  save: async () => ({ isErr: () => false }),
+  getEpisodesByDomain: () => memory.episodes,
   recordEpisode(e: unknown) { memory.episodes.push(e); },
 }));
 vi.mock('../../../src/harness/HarnessMemory.js', () => ({ harnessMemory: memory }));
@@ -45,7 +46,7 @@ describe('reflectUnreflectedSessions retry semantics', () => {
     const second = await reflectUnreflectedSessions(fs, up);
     expect(second).toMatchObject({ reflected: 1, skipped: 0, failed: 0, errors: [] });
     expect(second.signals[0].intentSummary).toBe('quiet pond');
-    expect(memory.episodes).toHaveLength(1);
+    expect(memory.episodes).toHaveLength(2);  // likes + dislikes episodes (F14)
   });
 
   it('an unparseable reply is marked so it is not retried forever', async () => {

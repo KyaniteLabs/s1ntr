@@ -1,3 +1,7 @@
+/**
+ * FIXTURE PROOF (Sol L3-18): fixed non-PNG buffers and a fake judge. It proves the receipt wiring only; it is
+ * not evidence that real rendering, perception or judging work. Real coverage: test/integration/create-render-judge-admission.test.ts.
+ */
 import path from 'node:path';
 import {
   LiminalCommandService,

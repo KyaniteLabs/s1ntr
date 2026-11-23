@@ -12,6 +12,7 @@ import { getChromeArgs } from '../security/SandboxConfig.js';
 import { Logger } from '../utils/Logger.js';
 import { getLocalP5ScriptForUrl, resolveChromiumExecutablePath } from '../utils/browserAssetFallbacks.js';
 import { missingChromiumError } from '../utils/browserPreflight.js';
+import { prepareBrowserScratch } from '../utils/scratchSpace.js';
 
 
 export interface SandboxResult {
@@ -86,6 +87,7 @@ export async function runInSandbox(
     const executablePath = resolveChromiumExecutablePath();
     if (!executablePath) throw missingChromiumError();
 
+    prepareBrowserScratch();   // profile dir off the data volume + free-space check
     browser = await puppeteer.launch({
       headless: true,
       executablePath,

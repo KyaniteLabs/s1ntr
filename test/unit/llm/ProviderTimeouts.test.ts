@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import type { AddressInfo } from 'node:net';
 import { OpenAIProvider } from '../../../src/llm/providers/OpenAIProvider.js';
 import {
@@ -12,6 +15,9 @@ import {
 import { LLMTimeoutError } from '../../../src/llm/errors.js';
 import { TIMEOUT_DEFAULT_MS, TIMEOUT_EVALUATOR_MS } from '../../../src/constants/limits.js';
 import { loadModelConfig } from '../../../src/llm/ModelConfig.js';
+import { LLMClient } from '../../../src/llm/LLMClient.js';
+import { bootstrapExecutorAuthority } from '../../../src/identity/executorAuthorityBootstrap.js';
+import * as urlValidator from '../../../src/security/UrlValidator.js';
 
 const UNDICI_DEFAULT_MS = 300_000;
 
@@ -82,6 +88,81 @@ describe('provider timeouts (#708): configured timeout is honoured past 300 s', 
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  it('honors a completion deadline at fetch without changing the next call', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockImplementation(async () => new Response(okBody));
+    vi.stubGlobal('fetch', fetch);
+    const client = new LLMClient({
+      baseUrl: 'http://127.0.0.1:1234/v1', model: 'glm-5.3', apiKey: 'test-only', timeout: 720_000,
+    });
+
+    await expect(client.complete({ prompt: 'long attempt', providerTimeoutMs: 1_200_000 }))
+      .resolves.toMatchObject({ success: true });
+    await expect(client.complete({ prompt: 'ordinary attempt' })).resolves.toMatchObject({ success: true });
+
+    const completions = fetch.mock.calls.filter(([, init]) => init?.method === 'POST');
+    expect(completions).toHaveLength(2);
+    expect(completions[0][1]).toMatchObject({ dispatcher: dispatcherFor(1_200_000) });
+    expect(completions[1][1]).toMatchObject({ dispatcher: dispatcherFor(720_000) });
+  });
+
+  it('validates the per-call provider once across transport retries', async () => {
+    vi.stubEnv('SINTER_LLM_MAX_RETRIES', '1');
+    vi.stubEnv('SINTER_LLM_RETRY_BASE_DELAY_MS', '0');
+    const validateUrl = vi.spyOn(urlValidator, 'validateUrl');
+    const fetch = vi.fn<typeof globalThis.fetch>(async (_url, init) => {
+      if (init?.method !== 'POST') return Response.json({ data: [{ id: 'glm-5.3' }] });
+      return new Response(okBody, { status: fetch.mock.calls.length === 2 ? 503 : 200 });
+    });
+    vi.stubGlobal('fetch', fetch);
+    const client = new LLMClient({
+      baseUrl: 'http://127.0.0.1:1234/v1', model: 'glm-5.3', timeout: 720_000,
+    });
+
+    try {
+      await expect(client.complete({ prompt: 'retry', providerTimeoutMs: 60_000 }))
+        .resolves.toMatchObject({ success: true });
+      expect(fetch.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(2);
+      expect(validateUrl.mock.calls.filter(([url]) => url === 'http://127.0.0.1:1234/v1')).toHaveLength(1);
+    } finally {
+      validateUrl.mockRestore();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('applies the per-call deadline to configured fallbacks without changing future calls', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'fallback-deadline-'));
+    try {
+      const primary = { baseUrl: 'http://127.0.0.1:1234/v1', model: 'gemini-3.6-flash-high' };
+      const fallback = { baseUrl: 'http://127.0.0.1:8317/v1', model: 'gpt-5.6-luna', timeout: 180_000 };
+      const configPath = join(root, 'config.json');
+      writeFileSync(configPath, JSON.stringify({ roles: { generator: primary }, fallbacks: { generator: [fallback] } }));
+      vi.stubEnv('SINTER_CONFIG_PATH', configPath);
+      vi.stubEnv('SINTER_LLM_MAX_RETRIES', '0');
+      await LLMClient.loadRoles(root);
+      const fetch = vi.fn<typeof globalThis.fetch>(async (url, init) => {
+        if (init?.method !== 'POST') return Response.json({ data: [{ id: primary.model }] });
+        return new Response(okBody, { status: String(url).includes(':1234/') ? 503 : 200 });
+      });
+      vi.stubGlobal('fetch', fetch);
+      const client = new LLMClient({
+        ...primary, role: 'generator', harnessTransportAuthority: bootstrapExecutorAuthority({ rootDir: join(root, 'authority') }),
+      });
+
+      await expect(client.complete({ prompt: 'bounded fallback', providerTimeoutMs: 60_000 }))
+        .resolves.toMatchObject({ success: true, fallbackUsed: true });
+      await expect(client.complete({ prompt: 'ordinary fallback' }))
+        .resolves.toMatchObject({ success: true, fallbackUsed: true });
+      const fallbackPosts = fetch.mock.calls.filter(([url, init]) => String(url).includes(':8317/') && init?.method === 'POST');
+      expect(fallbackPosts).toHaveLength(2);
+      expect(Reflect.get(fallbackPosts[0][1]!, 'dispatcher')).toBe(dispatcherFor(60_000));
+      expect(Reflect.get(fallbackPosts[1][1]!, 'dispatcher')).toBe(dispatcherFor(180_000));
+    } finally {
+      LLMClient.clearGlobalCache();
+      vi.unstubAllEnvs();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('lets a 400 s response finish under a 720 s timeout and hands fetch a raised dispatcher', async () => {

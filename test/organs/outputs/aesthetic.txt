@@ -1,0 +1,4 @@
+# organ: aesthetic | extractColorsFromCode + meetsQualityFloor | data: real, in-process call
+warm: {"colors":[{"hex":"#1a0b2e","r":26,"g":11,"b":46,"h":266,"s":61,"l":11,"count":1},{"hex":"#ff6600","r":255,"g":102,"b":0,"h":24,"s":100,"l":50,"count":1},{"hex":"#ffd166","r":255,"g":209,"b":102,"h":42,"s":100,"l":70,"count":1}],"dominant":{"hex":"#1a0b2e","r":26,"g":11,"b":46,"h":266,"s":61,"l":11,"count":1},"palette":[{"hex":"#1a0b2e","r":26,"g":11,"b":46,"h":266,"s":61,"l":11,"count":1},{"hex":
+cool: {"colors":[{"hex":"#001219","r":0,"g":18,"b":25,"h":197,"s":100,"l":5,"count":1},{"hex":"#0a9396","r":10,"g":147,"b":150,"h":181,"s":88,"l":31,"count":1},{"hex":"#94d2bd","r":148,"g":210,"b":189,"h":160,"s":41,"l":70,"count":1}],"dominant":{"hex":"#001219","r":0,"g":18,"b":25,"h":197,"s":100,"l":5,"count":1},"palette":[{"hex":"#001219","r":0,"g":18,"b":25,"h":197,"s":100,"l":5,"count":1},{"hex":"#
+floor(0.8)=true floor(0.05)=false

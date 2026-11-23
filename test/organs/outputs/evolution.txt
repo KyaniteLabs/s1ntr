@@ -1,0 +1,47 @@
+## 02-2-archive-list.txt
+# organ: chain | step: 2-archive-list | data: real
+$ node <repo>/bin/sinter archive list
+# cwd: <out>/_chain (repo: <repo>)
+# --- stdout
+
+Archive: 10 cells, 10 elites, 0 near-elites
+  Average quality: 0.613
+
+  sinter://artifact/45c93487-9a0b-4780-b853-427fc87798f6  q=0.48  fresh-generation  novelty=0.25
+  sinter://artifact/56ce7864-d99d-4f31-a21d-df3009393d82  q=0.69  fresh-generation  novelty=0.61
+  sinter://artifact/575ab7cb-a904-4418-a155-43ac5c842598  q=0.52  fresh-generation  novelty=0.24
+  sinter://artifact/64c5dcc3-6d4b-48d7-9187-44b5a365fe21  q=0.62  fresh-generation  novelty=1.00
+  sinter://artifact/91439f55-acbd-47eb-b5ac-c077d06b2a96  q=0.74  fresh-generation  novelty=0.14
+  sinter://artifact/b6ac9a17-ddeb-4d01-b523-d79d8e0660e7  q=0.44  fresh-generation  novelty=0.31
+  sinter://artifact/b734496e-dd76-4ce2-8341-81a64b3886a1  q=0.75  fresh-generation  novelty=0.15
+  sinter://artifact/e5b7f01a-ff7b-462f-91d2-66a3def7d42b  q=0.75  fresh-generation  novelty=0.23
+  sinter://artifact/f0f04a7a-d49b-4094-97aa-b3a18c519d33  q=0.50  fresh-generation  novelty=0.39
+  sinter://artifact/fa7dd1d6-14b7-4d99-8855-c8693134b68e  q=0.64  fresh-generation  novelty=0.50
+
+# --- stderr
+# exit: 0
+
+## 03-3-report-archive.txt
+# organ: chain | step: 3-report-archive | data: real
+$ node <repo>/bin/sinter report archive
+# cwd: <out>/_chain (repo: <repo>)
+# --- stdout
+
+=== Archive Report ===
+  Cells: 10  Elites: 10  Near-elites: 0
+  Average quality: 0.613
+  Niche balance: 100.0%
+
+  Top artifacts by quality:
+    sinter://artifact/e5b7f01a-ff7b-462f-91d2-66a3def7d42b  q=0.75  composite=0.47 [C]  fresh-generation
+    sinter://artifact/b734496e-dd76-4ce2-8341-81a64b3886a1  q=0.75  composite=0.51 [C]  fresh-generation
+    sinter://artifact/91439f55-acbd-47eb-b5ac-c077d06b2a96  q=0.74  composite=0.47 [C]  fresh-generation
+    sinter://artifact/56ce7864-d99d-4f31-a21d-df3009393d82  q=0.69  composite=0.58 [C]  fresh-generation
+    sinter://artifact/fa7dd1d6-14b7-4d99-8855-c8693134b68e  q=0.64  composite=0.40 [C]  fresh-generation
+
+  Signal averages:
+    Novelty: 0.381  Structure: 0.656  Temporal: 0.261  Fertility: 0.512
+
+# --- stderr
+# exit: 0
+

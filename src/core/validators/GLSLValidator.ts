@@ -128,7 +128,12 @@ export class GLSLValidator {
 
     // Check for complexity - simple gradients are not enough
     const hasNoise = /noise|hash|fbm|snoise|voronoi/.test(uncommented);
-    const hasAnimation = /\b(?:u_time|time|iTime)\b/.test(uncommented);
+    // The host wrapper supplies exactly u_time/u_resolution/u_mouse. The lint
+    // must track that exact (case-sensitive) name: uTime/U_Time spellings are
+    // never set, so a shader reading only them renders a static frame and
+    // must NOT pass as "animated" (LFM3 sweep 2026-11-16: 25/32 runs hid
+    // behind the old case-sensitive-but-lenient u_time|time|iTime match).
+    const hasAnimation = /\bu_time\b/.test(uncommented);
     const vec3Constructors = (uncommented.match(/\bvec3\s*\(/g) ?? []).length;
     const hasMultipleColors = vec3Constructors >= 2 ||
       /vec3\s+\w+\s*=[\s\S]*vec3\s*\([\s\S]*?,[\s\S]*?,[\s\S]*?\)/.test(uncommented);
@@ -137,7 +142,11 @@ export class GLSLValidator {
       errors.push('GLSL shader should use noise functions or multiple colors for complexity');
     }
     if (!hasAnimation) {
-      errors.push('GLSL shader should animate using u_time');
+      errors.push(
+        'GLSL shader should animate using u_time — declare exactly "uniform float u_time;" and read it in main(). '
+        + 'The host wrapper sets only u_time, u_resolution and u_mouse (lowercase, with underscores); '
+        + 'uTime, U_Time, time and iTime are never set.',
+      );
     }
 
     return errors;

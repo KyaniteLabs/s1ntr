@@ -172,6 +172,8 @@ export {
   LayerSequencer,
   AbortError,
   type LayerSequencerOptions,
+  type GovernedLayerGenerator,
+  type GovernedLayerRequest,
   type SequencerResult,
 } from './LayerSequencer.js';
 

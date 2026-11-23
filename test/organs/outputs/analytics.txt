@@ -1,0 +1,3 @@
+# organ: analytics | PostHogClient without a key | data: real, in-process call
+isConfigured=false (no key: nothing is sent)
+events={"view":"liminal_slot_view","interaction":"liminal_slot_interaction","bounce":"liminal_slot_bounce"}

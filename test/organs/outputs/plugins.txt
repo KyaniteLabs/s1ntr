@@ -1,0 +1,21 @@
+# organ: plugins | data: real command, fake provider
+$ sinter plugins status --plugins-dir <work>/plugins
+[CLI] Resolved provider: openai @ http://127.0.0.1:33991/v1 (model=gpt-5.4)
+Plugins in <work>/plugins: 1
+  Execution: refused (default). Set SINTER_PLUGINS_GOVERNED=1 to run pinned plugins.
+  demo         unpinned   domains: html
+  Pin one with: sinter plugins pin <id>
+# exit: 0
+
+$ sinter plugins pin demo --plugins-dir <work>/plugins
+[CLI] Resolved provider: openai @ http://127.0.0.1:33991/v1 (model=gpt-5.4)
+Pinned demo: <path>
+# exit: 0
+
+$ sinter plugins status --plugins-dir <work>/plugins
+[CLI] Resolved provider: openai @ http://127.0.0.1:33991/v1 (model=gpt-5.4)
+Plugins in <path> 1
+  Execution: refused (default). Set SINTER_PLUGINS_GOVERNED=1 to run pinned plugins.
+  demo         admitted   domains: html
+# exit: 0
+

@@ -12,6 +12,8 @@ import type { SafetyConfig } from './SafetyGuardrails.js';
 import type { CollaborationMode } from '../collab/CollaborationEngine.js';
 import type { DeepCollaborationConfig, CollaborativeConfig } from '../collab/types.js';
 import { Domain } from '../types/domains.js';
+import { env } from '../utils/env.js';
+import { DEFAULT_GIT_CONFIG } from '../git/types.js';
 import type { SwarmConfig, SwarmMode } from '../swarm/types.js';
 import type { SwarmOptions } from '../types/options/SwarmOptions.js';
 import { type DebugOptions, normalizeDebugOptions } from '../types/options/DebugOptions.js';
@@ -259,6 +261,15 @@ export interface NormalizedLoopOptions extends LoopOptions {
 }
 
 /**
+ * Opt-in per-run git branches and commits. Off unless SINTER_GIT_PER_RUN=1
+ * (LIMINAL_GIT_PER_RUN=1 also works), so a creative run never touches the
+ * caller's branch by default. Without this nothing could ever set git.enabled.
+ */
+export function gitConfigFromEnv(): import('../git/types.js').GitConfig | undefined {
+  return env('GIT_PER_RUN') === '1' ? { ...DEFAULT_GIT_CONFIG, enabled: true } : undefined;
+}
+
+/**
  * Normalize loop options with defaults
  */
 export function normalizeOptions(options: LoopOptions | null): NormalizedLoopOptions {
@@ -339,6 +350,6 @@ export function normalizeOptions(options: LoopOptions | null): NormalizedLoopOpt
     renderScoringOptions: options?.renderScoringOptions ?? {},
     evalMode: options?.evalMode,
     providerCallBudget: options?.providerCallBudget,
-    git: options?.git ?? undefined,
+    git: options?.git ?? gitConfigFromEnv(),
   };
 }

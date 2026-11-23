@@ -127,12 +127,16 @@ export class GoldenSuiteRunner {
     };
   }
 
-  /** Evaluate a single candidate with a timeout guard */
+  /** Evaluate a single candidate with a timeout guard; the timer is always cleared so it cannot keep the process alive. */
   private async evaluateWithTimeout(candidate: EvaluationCandidate): Promise<EvaluationFabricResult> {
-    const timeout = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`Evaluation timed out after ${this.timeoutMs}ms`)), this.timeoutMs),
-    );
-
-    return Promise.race([this.fabric.evaluate(candidate), timeout]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`Evaluation timed out after ${this.timeoutMs}ms`)), this.timeoutMs);
+    });
+    try {
+      return await Promise.race([this.fabric.evaluate(candidate), timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 }

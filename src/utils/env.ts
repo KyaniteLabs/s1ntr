@@ -15,17 +15,25 @@ const PREFIXES = ['SINTER_', 'LIMINAL_'] as const;
  * is unset. Idempotent; safe to call multiple times.
  */
 export function mirrorBrandEnv(): void {
-  for (const key of Object.keys(process.env)) {
-    let base: string | undefined;
-    if (key.startsWith('SINTER_')) base = key.slice('SINTER_'.length);
-    else if (key.startsWith('LIMINAL_')) base = key.slice('LIMINAL_'.length);
+  const original = { ...process.env };
+  for (const [key, value] of Object.entries(original)) {
+    const source = PREFIXES.find(prefix => key.startsWith(prefix));
+    if (!source || value === undefined) continue;
+    const base = key.slice(source.length);
     if (!base) continue;
-    const value = process.env[key];
-    if (value === undefined) continue;
-    for (const p of PREFIXES) {
-      const counterpart = `${p}${base}`;
-      if (process.env[counterpart] === undefined) process.env[counterpart] = value;
+    const target = source === 'SINTER_' ? 'LIMINAL_' : 'SINTER_';
+    const counterpart = target + base;
+    if (original[counterpart] !== undefined) continue;
+    // A mirrored credential must still point to the endpoint that supplied it.
+    if (base.endsWith('_BASE_URL') && original[target + base.replace(/_BASE_URL$/, '_API_KEY')] !== undefined) {
+      continue;
     }
+    if (base.endsWith('_API_KEY')) {
+      const endpointName = base.replace(/_API_KEY$/, '_BASE_URL');
+      const targetEndpoint = original[target + endpointName];
+      if (targetEndpoint !== undefined && targetEndpoint !== original[source + endpointName]) continue;
+    }
+    process.env[counterpart] = value;
   }
 }
 

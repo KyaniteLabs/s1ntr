@@ -1,0 +1,28 @@
+## run3.log
+piece d9-kinetic GPT-6.1 Sol 0.79
+
+🎨 Sinter: Creative Coding Agent
+📝 Prompt: "Push S1NTR to its limit: CSS-native kinetic art of a mechanical orrery: nested rotating rings with tick marks, planets as layered radial gradients, moons on their own orbits, and a brass es
+🔄 Governed candidates: 1
+📁 Output: <out>/generate/run3
+
+Generating: Push S1NTR to its limit: CSS-native kinetic art of a mechanical orrery: nested rotating rings with tick marks, planets as layered radial gradients, moons on their own orbits, and a brass e
+
+🎯 Domain (forced via --domain): kinetic
+
+[LLMClient] [attestation] non-harness generator attempt completes unattested: EXECUTOR_AUTHORITY_UNAVAILABLE: metered funding evidence missing for unknown
+[07:00:10.331] LLMClient llm:response <email>:34985 local/gpt-5.4 142ms ok
+[SandboxConfig] Chromium has no usable OS sandbox on this host, so it runs unsandboxed. Give Chromium an AppArmor profile that allows userns, or set LIMINAL_DISABLE_SANDBOX=true to choose this on purp
+[LLMClient] [attestation] non-harness evaluator attempt completes unattested: EXECUTOR_AUTHORITY_UNAVAILABLE: metered funding evidence missing for unknown
+[07:00:31.294] LLMClient llm:response <email>:34985 local/gpt-5.4 125ms ok
+
+⚠️  Generated, but not accepted
+🎯 Reason: below-quality-floor
+⭐ Quality score: 0.29
+🤖 Model: openai/gpt-5.4
+🧾 Provider calls: 2/2
+✅ Saved: <out>/generate/run3/artifacts/e72200b9eb484d1c40b0578fd6d38fba97b01ecdef305959c029f718eabb79be/source.txt
+✅ HTML: <out>/generate/run3/artifacts/e72200b9eb484d1c40b0578fd6d38fba97b01ecdef305959c029f718eabb79be/playable.html
+🧾 Authority receipt: f6096a0c5b97de1de624fe44b29de79a804c476550b1c65c0dfc004682e36e0c
+
+

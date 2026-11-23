@@ -548,6 +548,7 @@ describe('HeadlessRenderer', () => {
       context: { newPage: () => Promise<unknown> };
       initialize: () => Promise<void>;
       waitForCanvas: () => Promise<boolean>;
+      waitForLitCanvasScreenshot: () => Promise<boolean>;
       captureScreenshot: () => Promise<{
         buffer: Buffer;
         width: number;
@@ -569,6 +570,7 @@ describe('HeadlessRenderer', () => {
     };
     renderer.initialize = vi.fn().mockResolvedValue(undefined);
     renderer.waitForCanvas = vi.fn().mockResolvedValue(true);
+    renderer.waitForLitCanvasScreenshot = vi.fn().mockResolvedValue(true);
     renderer.captureScreenshot = vi.fn().mockResolvedValue({
       buffer: Buffer.alloc(0),
       width: 0,

@@ -1,9 +1,11 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { copyFile, mkdir, readFile, rm, stat } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, rm } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
+import { parseOperatorStateFile } from '../utils/operatorStateFile.js';
 import { writeFileAtomic } from '../utils/atomicWrite.js';
-import { classifyEffectFailure } from './LiminalEffectBroker.js';
+import { UnsentTransportError, classifyEffectFailure } from './LiminalEffectBroker.js';
+import { acquireDirLease, LeaseTimeoutError } from '../utils/dirLease.js';
 import { encodeLiminalDurableValue, LIMINAL_BUFFER_TAG,
   liminalDurablePayloadDigest } from './LiminalPayloadDigest.js';
 import type {
@@ -228,44 +230,16 @@ export class FileLiminalOperationJournal implements LiminalOperationJournal {
     return value;
   }
 
-  private async leaseOwnerAlive(lock: string): Promise<boolean> {
-    try {
-      const ownerText = await readFile(path.join(lock, 'owner.json'), 'utf8');
-      const owner = JSON.parse(ownerText) as { pid?: number };
-      if (!Number.isSafeInteger(owner.pid) || owner.pid! < 1) return false;
-      process.kill(owner.pid!, 0);
-      return true;
-    } catch (error) {
-      return (error as NodeJS.ErrnoException).code === 'EPERM';
-    }
-  }
-
   private async acquireLease(): Promise<{ token: string; ownerFile: string }> {
     const lock = `${this.file}.lock`;
     const token = randomUUID();
-    const deadline = Date.now() + 90_000;
-    for (;;) {
-      try {
-        await mkdir(lock, { recursive: false });
-        break;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-        try {
-          if (Date.now() - (await stat(lock)).mtimeMs > 20_000
-            && !(await this.leaseOwnerAlive(lock))) {
-            await rm(lock, { recursive: true, force: true });
-            continue;
-          }
-        } catch (leaseError) {
-          if ((leaseError as NodeJS.ErrnoException).code !== 'ENOENT') throw leaseError;
-        }
-        if (Date.now() >= deadline) throw new Error('JOURNAL_LEASE_HELD');
-        await new Promise(resolve => setTimeout(resolve, 25));
-      }
+    try {
+      await acquireDirLease({ lease: lock, token, timeoutMs: 90_000 });
+    } catch (error) {
+      if (error instanceof LeaseTimeoutError) throw new Error('JOURNAL_LEASE_HELD');
+      throw error;
     }
-    const ownerFile = path.join(lock, 'owner.json');
-    await writeFileAtomic(ownerFile, `${JSON.stringify({ token, pid: process.pid })}\n`);
-    return { token, ownerFile };
+    return { token, ownerFile: path.join(lock, 'owner.json') };
   }
 
   private async assertLease(lease: { token: string; ownerFile: string }): Promise<void> {
@@ -280,6 +254,11 @@ export class FileLiminalOperationJournal implements LiminalOperationJournal {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
+  }
+
+  async readAdmission(key: string): Promise<LiminalOperationAdmission | null> {
+    await this.queue;
+    return (await this.read()).operations[key] ?? null;
   }
 
   begin(key: string, proposed: LiminalOperationAdmission): Promise<LiminalOperationAdmission> {
@@ -305,7 +284,7 @@ export class FileLiminalOperationJournal implements LiminalOperationJournal {
         .find(([, operation]) => operation.operationId === operationId);
       if (!entry) throw new Error('UNKNOWN_LIMINAL_OPERATION');
       const [key, operation] = entry;
-      if (operation.attemptsConsumed >= maximum) throw new Error('TRANSPORT_ATTEMPT_CAP_EXHAUSTED');
+      if (operation.attemptsConsumed >= maximum) throw new UnsentTransportError('TRANSPORT_ATTEMPT_CAP_EXHAUSTED');
       const attempt = operation.attemptsConsumed + 1;
       const updated = Object.freeze({ ...operation, attemptsConsumed: attempt });
       const event = Object.freeze({ operationId, ordinal: state.events.length + 1,
@@ -353,10 +332,8 @@ export class FileLiminalOperationJournal implements LiminalOperationJournal {
         effect.reservation.operationId === operationId && effect.reservation.kind === kind);
       if (prior) {
         if (prior.state === 'reserved') return [state, prior.reservation];
-        // A prior attempt that failed should not permanently block retries.
-        // Drop the stale reservation and mint a fresh one; the audit trail
-        // for the failed attempt is preserved in the events log (#865).
-        if (prior.state !== 'failed') throw new Error('EFFECT_OUTCOME_UNRESOLVED');
+        // A legacy paid failure has no proof of non-dispatch. Local renders retain their retry behavior.
+        if (prior.state !== 'unsent' && !(kind === 'render' && prior.state === 'failed')) throw new Error('EFFECT_OUTCOME_UNRESOLVED');
       }
       const reservation = Object.freeze({ operationId, kind,
         effectId: `effect:${randomUUID()}`,
@@ -535,7 +512,7 @@ export class FileLiminalOperationJournal implements LiminalOperationJournal {
 
   private async readWithMigration(): Promise<{ state: JournalState; needsWrite: boolean }> {
     try {
-      const stored = JSON.parse(await readFile(this.file, 'utf8')) as unknown;
+      const stored = parseOperatorStateFile(this.file, await readFile(this.file, 'utf8'));
       return { state: validateState(stored),
         needsWrite: ![3, 4].includes((stored as { schemaVersion?: number }).schemaVersion ?? 0) };
     } catch (error) {

@@ -117,6 +117,9 @@ export class ToneValidator {
     // Check for hallucinations
     errors.push(...this.validateHallucinations(trimmed));
 
+    // Singletons used as constructors, and argument shapes that throw at runtime.
+    errors.push(...this.validateRuntimeShapes(trimmed));
+
     // Check for common graph/property mistakes found by evaluator dogfood.
     errors.push(...this.validateGraphSemantics(trimmed));
 
@@ -173,6 +176,26 @@ export class ToneValidator {
       }
     }
 
+    return errors;
+  }
+
+  /**
+   * Mistakes that parse and pass the class whitelist but throw once Tone runs
+   * (v2r1: 26 tone runs). Transport, Destination, Draw and Listener are ready-made
+   * instances in Tone 14, not classes; and setValueAtTime wants a number, so a
+   * waveform name belongs in `oscillator.type = "sine"`.
+   */
+  private static validateRuntimeShapes(code: string): string[] {
+    const errors: string[] = [];
+    const singletons = /\b(?:new\s+)?Tone\.(Transport|Destination|Draw|Listener)\s*\(/g;
+    for (const match of code.matchAll(singletons)) {
+      errors.push(`Tone.js: Tone.${match[1]} is a singleton instance, not a class or function — `
+        + `use Tone.${match[1]} directly (e.g. Tone.${match[1]}.${match[1] === 'Transport' ? 'start()' : match[1] === 'Destination' ? 'volume.value = -6' : 'schedule(...)'}) or Tone.get${match[1]}()`);
+    }
+    if (/\.setValueAtTime\s*\(\s*["'`][a-z]+["'`]/i.test(code)) {
+      errors.push('Tone.js: setValueAtTime(value, time) needs a number as its value; '
+        + 'set a waveform with oscillator.type = "sine" instead');
+    }
     return errors;
   }
 

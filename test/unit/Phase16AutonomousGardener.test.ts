@@ -471,8 +471,8 @@ describe('PolicyChangeManifest', () => {
   it('filters by status', () => {
     const manifest = new PolicyChangeManifest();
     manifest.stage('a', 'change a', {});
-    const r2 = manifest.stage('b', 'change b', {});
-    manifest.promote(r2.id, {});
+    const r2 = manifest.stage('b', 'change b', { quality: 0.3 });
+    manifest.promote(r2.id, { quality: 0.4 });
 
     expect(manifest.getByStatus('staged')).toHaveLength(1);
     expect(manifest.getByStatus('promoted')).toHaveLength(1);
@@ -507,6 +507,22 @@ describe('CreativeRuntimeCandidateBuilder', () => {
 // ── GardenPromotionGate ──
 
 describe('GardenPromotionGate', () => {
+  it.each([
+    [{ quality: 0.3, novelty: 0.5 }, { quality: 0.9 }],
+    [{}, { quality: 0.9 }],
+    [{ quality: 0.3 }, { quality: Number.NaN }],
+  ])('blocks incomplete metric snapshots', (before, after) => {
+    const manifest = new PolicyChangeManifest();
+    const record = manifest.stage('loop-mix', 'test', before);
+    expect(manifest.promote(record.id, after)).toBe(false);
+    const incomplete = { ...record, metricsAfter: after, status: 'promoted' as const };
+    const candidate = new CreativeRuntimeCandidateBuilder().build([incomplete], 'test');
+    expect(candidate.passed).toBe(false);
+    const forced = new GardenPromotionGate().check({ ...candidate, passed: true });
+    expect(forced.passed).toBe(false);
+    expect(forced.summary).toContain('missing or invalid comparison metrics');
+  });
+
   it('passes candidate with improvements and no regressions', () => {
     const gate = new GardenPromotionGate();
     const manifest = new PolicyChangeManifest();
@@ -519,6 +535,19 @@ describe('GardenPromotionGate', () => {
     const result = gate.check(candidate);
     expect(result.passed).toBe(true);
     expect(result.improvements.length).toBeGreaterThan(0);
+  });
+
+  it('requires baseline metrics and excludes unpaired gains', () => {
+    const manifest = new PolicyChangeManifest();
+    const record = manifest.stage('critic', 'partial comparison', { quality: 0.7, novelty: 0.5 });
+    expect(manifest.promote(record.id, { quality: 0.7, newMetric: 1 })).toBe(false);
+
+    const candidate = new CreativeRuntimeCandidateBuilder().build([record], 'partial evidence');
+    expect(candidate.validationScore).toBe(0);
+    const result = new GardenPromotionGate({ maxRegressions: 10 }).check({ ...candidate, passed: true });
+    expect(result.passed).toBe(false);
+    expect(result.improvements).toEqual([]);
+    expect(result.summary).toContain('missing or invalid comparison metrics');
   });
 
   it('blocks candidate with regressions', () => {

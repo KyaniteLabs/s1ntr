@@ -1,0 +1,10 @@
+## 01-sanitize-terminal.txt
+# organ: tui | step: sanitize-terminal | data: real
+$ node -e import('./dist/tui/sanitizeTerminalText.js').then(m=>{const f=Object.values(m)[0];console.log(Object.keys(m));console.log(JSON.stringify(f('hello \u001b[31mred\u001b[0m \u001b]0;title\u0007 
+# cwd: <repo> (repo: <repo>)
+# --- stdout
+[ 'sanitizeTerminalText' ]
+"hello red  world"
+# --- stderr
+# exit: 0
+

@@ -1,0 +1,60 @@
+## 01-readiness.txt
+# organ: reporting | step: readiness | data: real
+$ node <repo>/bin/sinter report readiness
+# cwd: <out>/_proj (repo: <repo>)
+# --- stdout
+
+=== Launch Readiness Report ===
+  Ready: NO
+  Score: 83%
+
+  Checks:
+    PASS Archive size: 10 entries (min 10)
+    PASS Niche diversity: 100% occupancy (min 30%)
+    PASS Garden health: thriving (score: 0.75)
+    PASS Weakness resolution: 0 high-severity weaknesses (max 0)
+    PASS Policy stability: 0 changes, 0 promoted
+    FAIL Taste alignment: 0% (min 30%)
+
+  Blockers:
+    - Taste alignment below threshold
+
+# --- stderr
+# exit: 0
+
+## 02-cognition.txt
+# organ: reporting | step: cognition | data: real
+$ node <repo>/bin/sinter report cognition
+# cwd: <out>/_proj (repo: <repo>)
+# --- stdout
+
+=== Sinter Cognitive Architecture ===
+  Every creative act becomes material for future intelligence: perception -> memory -> compost -> dreaming -> intuition -> creation -> evaluation -> self-improvement.
+
+Creative Body:
+  - SVG [gold] — Inspectable vector art and agent-editable visual structure
+  - p5.js [gold] — Browser-native generative sketches
+  - GLSL [beta] — Shader and fragment-program visual generation
+  - Hydra [beta] — Live-coded video synthesis
+  - Three.js [beta] — 3D scenes and WebGL objects
+  - Tone.js [beta] — Programmatic audio and music logic
+  - Strudel [beta] — Pattern-based live music code
+  - ASCII [scaffold] — Text-mode visual artifacts
+  - Kinetic Typography [scaffold] — Animated typographic compositions
+  - TextGen [scaffold] — Generative text and poetic artifacts
+  - NBE [scaffold] — Cascade neural-field fluid-art renders
+
+Cognitive Organs:
+  - Perception — Captures prompts, artifacts, previews, failures, user reactions, provider behavior, and repair attempts.
+  - Memory — Stores episodic, semantic, taste, procedural, and model-role experience outside the model context window.
+  - Compost — Digests discarded or completed material into reusable seeds, motifs, warnings, and creative nutrients.
+  - Dreaming — Runs offline recombination and cross-modal transfer so past work can become new possibilities.
+  - Intuition — Provides fast learned guidance for domain choice, promising fragments, novelty, and explore/exploit tradeoffs.
+  - Cortex — Allocates attention, goals, budget, stuck detection, and human-readable self-awareness.
+  - Garden + Evolution — Maintains creative ecosystem health through diversity, novelty, lineage, stagnation checks, and quality-diversity archives.
+  - Immune / Truth System — Keeps failures visible with validation, guardrails, honest scoring, artifact receipts, and no fake fallbacks.
+  - Model Assimilation — Auditions new models by role and domain, promotes from evidence, and preserves fallback provenance.
+
+Visible Loops:
+  Creative Loop: intent -> route -> generate -> preview/export -> evaluate -> user reaction -> memory -> compost -> dream -> next creation
+  Self-Improvement Loop: failure perceived -> weakness classified -> repair proposed -> isolated worktree patch -> verification -> procedural memory

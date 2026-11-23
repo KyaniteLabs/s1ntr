@@ -1,18 +1,12 @@
 /**
- * Atomic file writes for state that must never be torn (bandit posteriors,
- * Elo tables, domain-best trackers).
+ * Atomic file writes for state that must never be torn (bandit posteriors, Elo tables, domain-best
+ * trackers, the provider budget ledger).
  *
- * A direct writeFileSync interleaved with a concurrent reader leaves a
- * half-written JSON: the reader's parse throws, its catch starts a fresh
- * empty table, and the next save() WIPES months of state. writeAtomicSync
- * writes to a temp file then renames — rename is atomic on POSIX, so readers
- * see either the old or the new file, never a torn one.
+ * One implementation lives in utils/atomicWrite.ts (temp file with a unique suffix, rename, temp
+ * cleanup on failure). This name is kept for the callers that already import it.
  */
-
-import { writeFileSync, renameSync } from 'node:fs';
+import { writeFileAtomicSync } from '../utils/atomicWrite.js';
 
 export function writeAtomicSync(file: string, data: string): void {
-  const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(tmp, data);
-  renameSync(tmp, file);
+  writeFileAtomicSync(file, data);
 }

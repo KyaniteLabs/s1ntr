@@ -34,6 +34,7 @@ import Database from 'better-sqlite3';
 import { mkdirSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
+import { entropyQualityLabel } from '../types/mediumNames.js';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -1083,9 +1084,9 @@ function describeEvent(event: CompostEvent): string {
     case 'config_change':
       return `Config changed: ${(p.field as string)} = ${JSON.stringify(p.newValue)}`;
     case 'entropy_harvest':
-      return `Entropy harvested: quality=${p.quality}, source=${p.source}, phrase="${p.phrase}"`;
+      return `Entropy harvested: quality=${entropyQualityLabel(String(p.quality))}, source=${p.source}, phrase="${p.phrase}"`;
     case 'entropy_fallback':
-      return `Entropy fallback triggered: quality=${p.quality}, source=${p.source}`;
+      return `Entropy fallback triggered: quality=${entropyQualityLabel(String(p.quality))}, source=${p.source}`;
     default:
       return `${event.type}: ${truncate(JSON.stringify(p), 80)}`;
   }

@@ -14,6 +14,10 @@
 //              PAUSE the self-improve daemon first — concurrent saves race.
 //              (Simon-approved re-normalization, 2026-06-12.)
 
+import { randomUUID } from 'node:crypto';
+import { parseArgs } from 'node:util';
+import { withEvaluatorScope } from '../../dist/core/EvaluatorScope.js';
+import { runProductionCliProviderEffect } from '../../dist/cli/LiminalProductionProviderEffect.js';
 import fs from 'node:fs/promises';
 import { QualityArchive } from '../../dist/learning/QualityArchive.js';
 import { eventBus } from '../../dist/core/EventBus.js';
@@ -23,20 +27,25 @@ import { scoreRenderedEvidence } from '../../dist/core/ScoringEngine.js';
 
 const VISUAL_DOMAINS = ['p5', 'glsl', 'three', 'hydra', 'svg', 'ascii', 'textgen', 'kinetic'];
 const TOP_N = 2;
-const FLOORS_MODE = process.argv.includes('--floors');
-const ALL_MODE = process.argv.includes('--all');
-const PERSIST = process.argv.includes('--persist');
-const domainArgIndex = process.argv.indexOf('--domain');
-const DOMAIN_FILTER = domainArgIndex >= 0
-  ? (process.argv[domainArgIndex + 1] ?? '').split(',').map((s) => s.trim()).filter(Boolean)
-  : null;
-const DOMAINS = DOMAIN_FILTER && DOMAIN_FILTER.length
-  ? VISUAL_DOMAINS.filter((d) => DOMAIN_FILTER.includes(d))
-  : VISUAL_DOMAINS;
-if (DOMAIN_FILTER && DOMAINS.length === 0) {
-  console.error(`[rescore] --domain matched no known visual domain (known: ${VISUAL_DOMAINS.join(', ')})`);
+let flags;
+try {
+  ({ values: flags } = parseArgs({ options: { floors: { type: 'boolean' }, all: { type: 'boolean' },
+    persist: { type: 'boolean' }, domain: { type: 'string' }, 'max-provider-calls': { type: 'string' } } }));
+} catch (error) { console.error(`[rescore] ${error.message}`); process.exit(2); }
+const { floors: FLOORS_MODE, all: ALL_MODE, persist: PERSIST } = flags;
+const domains = flags.domain?.split(',').map(d => d.trim()) ?? VISUAL_DOMAINS;
+if (domains.some(d => !VISUAL_DOMAINS.includes(d))) {
+  console.error(`[rescore] unknown visual domain (known: ${VISUAL_DOMAINS.join(', ')})`);
   process.exit(1);
 }
+const DOMAINS = VISUAL_DOMAINS.filter(d => domains.includes(d));
+const cap = Number(flags['max-provider-calls']);
+if (flags['max-provider-calls'] !== undefined && (!Number.isSafeInteger(cap) || cap < 1)) {
+  console.error('[rescore] --max-provider-calls requires a positive integer');
+  process.exit(2);
+}
+let remaining = flags['max-provider-calls'] === undefined ? Infinity : cap;
+let exhausted = false;
 
 // EventBus normally mirrors LLM timing events to stdout; this report's stdout
 // contract is newline-delimited JSON, so suppress those process-wide event logs.
@@ -75,7 +84,13 @@ function roundScore(value) {
 
 async function readArchiveData() {
   const archivePath = process.env.QUALITY_ARCHIVE_PATH ?? QualityArchive.DEFAULT_PATH;
-  const raw = await fs.readFile(archivePath, 'utf-8');
+  let raw;
+  try { raw = await fs.readFile(archivePath, 'utf-8'); }
+  catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    console.error(`[rescore] no quality archive at ${archivePath}; nothing to re-score`);
+    return null;
+  }
   const data = JSON.parse(raw);
   return data && typeof data.archives === 'object' && data.archives ? data.archives : {};
 }
@@ -110,9 +125,25 @@ async function checkChromiumPreflight() {
 
 const stampDate = new Date().toISOString().slice(0, 10);
 const archives = await readArchiveData();
+if (archives === null) process.exit(0);
 
 // Preflight check before any scoring work.
 await checkChromiumPreflight();
+
+const selected = new Map();
+for (const domain of DOMAINS) {
+  const entries = ALL_MODE
+    ? (Array.isArray(archives[domain]) ? archives[domain] : []).filter(isNonQuarantined)
+    : FLOORS_MODE
+      ? floorEntriesForDomain(archives, domain)
+      : topEntriesForDomain(archives, domain);
+  if (!ALL_MODE && entries.length < TOP_N) {
+    console.error(`[rescore] RESCORE_ARCHIVE_TOO_SMALL: expected ${TOP_N} non-quarantined ${domain} entries, found ${entries.length}`);
+    process.exit(2);
+  }
+  selected.set(domain, entries);
+}
+if (![...selected.values()].some(entries => entries.length)) process.exit(0);
 
 const renderer = new HeadlessRenderer();
 
@@ -131,39 +162,47 @@ let totalEntries = 0;
 let honestEntries = 0;
 
 try {
-  for (const domain of DOMAINS) {
-    const entries = ALL_MODE
-      ? (Array.isArray(archives[domain]) ? archives[domain] : []).filter(isNonQuarantined)
-      : FLOORS_MODE
-        ? floorEntriesForDomain(archives, domain)
-        : topEntriesForDomain(archives, domain);
-    if (!ALL_MODE && entries.length < TOP_N) {
-      throw new Error(`Expected ${TOP_N} non-quarantined ${domain} entries, found ${entries.length}`);
-    }
-
+  for (const [domain, entries] of selected) {
     for (const entry of entries) {
       totalEntries++;
       const evidence = await renderer.renderWithEvidence(entry.output, { domain });
-      const evaluation = await scoreRenderedEvidence(
+      const idempotencyKey = `archive-rescore:${randomUUID()}`;
+      const evaluation = await withEvaluatorScope(call => {
+        if (remaining <= 0) {
+          exhausted = true;
+          throw new Error('RESCORE_PROVIDER_CAP_EXHAUSTED');
+        }
+        remaining--;
+        return runProductionCliProviderEffect({ role: 'evaluator', idempotencyKey,
+          binding: { surface: 'cli-rescore', domain, entry: entry.id, prompt: entry.prompt, output: entry.output },
+          effect: call });
+      }, () => scoreRenderedEvidence(
         evidence,
         entry.output,
         entry.prompt ?? `Archive ${domain} entry ${entry.id}`,
         undefined,
         domain,
-      );
+      ));
       const stored = roundScore(entry.qualityScore ?? 0);
       const fresh = roundScore(evaluation.score ?? 0);
+      // Sol L3-03: an unscored verdict (parse/scorer/infra) carries a placeholder number, never a grade.
+      const unscored = evaluation.scoreState === 'unscored'
+        || evaluation.failureClass === 'parse' || evaluation.failureClass === 'scorer'
+        || evaluation.failureClass === 'infra';
       const record = {
         id: entry.id,
         domain,
         stored,
-        fresh,
-        delta: roundScore(fresh - stored),
+        fresh: unscored ? null : fresh,
+        delta: unscored ? null : roundScore(fresh - stored),
+        failureClass: evaluation.failureClass ?? 'none',
+        scoreState: unscored ? 'unscored' : 'scored',
+        ...(evaluation.unscoredReason ? { unscoredReason: evaluation.unscoredReason } : {}),
       };
       if (FLOORS_MODE) {
         record.position = 'floor';
       }
-      if (persistArchive && evaluation.failureClass !== 'scorer' && evaluation.failureClass !== 'infra') {
+      if (persistArchive && !unscored) {
         record.persisted = await persistArchive.rescoreEntry(
           entry.id, fresh, `banded-judge renorm ${stampDate}`,
         );
@@ -173,13 +212,9 @@ try {
       }
       console.log(JSON.stringify(record));
 
-      // Honest evidence = non-infra-degraded evaluation. This includes:
-      // - failureClass === 'none' (real LLM score)
-      // - failureClass === 'render' (candidate code was bad, but we tried)
-      // - failureClass === 'parse' (LLM returned garbage, we tried)
-      // Excludes failureClass === 'infra' (browser missing) and failureClass === 'scorer'
-      // (LLM unavailable — no meaningful evidence gathered).
-      const isHonest = evaluation.failureClass !== 'infra' && evaluation.failureClass !== 'scorer';
+      // Honest evidence = a real verdict: failureClass 'none' (scored) or 'render' (the candidate
+      // itself failed to render). Parse, scorer and infra outcomes gave no grade (Sol L3-03).
+      const isHonest = !unscored;
       if (isHonest) {
         honestEntries++;
       }
@@ -204,3 +239,5 @@ if (guard.allDegraded) {
   console.error(guard.message);
   process.exit(1);
 }
+
+if (exhausted) { console.error('[rescore] RESCORE_PROVIDER_CAP_EXHAUSTED'); process.exitCode = 2; }

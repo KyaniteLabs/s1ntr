@@ -18,6 +18,7 @@ import { inlineVendorAssets } from '../utils/vendorAssets.js';
 import { missingChromiumError } from '../utils/browserPreflight.js';
 import { getChromeArgs } from '../security/SandboxConfig.js';
 import { isAllowedRenderRequestUrl } from './HeadlessRenderer.js';
+import { prepareBrowserScratch } from '../utils/scratchSpace.js';
 
 export class Renderer {
   private readonly RENDER_TIMEOUT = 30000;
@@ -39,6 +40,7 @@ export class Renderer {
     const disableSandbox = process.env.LIMINAL_DISABLE_SANDBOX === 'true';
     const executablePath = resolveChromiumExecutablePath();
     if (!executablePath) throw missingChromiumError();
+    prepareBrowserScratch();   // profile dir off the data volume + free-space check
     const launching = puppeteer.launch({
       headless: true,
       executablePath,

@@ -1,0 +1,15 @@
+# organ: quality | data: real command, fake provider
+$ sinter quality run --spec <work>/suite.json --candidates <work>/cand
+[CLI] Resolved provider: openai @ http://127.0.0.1:33991/v1 (model=gpt-5.4)
+
+◆ Sinter Quality Gate
+  Suite: s (1 cases)
+
+  PASS c1: 0.438
+
+  Result: 1/1 passed
+  Average score: 0.438
+  Duration: 5ms
+  Suite passed: true
+# exit: 0
+

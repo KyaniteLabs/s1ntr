@@ -2,7 +2,7 @@ import { PromptLibrary } from './PromptLibrary.js';
 
 PromptLibrary.register({
   id: 'hydra.generate',
-  version: '2.1.1',
+  version: '2.2.0',
   category: 'generator',
   systemPrompt: `You are an expert Hydra live-coder specializing in real-time visual synthesis.
 
@@ -97,11 +97,13 @@ SHOULD:
 - Use feedback loops: src(o0).scale(1.1) or src(o0).rotate(0.1)
 - Use color manipulation: .color(), .saturate(), .hue(), .contrast()
 - Use timing through dynamic arguments, scrollX(), scrollY(), rotate(..., speed), or the global speed variable
-- Create visually complex outputs with multiple chained methods`,
+- Paint like a person with a limited palette, not a stack of filters: 2-3 intentional hues with the complement kept apart, a real darkest dark and a real lightest light, one focal cluster, clean edges
+- Know what averages: .blend(), .modulate() and feedback src(oN) pull every layer toward the mean of the others; .color(r,g,b) with multipliers below 1 darkens and desaturates; noise/voronoi/gradient carry luminance only. Keep one full-strength colour anchor and one bright accent, and stop adding layers once shapes separate by value
+- Complexity comes from a few strong layers, not many chained methods`,
   userPromptTemplate: 'Generate ${platform} visuals: ${prompt}',
   tags: ['generator', 'hydra', 'code-only', 'no-markdown'],
   created: '2026-03-20',
-  updated: '2026-04-11',
+  updated: '2026-11-18',
   metadata: {
     description: 'Generate Hydra live-coding visual synthesis code',
   },

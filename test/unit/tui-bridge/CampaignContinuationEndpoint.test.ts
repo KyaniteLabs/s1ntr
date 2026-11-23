@@ -19,6 +19,7 @@ import type { CampaignRunAdmission, CampaignEvidenceCheckpoint } from
 import type { CreativeRunCoordinator } from '../../../src/creative-run/CreativeRunCoordinator.js';
 import { TuiBridgeServer } from '../../../src/tui-bridge/TuiBridgeServer.js';
 import { TuiBridgeService } from '../../../src/tui-bridge/TuiBridgeService.js';
+import { isolatedCliEnv } from '../../helpers/isolatedCli.js';
 
 const execFileAsync = promisify(execFile);
 const D = (char: string) => char.repeat(64);
@@ -227,7 +228,7 @@ describe('compiled campaign continuation CLI transport', () => {
         '--bridge-url', server.address, '--session', session.sessionId,
         '--campaign-run-id', harness.campaignRunId], {
         cwd: path.resolve(import.meta.dirname, '../../..'),
-        env: { ...process.env, SINTER_OWNER_AUTHORIZATION: 'owner-auth' },
+        env: { ...isolatedCliEnv().env, SINTER_OWNER_AUTHORIZATION: 'owner-auth' },
       });
       await server.stop();
       servers.splice(servers.indexOf(server), 1);

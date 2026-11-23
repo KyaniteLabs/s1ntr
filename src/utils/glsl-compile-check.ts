@@ -5,6 +5,9 @@
  * errors that static analysis cannot detect.
  */
 
+import { spawnSync } from 'node:child_process';
+import { prepareBrowserScratch } from './scratchSpace.js';
+
 export type CompileCheckStatus = 'pass' | 'compile-error' | 'infra-unavailable';
 
 export interface CompileCheckResult {
@@ -46,7 +49,13 @@ export function buildShaderSources(shaderCode: string): ShaderSources {
     if (!/\bu_time\b/.test(shaderCode)) {
       preamble += 'uniform float u_time;\n';
     }
-    source = preamble + shaderCode;
+    // `#version` / `#extension` lines must stay ahead of the injected preamble.
+    const directives: string[] = [];
+    const rest: string[] = [];
+    for (const line of shaderCode.split('\n')) {
+      (/^[ \t]*#[ \t]*(?:version|extension)\b/.test(line) ? directives : rest).push(line);
+    }
+    source = (directives.length ? directives.join('\n') + '\n' : '') + preamble + rest.join('\n');
   }
 
   const vertexShaderSrc = isGlsl300
@@ -103,6 +112,7 @@ export async function getOrCreateBrowser(): Promise<import('puppeteer').Browser 
     try {
       const puppeteer = await import('puppeteer');
       const { getChromeArgs } = await import('../security/SandboxConfig.js');
+      prepareBrowserScratch();   // profile dir off the data volume + free-space check
       browserInstance = await puppeteer.launch({
         headless: true,
         executablePath: chromeExecutablePath,
@@ -196,6 +206,10 @@ export async function checkGLSLCompile(fragmentShader: string): Promise<CompileC
           return { error: 'WebGL not available', infra: true };
         }
 
+        // WebGL1 only honors `#extension GL_OES_standard_derivatives` once the
+        // extension has been requested; WebGL2 returns null (derivatives are core).
+        gl.getExtension('OES_standard_derivatives');
+
         const { vertexShaderSrc, fragmentShaderSrc } = buildShaderSources(shaderCode);
 
         // Compile vertex shader
@@ -267,5 +281,35 @@ export async function checkGLSLCompile(fragmentShader: string): Promise<CompileC
  * This is the same as checkGLSLCompile but with a clearer name for the validator.
  */
 export async function glslCompileCheck(fragmentShader: string): Promise<CompileCheckResult> {
-  return checkGLSLCompile(fragmentShader);
+  const browserResult = await checkGLSLCompile(fragmentShader);
+  if (browserResult.status !== 'infra-unavailable') return browserResult;
+  // No browser WebGL (CI runners, Kaggle, some headless hosts). A static pass
+  // is not a compile: fall back to the Khronos reference compiler so an
+  // undeclared identifier or orphan #endif still fails instead of passing open.
+  const reference = glslangCompileCheck(fragmentShader);
+  if (reference) return reference;
+  return browserResult;
+}
+
+/**
+ * Compile the fragment shader with glslangValidator (the Khronos reference
+ * front end) when it is on PATH. Uses the same sources as the WebGL check.
+ * Returns null when glslangValidator is not installed.
+ */
+export function glslangCompileCheck(fragmentShader: string): CompileCheckResult | null {
+  const { fragmentShaderSrc } = buildShaderSources(fragmentShader);
+  const run = spawnSync('glslangValidator', ['--stdin', '-S', 'frag'], {
+    input: fragmentShaderSrc,
+    encoding: 'utf8',
+    timeout: PAGE_TIMEOUT_MS,
+  });
+  if (run.error) return null;
+  if (run.status === 0) return { success: true, status: 'pass' };
+  const log = `${run.stdout ?? ''}${run.stderr ?? ''}`;
+  const errors = log.split('\n').filter((l) => /^ERROR:/.test(l) && !/compilation errors/.test(l));
+  return {
+    success: false,
+    status: 'compile-error',
+    error: `Fragment (glslang): ${(errors.length ? errors.join('\n') : log).trim().slice(0, 2000)}`,
+  };
 }

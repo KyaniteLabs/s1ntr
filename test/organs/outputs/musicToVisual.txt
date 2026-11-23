@@ -1,0 +1,19 @@
+## 01-live-music-fake.txt
+# organ: musicToVisual | step: live-music-fake | data: fake
+$ node <repo>/bin/sinter live-music a slow tide of low drones -o <out>/musicToVisual/out --music-to-visual
+# cwd: <out>/_proj (repo: <repo>)
+# --- stdout
+
+🎵 Sinter: Live AV
+📝 Prompt: "a slow tide of low drones"
+📁 Output: <out>/musicToVisual/out
+
+[07:18:43.426] LLMClient llm:response <email>:34985 local/gpt-5.4 129ms ok
+✅ Music: <out>/musicToVisual/out/strudel.js
+✅ Visuals: <out>/musicToVisual/out/hydra.js
+🔗 Visuals follow the music (measured tempo 96 BPM)
+
+# --- stderr
+[LLMClient] [attestation] non-harness generator attempt completes unattested: EXECUTOR_AUTHORITY_UNAVAILABLE: metered funding evidence missing for unknown
+# exit: 0
+

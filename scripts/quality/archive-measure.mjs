@@ -12,6 +12,7 @@ import puppeteer from 'puppeteer';
 import { QualityArchive } from '../../dist/learning/QualityArchive.js';
 import { HTMLWrapper } from '../../dist/utils/htmlWrapper.js';
 import { analyzeScreenshotBuffer } from '../../dist/render/DecodedImageVisibility.js';
+import { prepareBrowserScratch } from '../lib/scratch-space.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const OUT = path.join(ROOT, '.quality/archive-measure-renders');
@@ -109,6 +110,7 @@ for (const domain of VISUAL_DOMAINS) {
   });
 }
 
+prepareBrowserScratch();   // browser profile off the data volume + free-space check
 const browser = await puppeteer.launch({
   headless: 'new',
   protocolTimeout: 60000,

@@ -81,13 +81,22 @@ const KNOWN_CLIS: Record<string, CliSpec> = {
 };
 
 /** Effort levels each CLI accepts, and the env var that sets a fleet-wide default. */
-const EFFORT: Record<string, { levels: readonly string[]; env: string }> = {
-  codex: { levels: ['low', 'medium', 'high', 'xhigh'], env: 'SINTER_CODEX_REASONING_EFFORT' },
-  claude: { levels: ['low', 'medium', 'high', 'xhigh', 'max'], env: 'SINTER_CLAUDE_EFFORT' },
+const EFFORT: Record<string, { levels: readonly string[]; env: string;
+  /** argv that sets the effort, given the level. */ args: (level: string) => readonly string[] }> = {
+  codex: { levels: ['low', 'medium', 'high', 'xhigh'], env: 'SINTER_CODEX_REASONING_EFFORT',
+    args: level => ['-c', `model_reasoning_effort=${level}`] },
+  claude: { levels: ['low', 'medium', 'high', 'xhigh', 'max'], env: 'SINTER_CLAUDE_EFFORT',
+    args: level => ['--effort', level] },
+  agy: { levels: ['low', 'medium', 'high', 'xhigh', 'max'], env: 'SINTER_AGY_EFFORT',
+    args: level => ['--effort', level] },
+  grok: { levels: ['low', 'medium', 'high'], env: 'SINTER_GROK_EFFORT',
+    args: level => ['--reasoning-effort', level] },
+  'command-code': { levels: ['low', 'medium', 'high'], env: 'SINTER_COMMAND_CODE_EFFORT',
+    args: level => ['--effort', level] },
 };
 
 /**
- * Per-seat effort: `cli://codex/xhigh` or `cli://claude/high`. The URL segment
+ * Per-seat effort: `cli://codex/xhigh`, `cli://claude/high` or `cli://agy/high`. The URL segment
  * wins over the env default, so two seats on one CLI can run at different
  * efforts. Rotation may append /chat/completions; any segment that is not an
  * effort level is ignored, and an empty result means "CLI default".
@@ -353,8 +362,7 @@ export class CliProvider extends BaseProvider {
     }
     const effort = seatEffort(command, this.config.baseUrl);
     if (effort.isErr()) return Promise.resolve(err(new LLMError(effort.error, 'cli')));
-    if (effort.value && command === 'codex') args.push('-c', `model_reasoning_effort=${effort.value}`);
-    if (effort.value && command === 'claude') args.push('--effort', effort.value);
+    if (effort.value) args.push(...EFFORT[command].args(effort.value));
     args.push(...spec.extraArgs);
     // `--image=<path>` binds one value per flag, and `--` ends options: codex's
     // --image takes several values and would otherwise swallow the prompt.

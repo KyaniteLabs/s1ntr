@@ -18,6 +18,7 @@ import { HTMLWrapper } from '../../dist/utils/htmlWrapper.js';
 import { detectDomain } from './detect-domain.mjs';
 import { relativeLuminance, DARK_LUMINANCE_THRESHOLD } from './luminance.mjs';
 import { looksLikeRevideoArtifact, renderRevideoStill } from './revideo-render.mjs';
+import { prepareBrowserScratch } from '../lib/scratch-space.mjs';
 
 // sharp is an optionalDependency — load it lazily so the renderer still works
 // without it (the DARK luminance flag is just skipped when it's unavailable).
@@ -97,6 +98,7 @@ function selectWorks() {
 const works = selectWorks();
 if (works.length === 0) { console.error('No gallery works found at', GALLERY); process.exit(1); }
 
+prepareBrowserScratch();   // browser profile off the data volume + free-space check
 const browser = await puppeteer.launch({
   headless: 'new', protocolTimeout: 60000,
   args: ['--no-sandbox', '--disable-setuid-sandbox', '--use-gl=angle', '--use-angle=swiftshader',

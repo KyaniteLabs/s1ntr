@@ -6,6 +6,7 @@ import type { AdmittedCreativeEvidence, DreamResearchPlan,
 import type { DreamResearchService } from '../dreaming/research/DreamResearchService.js';
 import type { DreamExperimentPlan, DreamModality } from
   '../dreaming/research/DreamResearchTypes.js';
+import { extractParentTechnique } from '../dreaming/research/ParentTechnique.js';
 import type { LiminalProductCommandPort } from './LiminalProductCommandPort.js';
 import type { VerifiedLiminalOwnerEvidence } from './LiminalProductCommandPort.js';
 import { FileLiminalProductCommandStore } from './LiminalProductCommandPort.js';
@@ -14,7 +15,11 @@ export interface DreamProductCommand {
   readonly schema: 'sinter.dream-product-command';
   readonly schemaVersion: 1;
   readonly idempotencyKey: string;
-  readonly evidence: readonly { readonly createKey: string; readonly ownerReviewKey: string }[];
+  /** Each item names an owner review, or `source: 'judge-scoring'` to use the judge's score as evidence. */
+  readonly evidence: readonly ({ readonly createKey: string; readonly ownerReviewKey: string;
+    readonly source?: undefined } | { readonly createKey: string;
+    readonly source: 'judge-scoring'; readonly ownerReviewKey?: undefined;
+    readonly expectedCreateReceiptDigest?: string })[];
 }
 
 export interface DreamProductProjection {
@@ -64,6 +69,8 @@ const stable = (value: unknown): string => {
 const digest = (value: unknown): string =>
   createHash('sha256').update(stable(value)).digest('hex');
 
+interface ParentTechniqueFields { readonly parentTechniqueDigest?: string; readonly parentTechnique?: string }
+
 /** Canonical product path from accepted Create evidence to one bounded experiment. */
 export class DreamProductCommandPort {
   constructor(private readonly products: LiminalProductCommandPort,
@@ -72,7 +79,11 @@ export class DreamProductCommandPort {
     private readonly executor: DreamRenderedExperimentExecutor,
     private readonly store: DreamProductProjectionStore,
     private readonly policy: DreamResearchPlan['budget'],
-    private readonly template: DreamExperimentTemplate) {}
+    private readonly template: DreamExperimentTemplate,
+    /** Reserves one precommitted holdout per study and returns its commitment digest (F02). Absent: the template's single commitment. */
+    private readonly assignHoldout?: (aggregateId: string) => string,
+    /** Reads an admitted parent's source so the study binds what the piece does (F09). Absent or null: criterion-digest principle. */
+    private readonly readParentSource?: (createKey: string, artifactDigest: string) => Promise<string | null>) {}
 
   async run(command: DreamProductCommand): Promise<DreamProductProjection> {
     this.validate(command);
@@ -116,23 +127,40 @@ export class DreamProductCommandPort {
   }
 
   private async admittedEvidence(command: DreamProductCommand):
-  Promise<Array<AdmittedCreativeEvidence & VerifiedLiminalOwnerEvidence>> {
-    const verified = await Promise.all(command.evidence.map(item =>
-      this.products.verifiedOwnerEvidence(item.createKey, item.ownerReviewKey)));
-    return verified.map(item => Object.freeze({ ...item, evidenceDigest: item.evidenceDigest,
-      artifactDigest: item.artifactDigest, principleIds: [item.criterionDigest],
+  Promise<Array<AdmittedCreativeEvidence & VerifiedLiminalOwnerEvidence & ParentTechniqueFields>> {
+    const verified = await Promise.all(command.evidence.map(async item => {
+      if (item.source !== 'judge-scoring') {
+        return this.products.verifiedOwnerEvidence(item.createKey, item.ownerReviewKey);
+      }
+      const proof = await this.products.verifiedJudgeEvidence(item.createKey, item.expectedCreateReceiptDigest !== undefined);
+      if (item.expectedCreateReceiptDigest !== undefined
+        && item.expectedCreateReceiptDigest !== proof.createReceiptDigest) {
+        throw new Error('DREAM_JUDGE_CREATE_RECEIPT_MISMATCH');
+      }
+      return proof;
+    }));
+    const techniques = await Promise.all(verified.map(async item => {
+      const source = this.readParentSource ? await this.readParentSource(item.createKey, item.artifactDigest) : null;
+      return source ? extractParentTechnique(source) : null;
+    }));
+    return verified.map((item, index) => Object.freeze({ ...item, evidenceDigest: item.evidenceDigest,
+      artifactDigest: item.artifactDigest,
+      principleIds: [techniques[index]?.statement ?? item.criterionDigest],
+      ...(techniques[index] ? { parentTechniqueDigest: techniques[index]!.digest,
+        parentTechnique: techniques[index]!.statement } : {}),
       domain: item.domain, quality: item.quality, noveltyDescriptor: [item.quality],
       outcome: 'accepted' as const, rendered: true, admissionEligible: true }));
   }
 
   private experimentPlan(commandDigest: string,
-    evidence: readonly (AdmittedCreativeEvidence & VerifiedLiminalOwnerEvidence)[],
+    evidence: readonly (AdmittedCreativeEvidence & VerifiedLiminalOwnerEvidence & ParentTechniqueFields)[],
     plan: DreamResearchPlan): DreamExperimentPlan {
     const aggregateId = `dream-${commandDigest.slice(0, 24)}`;
     return Object.freeze({ aggregateId, schemaVersion: 1, campaignId: this.template.campaignId,
       hypothesis: Object.freeze({ id: plan.planDigest, statement: plan.hypothesis,
         principle: plan.hypothesis, expectedEffect: plan.criterion }),
       context: Object.freeze({ ...this.template.context,
+        ...(this.assignHoldout ? { transferCommitmentDigest: this.assignHoldout(aggregateId) } : {}),
         liminalParentBindings: evidence.map(item => Object.freeze({
           createKey: item.createKey, ownerReviewKey: item.ownerReviewKey,
           operationId: item.operationId, lineageId: item.lineageId,
@@ -141,7 +169,10 @@ export class DreamProductCommandPort {
           reviewCommandDigest: item.reviewCommandDigest,
           reviewDecisionDigest: item.reviewDecisionDigest,
           reviewReceiptDigest: item.reviewReceiptDigest,
-          artifactDigest: item.artifactDigest, evidenceDigest: item.evidenceDigest })),
+          artifactDigest: item.artifactDigest, evidenceDigest: item.evidenceDigest,
+          ...('parentTechniqueDigest' in item ? { parentTechniqueDigest: item.parentTechniqueDigest,
+            parentTechnique: item.parentTechnique } : {}),
+          ...(item.provenance ? { provenance: item.provenance } : {}) })),
         sourceDigests: evidence.map(item => item.artifactDigest).sort(),
         parentSetDigest: digest(evidence.map(item => ({ artifactDigest: item.artifactDigest,
           evidenceDigest: item.evidenceDigest })).sort((a, b) =>
@@ -205,12 +236,16 @@ export class DreamProductCommandPort {
   }
 
   private validate(command: DreamProductCommand): void {
-    const pairs = command.evidence.map(item => `${item.createKey}\0${item.ownerReviewKey}`);
+    const pairs = command.evidence.map(item => `${item.createKey}\0${item.ownerReviewKey ?? item.source}`);
     if (command.schema !== 'sinter.dream-product-command' || command.schemaVersion !== 1
       || !command.idempotencyKey.trim() || command.evidence.length < 1
       || new Set(pairs).size !== pairs.length
       || command.evidence.some(item => !item.createKey.trim()
-        || !item.ownerReviewKey.trim() || item.createKey === item.ownerReviewKey)) {
+        || (item.source === 'judge-scoring'
+          ? item.ownerReviewKey !== undefined || (item.expectedCreateReceiptDigest !== undefined
+            && !/^[a-f0-9]{64}$/.test(item.expectedCreateReceiptDigest))
+          : item.source !== undefined || !item.ownerReviewKey?.trim()
+            || item.createKey === item.ownerReviewKey))) {
       throw new Error('DREAM_PRODUCT_COMMAND_INVALID');
     }
   }

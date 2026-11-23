@@ -195,6 +195,9 @@ export async function submitInput(host: TuiBridgeService, sessionId: string, inp
             kind: 'llm',
             requiresConfirmation: true,
             createdAt: new Date().toISOString(),
+            ...(input.creativePreferences || input.guidanceAnswers
+              ? { creativeOptions: { creativePreferences: input.creativePreferences, guidanceAnswers: input.guidanceAnswers } }
+              : {}),
           };
           const status = host.sessions.update(sessionId, {
             mode: 'action',
@@ -314,7 +317,7 @@ export async function confirmAction(host: TuiBridgeService, sessionId: string, a
     host.emit(sessionId, { type: 'response.started', sessionId });
     const routeStart = Date.now();
     const runApproved = route === 'creative'
-      ? host.streamGovernedProductCreate(sessionId, approvedText, conversation)
+      ? host.streamGovernedProductCreate(sessionId, approvedText, conversation, pendingAction.creativeOptions ?? {})
       : route === 'hybrid'
         ? host.streamHybridTask(sessionId, approvedText, conversation, llm)
         : host.streamEngineeringTask(sessionId, approvedText, conversation, llm);

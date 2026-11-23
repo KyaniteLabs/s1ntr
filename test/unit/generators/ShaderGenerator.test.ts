@@ -20,9 +20,30 @@ describe('ShaderGenerator', () => {
     const body = 'void main() { vec2 uv = gl_FragCoord.xy / RES.xy; gl_FragColor = vec4(uv, sin(T), 1.0); }';
     const bad = gen.validate(`precision highp float;\nuniform vec2 resolution;\nuniform float time;\n${body.replace('RES', 'resolution').replace('T', 'time')}`);
     expect(bad.valid).toBe(false);
-    expect(bad.error).toBe('Shader declares uniforms the host never sets: resolution, time. Use only u_time, u_resolution, u_mouse.');
+    expect(bad.error).toBe('Shader declares uniforms the host never sets: resolution, time. The host supplies exactly: uniform float u_time; uniform vec2 u_resolution; uniform vec2 u_mouse; — delete the dead declarations or fold their values into constants.');
     const good = gen.validate(`precision highp float;\nuniform vec2 u_resolution;\nuniform float u_time;\nuniform vec2 u_mouse;\n${body.replace('RES', 'u_resolution').replace('T', 'u_time')}`);
     expect(good.error ?? '').not.toContain('never sets');
+  });
+
+  it('normalizes a desktop-GLSL LFM3-style shader before validation (version, in/out, C math, uTime, 1e6.0)', () => {
+    const gen = new ExposedShaderGenerator();
+    const code = [
+      '#version 330 core',
+      'in vec2 vUv;',
+      'out vec4 FragColor;',
+      'uniform float uTime;',
+      'uniform vec2 uResolution;',
+      'float pattern(vec2 p){ return sin(fabs(p.x) * 3.0) + sqrtf(abs(p.y)); }',
+      'void main(){',
+      '  vec2 uv = vUv * 2.0 - 1.0;',
+      '  float v = pattern(uv + 0.1 * sin(uTime));',
+      '  float d = fminf(abs(length(uv) - 0.5), 1.0) * 1e6.0;',
+      '  vec3 col = mix(vec3(0.9, 0.2, 0.5), vec3(0.1, 0.4, 0.9), clamp(d, 0.0, 1.0));',
+      '  FragColor = vec4(col, 1.0);',
+      '}',
+    ].join('\n');
+    const result = gen.validate(code);
+    expect({ valid: result.valid, error: result.error }).toEqual({ valid: true, error: undefined });
   });
 
   it('wraps void main shaders without adding a mainImage call', () => {
@@ -32,6 +53,16 @@ describe('ShaderGenerator', () => {
     expect(wrapped).toContain('const fs=');
     expect(wrapped).not.toContain('mainImage(gl_FragColor');
     expect(wrapped).toContain('void main()');
+  });
+
+  it('keeps #version first and injects precision/uniforms after it; derivative shaders carry no ES 1.00 extension under 300 es', () => {
+    const gen = new ShaderGenerator();
+    const wrapped = gen.wrapForGallery('void main(){ float w = fwidth(gl_FragCoord.x); gl_FragColor = vec4(w); }');
+    const fs = JSON.parse(/const fs=("(?:[^"\\]|\\.)*");/.exec(wrapped)![1]) as string;
+    expect(fs.split('\n')[0]).toBe('#version 300 es');
+    expect(fs.indexOf('uniform float u_time;')).toBeGreaterThan(fs.indexOf('#version'));
+    expect(fs).not.toContain('GL_OES_standard_derivatives');
+    expect(wrapped).toContain('gl.getExtension("OES_standard_derivatives")');
   });
 
   it('strips markdown GLSL fences before wrapping', () => {

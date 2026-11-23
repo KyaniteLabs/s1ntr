@@ -1,11 +1,13 @@
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
+import { execFile } from 'child_process';
+import { inlineVendorAssets } from '../utils/vendorAssets.js';
+import { withRenderBudget } from './RenderBudget.js';
 import { VideoRenderer, VideoRenderOptions, VideoRenderResult } from './VideoRenderer.js';
 
 const DEFAULT_FPS = 30;
-const DEFAULT_WIDTH = 1920;
-const DEFAULT_HEIGHT = 1080;
+const HYPERFRAMES_RENDER_BUDGET_MS = 300_000;
 
 
 interface AssetDescriptor {
@@ -60,11 +62,32 @@ function injectAssetsIntoHtml(html: string, assets: AssetDescriptor[]): string {
   return html + '\n' + script;
 }
 
+export interface ProbedMedia { width: number; height: number; duration: number }
+
+/** What the file really is: ffprobe on the written output. Throws when it cannot be read as video. */
+export function probeMediaWithFfprobe(file: string, signal?: AbortSignal): Promise<ProbedMedia> {
+  return new Promise((resolve, reject) => {
+    execFile('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height:format=duration',
+      '-of', 'json', file], { timeout: 30_000, signal }, (error, stdout) => {
+      if (error) { reject(new Error(`HyperFrames output could not be probed: ${error.message}`)); return; }
+      try {
+        const parsed = JSON.parse(stdout) as { streams?: Array<{ width?: number; height?: number }>; format?: { duration?: string } };
+        const stream = parsed.streams?.[0];
+        const duration = Number(parsed.format?.duration);
+        if (!stream?.width || !stream?.height || !Number.isFinite(duration)) throw new Error('no video stream');
+        resolve({ width: stream.width, height: stream.height, duration });
+      } catch (e) { reject(new Error(`HyperFrames output is not readable video: ${(e as Error).message}`)); }
+    });
+  });
+}
+
 export class HyperFramesRenderer implements VideoRenderer {
   private tempBaseDir: string;
+  private probeMedia: (file: string, signal?: AbortSignal) => Promise<ProbedMedia>;
 
-  constructor(options?: { tempDir?: string }) {
+  constructor(options?: { tempDir?: string; probeMedia?: (file: string, signal?: AbortSignal) => Promise<ProbedMedia> }) {
     this.tempBaseDir = options?.tempDir ?? os.tmpdir();
+    this.probeMedia = options?.probeMedia ?? probeMediaWithFfprobe;
   }
 
   async writeComposition(code: string): Promise<string> {
@@ -89,19 +112,21 @@ export class HyperFramesRenderer implements VideoRenderer {
     opts: HyperFramesRenderOptions = {}
   ): Promise<VideoRenderResult> {
     const fps = opts.fps ?? DEFAULT_FPS;
-    const width = opts.width ?? DEFAULT_WIDTH;
-    const height = opts.height ?? DEFAULT_HEIGHT;
 
-    let html = code;
+    let html = await inlineVendorAssets(code);
     if (opts.assets && opts.assets.length > 0) {
       html = injectAssetsIntoHtml(html, opts.assets);
     }
 
     let compDir: string | undefined;
+    let stagingDir: string | undefined;
     try {
       compDir = await this.writeComposition(html);
 
-      await fs.mkdir(path.dirname(outputPath), { recursive: true });
+      const outputDir = path.dirname(path.resolve(outputPath));
+      await fs.mkdir(outputDir, { recursive: true });
+      stagingDir = await fs.mkdtemp(path.join(outputDir, '.hyperframes-'));
+      const stagedOutput = path.join(stagingDir, path.basename(outputPath));
 
       let createRenderJob: (config: { fps: number; quality: string; format: string }) => unknown;
       let executeRenderJob: (job: unknown, projectDir: string, outputPath: string, onProgress?: unknown, abortSignal?: AbortSignal) => Promise<void>;
@@ -125,7 +150,7 @@ export class HyperFramesRenderer implements VideoRenderer {
       // outputResolution is intentionally omitted: the engine reads the composition's own dimensions
       // from the HTML (via the compile stage), so forcing a preset here would mismatch compositions
       // that don't happen to use a canonical CanvasResolution size. The width/height opts we received
-      // are only used to populate the returned VideoRenderResult metadata.
+      // are not used to size the output; the returned metadata is probed from the written file.
       const ext = path.extname(outputPath).slice(1);
       const job = createRenderJob({
         fps,
@@ -134,21 +159,36 @@ export class HyperFramesRenderer implements VideoRenderer {
       });
 
       // executeRenderJob(job, projectDir, outputPath, onProgress?, abortSignal?) → Promise<void>
-      await executeRenderJob(job, compDir, outputPath);
+      // The producer drives its own browser; the abort signal is the only handle on it,
+      // so a hung export is aborted on timeout instead of waiting forever.
+      const compositionDir = compDir;
+      const media = await withRenderBudget('hyperframes render', opts.timeoutMs ?? HYPERFRAMES_RENDER_BUDGET_MS,
+        async (signal) => {
+          await executeRenderJob(job, compositionDir, stagedOutput, undefined, signal);
+          signal.throwIfAborted();
 
-      const duration = opts.duration ?? 0;
+          // A producer can resolve without writing a file. Only promote a newly written regular file.
+          const written = await fs.lstat(stagedOutput).catch(() => null);
+          if (!written?.isFile() || written.size === 0) {
+            throw new Error(`HyperFrames render finished but wrote no output at ${outputPath}`);
+          }
+          signal.throwIfAborted();
+          return this.probeMedia(stagedOutput, signal);
+        });
+      await fs.rename(stagedOutput, outputPath);
 
       return {
         outputPath,
-        duration,
-        width,
-        height,
+        duration: media.duration,
+        width: media.width,
+        height: media.height,
         format: (ext as 'mp4' | 'webm' | 'mov') || 'mp4',
       };
     } finally {
-      if (compDir) {
-        await this.cleanup(compDir);
-      }
+      await Promise.all([
+        compDir && this.cleanup(compDir),
+        stagingDir && this.cleanup(stagingDir),
+      ]);
     }
   }
 }

@@ -22,6 +22,24 @@ const root = (): string => {
   return value;
 };
 
+/** A Hermes data dir whose auth.json holds a fake openai-codex login (no real tokens). */
+function hermesHome(opts: { mode?: string; plan?: string | null; refresh?: boolean;
+  expDays?: number; refreshedDaysAgo?: number } = {}): NodeJS.ProcessEnv {
+  const dir = root();
+  const claims = {
+    exp: Math.floor(Date.now() / 1000) + (opts.expDays ?? 5) * 86_400,
+    'https://api.openai.com/auth': opts.plan === null ? {} : { chatgpt_plan_type: opts.plan ?? 'pro' },
+  };
+  const jwt = `h.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.s`;
+  writeFileSync(join(dir, 'auth.json'), JSON.stringify({ providers: { 'openai-codex': {
+    auth_mode: opts.mode ?? 'chatgpt',
+    last_refresh: new Date(Date.now() - (opts.refreshedDaysAgo ?? 1) * 86_400_000).toISOString(),
+    // The id_token is stale in real stores (issued at first login); only the access token is live.
+    tokens: { id_token: 'h.e30.s', access_token: jwt, ...(opts.refresh === false ? {} : { refresh_token: 'r' }) },
+  } } }));
+  return { HERMES_HOME: dir };
+}
+
 afterEach(() => {
   for (const path of roots.splice(0)) rmSync(path, { recursive: true, force: true });
 });
@@ -355,6 +373,110 @@ describe('production executor authority bootstrap', () => {
     });
     expect(() => authority.reserveAttempt({ ...context, surface: 'minimax-direct' as const }))
       .toThrow(/metered funding evidence missing for minimax-direct/);
+  });
+
+  // Sol F12: the operator path. Evidence supplied -> metered route runs; absent -> plain refusal naming what to supply.
+  it('a metered route runs only with operator-supplied ceiling and receipt digest, and refuses plainly without', async () => {
+    const identity = { provider: 'minimax' as const, model: 'minimax-m3', effort: 'high' as const, alias: 'minimax-m3' };
+    const context = {
+      role: 'harness' as const, requestDigest: 'op-request', routeDigest: 'op-route',
+      requestedIdentity: identity, resolvedIdentity: identity, phase: 'pre-primary-transport' as const,
+      fallbackOrdinal: 0, retryOrdinal: 0, attemptOrdinal: 0, priorTraceDigest: null,
+      policyTraceDigest: 'op-policy', fallbackChain: [{ ordinal: 0, identity }],
+      surface: 'minimax-direct' as const, seatDigest: 'o'.repeat(64),
+    };
+    const none = bootstrapExecutorAuthority({ rootDir: root(), env: {} });
+    expect(() => none.reserveAttempt(context)).toThrow(/supply SINTER_METERED_APPROVED_USD_CEILING.*SINTER_METERED_PRICE_RECEIPT_DIGEST/);
+    const half = bootstrapExecutorAuthority({ rootDir: root(), env: { SINTER_METERED_APPROVED_USD_CEILING: '5' } });
+    expect(() => half.reserveAttempt(context)).toThrow(/metered funding evidence missing/);
+    const supplied = bootstrapExecutorAuthority({ rootDir: root(), env: {
+      SINTER_METERED_APPROVED_USD_CEILING: '5', SINTER_METERED_PRICE_RECEIPT_DIGEST: 'd'.repeat(64) } });
+    const reservation = await supplied.reserveAttempt(context);
+    expect(reservation?.subject.funding).toMatchObject({ mode: 'metered-api', approvedUsdCeiling: 5 });
+  });
+
+  it('classifies a Hermes openai-codex seat as subscription and keeps openai-api metered', async () => {
+    expect(classifyProviderSurface('cli', 'cli://hermes/openai-codex/high')).toBe('hermes-codex-seat');
+    expect(classifyProviderSurface('cli', 'cli://hermes/openai-codex/xhigh/chat/completions')).toBe('hermes-codex-seat');
+    expect(classifyProviderSurface('cli', 'cli://hermes/openai-api/high')).toBe('hermes-cli-seat');
+    expect(classifyProviderSurface('cli', 'cli://hermes/zai/high')).toBe('hermes-cli-seat');
+    // Only the CLI transport counts; an HTTP URL cannot claim the seat.
+    expect(classifyProviderSurface('openai', 'https://hermes/openai-codex/high')).toBe('unknown');
+
+    const authority = bootstrapExecutorAuthority({ rootDir: root(), env: hermesHome() });
+    const identity = { provider: 'openai' as const, model: 'gpt-6.1-sol',
+      effort: 'high' as const, alias: 'gpt-6.1-sol' };
+    const context = {
+      role: 'harness' as const, requestDigest: 'hc-request', routeDigest: 'hc-route',
+      requestedIdentity: identity, resolvedIdentity: identity, phase: 'pre-primary-transport' as const,
+      fallbackOrdinal: 0, retryOrdinal: 0, attemptOrdinal: 0, priorTraceDigest: null,
+      policyTraceDigest: 'hc-policy', fallbackChain: [{ ordinal: 0, identity }],
+      surface: 'hermes-codex-seat' as const, seatDigest: 'h'.repeat(64),
+    };
+    const reservation = await authority.reserveAttempt(context);
+    expect(reservation?.subject.funding).toMatchObject({
+      mode: 'subscription-seat', quotaSurface: 'hermes-codex-seat',
+    });
+    expect(() => authority.reserveAttempt({ ...context, surface: 'hermes-cli-seat' as const }))
+      .toThrow(/metered funding evidence missing for hermes-cli-seat/);
+  });
+
+  describe('hermes-codex-seat entitlement', () => {
+    const codexContext = () => {
+      const identity = { provider: 'openai' as const, model: 'gpt-6.1-sol',
+        effort: 'high' as const, alias: 'gpt-6.1-sol' };
+      return {
+        role: 'harness' as const, requestDigest: 'he-request', routeDigest: 'he-route',
+        requestedIdentity: identity, resolvedIdentity: identity, phase: 'pre-primary-transport' as const,
+        fallbackOrdinal: 0, retryOrdinal: 0, attemptOrdinal: 0, priorTraceDigest: null,
+        policyTraceDigest: 'he-policy', fallbackChain: [{ ordinal: 0, identity }],
+        surface: 'hermes-codex-seat' as const, seatDigest: 'e'.repeat(64),
+      };
+    };
+
+    it.each([
+      ['an API-key login', { mode: 'api_key' }, /not a ChatGPT subscription login/],
+      ['a login with no refresh token', { refresh: false }, /not a ChatGPT subscription login/],
+      ['a lapsed login (expired token, stale refresh)', { expDays: -3, refreshedDaysAgo: 60 }, /login has lapsed/],
+      ['a token with no ChatGPT plan claim', { plan: null }, /no ChatGPT plan/],
+    ])('fails closed on %s', async (_name, opts, message) => {
+      const authority = bootstrapExecutorAuthority({ rootDir: root(), env: hermesHome(opts) });
+      expect(() => authority.reserveAttempt(codexContext())).toThrow(ExecutorAuthorityUnavailableError);
+      expect(() => authority.reserveAttempt(codexContext())).toThrow(message);
+    });
+
+    it('fails closed when there is no Hermes login at all', () => {
+      const authority = bootstrapExecutorAuthority({ rootDir: root(), env: { HERMES_HOME: root() } });
+      expect(() => authority.reserveAttempt(codexContext())).toThrow(/Hermes login/);
+    });
+
+    it('admits a login whose access token is due a refresh but was refreshed recently', async () => {
+      const authority = bootstrapExecutorAuthority({ rootDir: root(),
+        env: hermesHome({ expDays: -1, refreshedDaysAgo: 2 }) });
+      expect((await authority.reserveAttempt(codexContext()))?.subject.funding)
+        .toMatchObject({ mode: 'subscription-seat' });
+    });
+
+    it('admits a live ChatGPT subscription login', async () => {
+      const authority = bootstrapExecutorAuthority({ rootDir: root(), env: hermesHome() });
+      const reservation = await authority.reserveAttempt(codexContext());
+      expect(reservation?.subject.funding).toMatchObject({ mode: 'subscription-seat' });
+    });
+
+    it('records quota exhaustion as subscription exhaustion and never falls back to metered', async () => {
+      const authority = bootstrapExecutorAuthority({ rootDir: root(), env: hermesHome() });
+      const context = codexContext();
+      const reservation = await authority.reserveAttempt(context);
+      const attestation = await authority.attestCompletion({
+        context, reservation,
+        response: { success: false, terminalReason: 'usage limit reached for this billing cycle', durationMs: 5 },
+      } as never);
+      expect(attestation.subject.exhaustionClass).toBe('subscription-quota-exhausted');
+      expect(attestation.subject.funding).toMatchObject({ mode: 'subscription-seat' });
+      // The metered fallback surface for the same seat stays blocked.
+      expect(() => authority.reserveAttempt({ ...context, surface: 'hermes-cli-seat' as const }))
+        .toThrow(/metered funding evidence missing for hermes-cli-seat/);
+    });
   });
 
   it('does not expose a staged receipt until its completion nonce is durably accepted', async () => {

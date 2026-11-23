@@ -68,7 +68,7 @@ import { CORTEX_BROADCAST_INTERVAL_MS, CORTEX_CONFIG, GARDENER_CONFIG, PRIOR_ART
 import type { RetiredDraftGenerator, RetiredDraftResult } from './service/retiredDraftAdapter.js';
 import type { TuiBridgeEvent, TuiFailureProvenance, TuiInputRequest, TuiPendingAction, TuiRunExecutor, TuiRunKind, TuiRunLifecycle, TuiRunPhase, TuiSessionStatus } from './types.js';
 import { createHash } from 'node:crypto';
-import os from 'node:os';
+import { resolveDreamQueuePath } from '../dreaming/dreamQueuePath.js';
 import path from 'node:path';
 import * as artistReview from './service/ArtistReview.js';
 import * as draftGeneration from './service/DraftGeneration.js';
@@ -253,8 +253,7 @@ export class TuiBridgeService {
     this.governedContinuations = options.progressPersistence
       ? new DurableCampaignContinuationContextRegistry(options.progressPersistence) : undefined;
     const dreamQueue = new DreamQueue({ persistPath: options.dreamQueuePath
-      ?? process.env.SINTER_DREAM_QUEUE_PATH
-      ?? path.join(os.homedir(), '.sinter', 'dreams', 'queue.json') });
+      ?? resolveDreamQueuePath() });
     this.campaignDreamQueue = dreamQueue;
     this.campaignDreamGovernance = options.dreamAssimilation;
     this.governedDreamRunner = options.dreamTaskConsumer

@@ -218,3 +218,20 @@ describe('Prompt Library Validation', () => {
     });
   });
 });
+
+describe('GLSL dialect contract in glsl.generate', () => {
+  it('states the exact GLSL ES version policy and forbids desktop headers', () => {
+    const prompt = PromptLibrary.get('glsl.generate');
+    expect(prompt?.systemPrompt).toContain('#version 300 es');
+    expect(prompt?.systemPrompt).toMatch(/never|#version 330/i);
+  });
+
+  it('names the exact host uniforms and bans C math names', () => {
+    const prompt = PromptLibrary.get('glsl.generate');
+    expect(prompt?.systemPrompt).toContain('uniform float u_time;');
+    expect(prompt?.systemPrompt).toContain('uniform vec2 u_resolution;');
+    expect(prompt?.systemPrompt).toMatch(/fabs|fminf/);
+    expect(prompt?.systemPrompt).toMatch(/loop index|for \(int/i);
+    expect(prompt?.systemPrompt).toMatch(/array|vec3\[3\]/i);
+  });
+});

@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Fragment mode writes a host-page proof next to `fragment.svg`: `fragment.host.html` declares the host tokens on `:root` with editable swatches, embeds the fragment inline, and owns motion with a `prefers-reduced-motion` guard. The CLI prints `Host proof: <path>` (part of #1162).
+- `--output-mode fragment` routes through the svg domain when the domain is `custom` (formerly `meta`) or none was detected, instead of refusing; explicit other domains still refuse — p5 instance-mode and Three.js container fragments remain separate issues (part of #1162).
+
 ## [2.5.0] - 2026-11-15
 
 User-facing changes merged since 2.4.0 (#1482–#1535, 2026-11-14).

@@ -9,11 +9,15 @@
  * CreativeEvaluator and AestheticCritic are now available as scoring strategies.
  */
 
+import { sourcePaletteFacts } from '../aesthetic/ColorExtractor.js';
+import { evaluatorCall } from './EvaluatorScope.js';
 import { CreativeEvaluator } from './CreativeEvaluator.js';
 import { AestheticCritic } from '../aesthetic/AestheticCritic.js';
 import { resolvePromptTier, tiered } from '../prompts/PromptTier.js';
 import { detectProviderFromUrl } from '../harness/MultiProviderConfig.js';
 import { Logger } from '../utils/Logger.js';
+import { firstJsonObject, boundedEvaluatorImages, parseJudgeJson } from './EvaluatorIO.js';
+export { firstJsonObject, boundedEvaluatorImages, parseJudgeJson };
 import { HeuristicScorer } from '../swarm/HeuristicScorer.js';
 import { quickScore } from '../collab/Scoring.js';
 import { Domain } from '../types/domains.js';
@@ -27,6 +31,8 @@ import { EVALUATOR_TOOLS, createGeneratorToolExecutor } from '../harness/tools/g
 import { Result, ok, err } from 'neverthrow';
 import { LLMError } from '../llm/errors.js';
 import type { RenderEvidence, GenerationEvaluation, RenderMeasure } from './types/GenerationEvaluation.js';
+import { ALIVE_GLITCH_SCORE_FLOOR, glitchLivenessSummary } from '../render/GlitchLiveness.js';
+import { OVERMIXED_SCORE_CAP, overmixedRepairAdvice, valueStructureSummary } from '../render/ValueStructure.js';
 import { evaluateRenderEvidencePerception, measureRenderEvidence } from '../perception/RenderEvidencePerception.js';
 import { DomainEvaluatorRegistry } from './evaluators/DomainEvaluatorRegistry.js';
 import { TIMEOUT_EVALUATOR_MS } from '../constants/limits.js';
@@ -38,13 +44,20 @@ import {
   type CreativeJudgmentScores,
 } from '../learning/CreativeJudgmentCalibration.js';
 
+/** Palette facts for the judge brief when the judge is handed source (the governed path withholds it and judges frames only). */
+export function sourcePaletteSummary(code: string): string {
+  const facts = sourcePaletteFacts(code);
+  return facts ? `\nSource palette (declared hex colours): ${facts}.` : '';
+}
+
 const RUBRIC_BANDS = `Score bands (anchor your score in a band first, then refine):
 - 0.90-1.00: gallery-grade — strong composition AND deliberate palette AND evident craft; nothing broken.
 - 0.75-0.89: competent — coherent and intentional, but missing one dimension (flat lighting, no focal point, sparse).
 - 0.60-0.74: weak — renders something relevant but visually thin, muddled, or accidental-looking.
 - 0.40-0.59: poor — barely related to the brief, severe visual defects, or mostly empty.
 - 0.00-0.39: broken — blank, black, garbled, or unrelated to the brief.
-Most competent work belongs in 0.75-0.89. Reserve 0.90+ for work you would exhibit.`;
+Most competent work belongs in 0.75-0.89. Reserve 0.90+ for work you would exhibit.
+Glitch is not broken: saturated, structured, moving datamosh, pixel-sort or feedback blow-up is alive. "Broken" means blank, near-uniform, frozen or crashed. Judge glitch on impact (motion, colour, structure) like any other piece; aliasing and pixel noise are its material, not a defect.`;
 
 const PRIMORDIAL_CRAFT_RUBRIC = `Score each visible dimension independently:
 - cohesion: elements behave as one visual system rather than unrelated effects.
@@ -53,7 +66,7 @@ const PRIMORDIAL_CRAFT_RUBRIC = `Score each visible dimension independently:
 - materiality: surfaces show convincing texture, thickness, transmission, refraction, or tactile response.
 - motionPurpose: movement reveals form, hierarchy, or transformation rather than adding random activity.
 - composition: hierarchy, focal structure, balance, and negative space are intentional.
-- palette: color relationships support the form and remain controlled over time.
+- palette: color relationships support the form and remain controlled over time. Palette fit never outweighs impact: a frame with no real light, no clean colour and no value separation (overmixed) scores low on palette however well it matches the brief's named colours.
 - finish: detail, texture, transitions, and edge treatment withstand close inspection.`;
 const PERCEPTUAL_ANTI_PROXY_RULES = `Anti-proxy rules:
 - Score demonstrated pixels across both frames, never intended technique inferred from the brief or code.
@@ -401,7 +414,7 @@ Reply with ONE line of flat JSON only: {"score":0.0,"technical":0.0,"creative":0
     const userPrompt = `Criteria: ${criteria}\nDomain: ${input.domain ?? 'general'}\n${input.prompt ? `Prompt: ${input.prompt}\n` : ''}Artifact:\n${input.output}`;
 
     try {
-      const toolResult = await this.llm.generateWithToolLoop({
+      const toolResult = await evaluatorCall(() => this.llm.generateWithToolLoop({
         systemPrompt,
         userPrompt,
         tools: EVALUATOR_TOOLS,
@@ -409,7 +422,7 @@ Reply with ONE line of flat JSON only: {"score":0.0,"technical":0.0,"creative":0
         maxIterations: 2,
         signal: input.signal,
         jsonMode: promptTier === 'compact',
-      });
+      }));
       const responseText = toolResult.content;
 
       if (!toolResult.success || !responseText) {
@@ -740,9 +753,74 @@ function repairAdviceForRenderMeasure(measure: RenderMeasure) {
   };
 }
 
+/** The judge's brief-difficulty rating: an integer 1-10, or undefined when the reply gave no usable number. */
+export function parseBriefDifficulty(raw: unknown): number | undefined {
+  const n = typeof raw === 'number' ? raw : (typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : NaN);
+  if (!Number.isFinite(n)) return undefined;
+  return Math.max(1, Math.min(10, Math.round(n)));
+}
+
+/**
+ * An evaluation that never produced a verdict. The 0.5 is a neutral placeholder, never a grade:
+ * scoreState + confidence 0 keep it out of admission, ranking and archives (Sol L3-02/L3-03).
+ */
+function unscoredVerdict(
+  measure: RenderMeasure | undefined,
+  failureClass: 'parse' | 'scorer',
+  unscoredReason: string,
+  issue: string,
+): GenerationEvaluation {
+  return applyRenderMeasurePenalty({
+    score: 0.5,
+    confidence: 0,
+    failureClass,
+    scoreState: 'unscored',
+    unscoredReason,
+    repairAdvice: {
+      issue,
+      fix: 'Retry the evaluation or verify the evaluator model returns the requested JSON verdict',
+      constraint: 'Evaluator must return a parseable JSON object with a score and a confidence',
+    },
+  }, measure);
+}
+
+/** Tells the judge how much piece time the late frame actually covers, so a cut-short arc is not read as the finished piece. */
+function arcNote(evidence: RenderEvidence): string {
+  const arc = evidence.arc;
+  if (!arc) return '';
+  const short = arc.reachedMs < arc.horizonMs;
+  return ` Late frame at piece time ${Math.round(arc.reachedMs)} of ${Math.round(arc.horizonMs)} ms${short ? ' (the arc budget ran out before the horizon: judge only what was seen)' : ''}.`;
+}
+
 function applyRenderMeasurePenalty(result: GenerationEvaluation, measure: RenderMeasure | undefined): GenerationEvaluation {
   if (!measure) return result;
-  if (measure.verdict === 'ok') return { ...result, renderMeasure: measure };
+  // A placeholder is not a grade: no multiplier, floor or cap may act on it.
+  if (result.scoreState === 'unscored') return { ...result, renderMeasure: measure };
+  if (measure.verdict === 'ok') {
+    const vs = measure.valueStructure;
+    if (!vs?.overmixed) {
+      const live = measure.glitchLiveness;
+      // Deterministic evidence beats a vision judge that reads glitch as corrupted: an alive frame is never in the broken band.
+      if (live?.alive && result.score < ALIVE_GLITCH_SCORE_FLOOR) {
+        return {
+          ...result,
+          score: ALIVE_GLITCH_SCORE_FLOOR,
+          reasoning: [result.reasoning, `Alive glitch (${glitchLivenessSummary(live)}): saturated, structured and moving is not broken; score lifted from ${result.score.toFixed(2)} to the ${ALIVE_GLITCH_SCORE_FLOOR} broken-band line.`].filter(Boolean).join(' '),
+          renderMeasure: measure,
+        };
+      }
+      return { ...result, renderMeasure: measure };
+    }
+    // Painter's check: overmixed / lost value structure. Cap, not reject, so a
+    // strong judged piece can still land just under the creative floor.
+    return {
+      ...result,
+      score: Math.min(result.score, OVERMIXED_SCORE_CAP),
+      repairAdvice: overmixedRepairAdvice(vs),
+      reasoning: [result.reasoning, `Overmixed / lost value structure (${valueStructureSummary(vs)}); score capped at ${OVERMIXED_SCORE_CAP}.`].filter(Boolean).join(' '),
+      renderMeasure: measure,
+    };
+  }
   const measuredLine = `Measured render penalty applied: ${renderMeasureSummary(measure)}.`;
   return {
     ...result,
@@ -784,8 +862,12 @@ function createTimeoutController(parent: AbortSignal | undefined, timeoutMs: num
 
 // A judge stall is rare (3 of 238 glm-5.3-flash calls on 2026-11-16; p90
 // 70 s), so one fresh attempt usually saves the score. Only a timeout retries.
-async function callWithOneTimeoutRetry<T>(call: (signal?: AbortSignal) => Promise<T>, timeoutMs: number): Promise<T> {
+async function callWithOneTimeoutRetry<T>(
+  call: (signal?: AbortSignal) => Promise<T>, attemptTimeoutMs: number, deadlineAt?: number,
+): Promise<T> {
   for (let attempt = 1; ; attempt++) {
+    const timeoutMs = deadlineAt === undefined ? attemptTimeoutMs : Math.min(attemptTimeoutMs, deadlineAt - Date.now());
+    if (timeoutMs <= 0) throw new Error('Rendered evidence evaluation deadline already spent');
     const controller = createTimeoutController(undefined, timeoutMs);
     try {
       const pending = call(controller.signal);
@@ -817,48 +899,6 @@ async function withScoringTimeout<T>(operation: Promise<T>, timeoutMs: number): 
   } finally {
     if (timeout) clearTimeout(timeout);
   }
-}
-
-function firstJsonObject(input: string): string | undefined {
-  const start = input.indexOf('{');
-  if (start < 0) return undefined;
-  let depth = 0;
-  let quoted = false;
-  let escaped = false;
-  for (let index = start; index < input.length; index++) {
-    const char = input[index];
-    if (quoted) {
-      if (escaped) escaped = false;
-      else if (char === '\\') escaped = true;
-      else if (char === '"') quoted = false;
-      continue;
-    }
-    if (char === '"') quoted = true;
-    else if (char === '{') depth++;
-    else if (char === '}' && --depth === 0) return input.slice(start, index + 1);
-  }
-  return undefined;
-}
-
-export async function boundedEvaluatorImages(images: Array<{
-  mimeType: string; dataBase64: string; width?: number; height?: number; label: string;
-}>): Promise<typeof images> {
-  if (images.reduce((sum, image) => sum + image.dataBase64.length, 0) < 500_000) return images;
-  const { default: sharp } = await import('sharp');
-  return Promise.all(images.map(async image => {
-    const { data, info } = await sharp(Buffer.from(image.dataBase64, 'base64'))
-      .resize({ width: 640, height: 640, fit: 'inside', withoutEnlargement: true })
-      .jpeg({ quality: 85 })
-      .toBuffer({ resolveWithObject: true });
-    return {
-      ...image,
-      mimeType: 'image/jpeg',
-      dataBase64: data.toString('base64'),
-      width: info.width,
-      height: info.height,
-      label: `${image.label}-normalized`,
-    };
-  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -896,7 +936,8 @@ async function gateRenderedEvidence(evidence: RenderEvidence, domain?: string): 
     } };
   }
 
-  const renderMeasure = await measureRenderEvidence(evidence);
+  // Sol L3-08: an audio piece's frame is the player shell, not the work; its pixels never grade the music.
+  const renderMeasure = domain === 'tone' || domain === 'strudel' ? undefined : await measureRenderEvidence(evidence);
   const perceptionReport = domain ? await evaluateRenderEvidencePerception(evidence, domain) : undefined;
   if (perceptionReport && !perceptionReport.passed) {
     const issueIds = perceptionReport.issues.map(issue => issue.id).join(', ');
@@ -948,6 +989,7 @@ export async function scoreRenderedEvidence(
   options: {
     readonly judgmentProfile?: CreativeJudgmentProfile;
     readonly timeoutMs?: number;
+    readonly deadlineAt?: number;
     /** A decision model (Liquid AI d1) scores alone in place of the LLM judge. */
     readonly decisionModel?: DecisionModelClient;
   } = {},
@@ -966,6 +1008,8 @@ export async function scoreRenderedEvidence(
       score: 0.5,
       confidence: 0,
       failureClass: 'scorer',
+      scoreState: 'unscored',
+      unscoredReason: 'no evaluator LLM is available for rendered-evidence scoring',
       repairAdvice: {
         issue: 'Evaluator LLM is unavailable for rendered-evidence scoring',
         fix: 'Set ANTHROPIC_API_KEY (or SINTER_LLM_BASE_URL / SINTER_LLM_MODEL for a custom endpoint), or switch to legacy evaluation mode',
@@ -1000,12 +1044,14 @@ Return ONLY a JSON object with this exact structure:
   "confidence": <number 0-1>,
   "dimensions": {"cohesion":0.0,"structuralDepth":0.0,"spatialEmbodiment":0.0,"materiality":0.0,"motionPurpose":0.0,"composition":0.0,"palette":0.0,"finish":0.0},
   "reasoning": "<brief explanation>",
+  "difficulty": <integer 1-10>,
   "repairAdvice": {
     "issue": "<one-sentence description of the problem>",
     "fix": "<one-sentence instruction for how to fix it>",
     "constraint": "<one-sentence boundary condition>"
   }
 }
+"difficulty" rates the BRIEF, not the artwork: how hard it is to realise well in this medium (1 = trivial, 5 = needs real craft, 10 = at the edge of what the medium can do). Rate it the same whether this attempt succeeded or failed.
 Include repairAdvice whenever score is below 0.9. Below 0.7 it is a repair (what is broken).
 For 0.7-0.89 it is an ELEVATION: issue names the single weakest craft dimension (composition, depth, light/value, palette, motion, negative space, or finish) and fix gives one concrete change that would lift the work into the 0.90 band.
 If score is 0.9 or above, omit repairAdvice or set it to null.
@@ -1017,7 +1063,8 @@ ${PERCEPTUAL_ANTI_PROXY_RULES}
 Active learned weights: ${judgmentWeights}
 Learned hierarchy guidance: ${learnedGuidance || 'none'}
 Reply with ONE line of flat JSON, nothing else:
-{"score":0.0,"confidence":0.0,"cohesion":0.0,"structuralDepth":0.0,"spatialEmbodiment":0.0,"materiality":0.0,"motionPurpose":0.0,"composition":0.0,"palette":0.0,"finish":0.0,"reasoning":"...","issue":"...","fix":"..."}
+{"score":0.0,"confidence":0.0,"cohesion":0.0,"structuralDepth":0.0,"spatialEmbodiment":0.0,"materiality":0.0,"motionPurpose":0.0,"composition":0.0,"palette":0.0,"finish":0.0,"reasoning":"...","difficulty":5,"issue":"...","fix":"..."}
+difficulty is an integer 1-10 rating the BRIEF (not the artwork): how hard it is to realise well in this medium; 1 trivial, 10 at the edge of the medium. Rate it the same whether this attempt succeeded or failed.
 issue and fix whenever score < 0.9: name the weakest craft dimension (composition, depth, light, palette, motion, space, finish) and one concrete change to lift it. No nested objects. No markdown.`,
   }, promptTier);
 
@@ -1058,11 +1105,14 @@ issue and fix whenever score < 0.9: name the weakest craft dimension (compositio
   const lateScreenshotNote = evidence.lateScreenshot
     ? (textOnlyJudge ? notVisibleNote.replace('Screenshot', 'Late screenshot') : `\nLate screenshot: attached ${evidence.lateScreenshot.mimeType}${evidence.lateScreenshot.width && evidence.lateScreenshot.height ? ` ${evidence.lateScreenshot.width}x${evidence.lateScreenshot.height}` : ''}`)
     : '\nLate screenshot: not available.';
-  const renderMeasureNote = renderMeasure ? `\nRender measure: ${renderMeasureSummary(renderMeasure)}` : '';
+  const renderMeasureNote = renderMeasure
+    ? `\nRender measure: ${renderMeasureSummary(renderMeasure)}${renderMeasure.glitchLiveness?.alive ? `\nMeasured alive glitch (${glitchLivenessSummary(renderMeasure.glitchLiveness)}): saturated, structured and moving; do not call it broken.` : ''}`
+    : '';
   const audioNote = evidence.audio
     ? `\nMeasured audio: ${evidence.audio.success ? 'audible' : 'inaudible'}; peak ${evidence.audio.peakAmplitude ?? 'n/a'}; rms ${evidence.audio.rmsAmplitude ?? 'n/a'}${(evidence.audio.peakAmplitude ?? 0) > 1 ? ' (peak above 1.0: clipping)' : ''}`
     : '';
-  const userPrompt = `Brief: ${brief}\nCode:\n${code}\nTiming: ${evidence.timingMs}ms${audioNote}${screenshotNote}${lateScreenshotNote}${renderMeasureNote}${frameDescriptorNote}`;
+  const sourcePaletteNote = sourcePaletteSummary(code);
+  const userPrompt = `Brief: ${brief}\nCode:\n${code}\nTiming: ${evidence.timingMs}ms${arcNote(evidence)}${audioNote}${screenshotNote}${lateScreenshotNote}${renderMeasureNote}${sourcePaletteNote}${frameDescriptorNote}`;
 
   const localEvaluator = isSlowEvaluatorProvider(evalProvider);
   const scoreTimeoutMs = renderedEvidenceScoreTimeoutMs(localEvaluator, options.timeoutMs);
@@ -1084,31 +1134,31 @@ issue and fix whenever score < 0.9: name the weakest craft dimension (compositio
         }] : [])])
       : [];
     const response = await callWithOneTimeoutRetry((signal) => (evaluatorImages.length > 0
-      ? llm.generateWithImages(systemPrompt, userPrompt, evaluatorImages, signal, true, { jsonMode: true })
-      : llm.generate(systemPrompt, userPrompt, signal, true, undefined, { jsonMode: true })), scoreTimeoutMs);
+      ? evaluatorCall(() => llm.generateWithImages(systemPrompt, userPrompt, evaluatorImages, signal, true, { jsonMode: true }))
+      : evaluatorCall(() => llm.generate(systemPrompt, userPrompt, signal, true, undefined, { jsonMode: true }))), scoreTimeoutMs, options.deadlineAt);
     Logger.info(
       'ScoringEngine',
       `[stage-timing] rendered-evidence-score: ${Date.now() - scoreStartedAt}ms (screenshot: ${evidence.screenshot ? `${Math.round(evidence.screenshot.dataBase64.length / 1024)}KB` : 'none'})`,
     );
+    // A transport that says it failed (for example a reply cut at the token cap)
+    // never yields a verdict, whatever text came back with it (Sol L3-02).
+    if (response.success === false) {
+      return unscoredVerdict(renderMeasure, 'scorer',
+        `evaluator ${String(evalConfig.model ?? 'model')} reply was unsuccessful${response.error ? `: ${response.error}` : ''}`,
+        'Evaluator reply was incomplete or failed at the transport');
+    }
     const jsonObject = firstJsonObject(response.code);
     if (!jsonObject) {
-      return applyRenderMeasurePenalty({
-        score: 0.5,
-        confidence: 0,
-        failureClass: 'parse',
-        repairAdvice: {
-          issue: 'Evaluator LLM response could not be parsed',
-          fix: 'Retry the evaluation or verify the evaluator model returns valid JSON',
-          constraint: 'Evaluator must return a parseable JSON object',
-        },
-      }, renderMeasure);
+      return unscoredVerdict(renderMeasure, 'parse',
+        `evaluator ${String(evalConfig.model ?? 'model')} reply held no JSON object`,
+        'Evaluator LLM response could not be parsed');
     }
-    const parsed = JSON.parse(jsonObject);
+    const parsed = parseJudgeJson(jsonObject);
     const rawDimensions = parsed.dimensions && typeof parsed.dimensions === 'object'
       ? parsed.dimensions as Record<string, unknown>
       : parsed as Record<string, unknown>;
     const dimensionEntries = CREATIVE_JUDGMENT_DIMENSIONS.map(dimension => (
-      [dimension, typeof rawDimensions[dimension] === 'number'
+      [dimension, typeof rawDimensions[dimension] === 'number' && Number.isFinite(rawDimensions[dimension])
         ? Math.max(0, Math.min(1, rawDimensions[dimension] as number))
         : undefined]
     ));
@@ -1116,11 +1166,20 @@ issue and fix whenever score < 0.9: name the weakest craft dimension (compositio
     const dimensionScores = hasAllDimensions
       ? Object.fromEntries(dimensionEntries) as CreativeJudgmentScores
       : undefined;
-    const rawScore = typeof parsed.score === 'number' ? Math.max(0, Math.min(1, parsed.score)) : 0.5;
+    const hasAggregate = typeof parsed.score === 'number' && Number.isFinite(parsed.score);
+    // Structurally valid JSON is not a verdict: with no aggregate score and no
+    // complete dimensions, or no usable confidence, nothing was judged (Sol L3-02).
+    if ((!hasAggregate && !dimensionScores)
+      || typeof parsed.confidence !== 'number' || !Number.isFinite(parsed.confidence)) {
+      return unscoredVerdict(renderMeasure, 'parse',
+        `evaluator ${String(evalConfig.model ?? 'model')} returned JSON without a usable ${hasAggregate || dimensionScores ? 'confidence' : 'score'}`,
+        'Evaluator reply was valid JSON but carried no verdict');
+    }
+    const rawScore = hasAggregate ? Math.max(0, Math.min(1, parsed.score as number)) : 0;
     const score = dimensionScores
       ? scoreCreativeJudgment(dimensionScores, judgmentProfile)
       : rawScore;
-    const confidence = typeof parsed.confidence === 'number' ? Math.max(0, Math.min(1, parsed.confidence)) : 0.5;
+    const confidence = Math.max(0, Math.min(1, parsed.confidence));
 
     // Compact tier returns flat issue/fix; normalize to the nested shape.
     const rawAdvice = parsed.repairAdvice
@@ -1142,6 +1201,7 @@ issue and fix whenever score < 0.9: name the weakest craft dimension (compositio
       failureClass: 'none',
       repairAdvice,
       reasoning: typeof parsed.reasoning === 'string' ? parsed.reasoning : undefined,
+      ...(parseBriefDifficulty(parsed.difficulty) !== undefined ? { difficulty: parseBriefDifficulty(parsed.difficulty) } : {}),
       dimensionScores,
       calibrationDigest: dimensionScores ? judgmentProfile.profileDigest : undefined,
     }, renderMeasure);
@@ -1169,6 +1229,8 @@ issue and fix whenever score < 0.9: name the weakest craft dimension (compositio
       score: 0.5,
       confidence: 0,
       failureClass: 'scorer',
+      scoreState: 'unscored',
+      unscoredReason: `evaluator call failed: ${message.slice(0, 200)}`,
       repairAdvice: {
         issue: 'Evaluator LLM scoring failed during execution',
         fix: 'Check network connectivity and evaluator credentials, or fall back to legacy evaluation mode',
@@ -1236,7 +1298,7 @@ export async function scoreRenderedEvidenceWithDecisionModel(
     `Domain: ${domain ?? 'unknown'}.`,
     `Brief: ${brief || 'none'}.`,
     attached,
-    `Render time: ${evidence.timingMs} ms. Runtime errors: ${evidence.errors?.length ?? 0}.`,
+    `Render time: ${evidence.timingMs} ms.${arcNote(evidence)} Runtime errors: ${evidence.errors?.length ?? 0}.`,
   ].join('\n');
   const result = await decision.decide({
     state,

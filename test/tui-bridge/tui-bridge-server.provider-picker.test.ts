@@ -127,7 +127,7 @@ describe('TuiBridgeServer model picker', () => {
     }
   });
 
-  it('switches the OpenRouter model, saves config, and updates session status', async () => {
+  it('switches the OpenRouter model for the requesting session and leaves config alone', async () => {
     const port = await getFreePort();
     const service = new TuiBridgeService();
     const server = new TuiBridgeServer(service, {
@@ -149,15 +149,7 @@ describe('TuiBridgeServer model picker', () => {
         body: JSON.stringify({ mode: 'chat', clientIntent: 'chat', text: '/provider openrouter deepseek' }),
       });
 
-      expect(mockSaveConfig).toHaveBeenCalledWith(expect.objectContaining({
-        defaultProvider: 'openrouter',
-        providers: expect.objectContaining({
-          openrouter: expect.objectContaining({
-            baseUrl: 'https://openrouter.ai/api/v1',
-            model: 'deepseek/deepseek-v4.1-flash-1017',
-          }),
-        }),
-      }));
+      expect(mockSaveConfig).not.toHaveBeenCalled();
       expect(mockLLMClientCtor).toHaveBeenCalledWith(expect.objectContaining({
         baseUrl: 'https://openrouter.ai/api/v1',
         model: 'deepseek/deepseek-v4.1-flash-1017',
@@ -194,16 +186,7 @@ describe('TuiBridgeServer model picker', () => {
         body: JSON.stringify({ mode: 'chat', clientIntent: 'chat', text: '/model openai gpt-5.4-mini' }),
       });
 
-      expect(mockSaveConfig).toHaveBeenCalledWith(expect.objectContaining({
-        defaultProvider: 'openai',
-        providers: expect.objectContaining({
-          openai: expect.objectContaining({
-            baseUrl: 'https://api.openai.com/v1',
-            model: 'gpt-5.4-mini',
-            apiKey: 'openai-key',
-          }),
-        }),
-      }));
+      expect(mockSaveConfig).not.toHaveBeenCalled();
       expect(mockLLMClientCtor).toHaveBeenCalledWith(expect.objectContaining({
         baseUrl: 'https://api.openai.com/v1',
         model: 'gpt-5.4-mini',
@@ -262,12 +245,7 @@ describe('TuiBridgeServer model picker', () => {
         model: 'gpt-5.4-mini',
         apiKey: 'env-openai-key',
       }));
-      expect(mockSaveConfig).toHaveBeenCalledWith(expect.objectContaining({
-        defaultProvider: 'openai',
-        providers: expect.objectContaining({
-          openai: expect.objectContaining({ apiKey: 'env-openai-key' }),
-        }),
-      }));
+      expect(mockSaveConfig).not.toHaveBeenCalled();
     } finally {
       delete process.env.OPENAI_API_KEY;
       await server.stop();
@@ -296,24 +274,52 @@ describe('TuiBridgeServer model picker', () => {
         body: JSON.stringify({ mode: 'chat', clientIntent: 'chat', text: '/model lmstudio local-model' }),
       });
 
-      expect(mockSaveConfig).toHaveBeenCalledWith(expect.objectContaining({
-        defaultProvider: 'lmstudio',
-        providers: expect.objectContaining({
-          lmstudio: expect.objectContaining({
-            baseUrl: 'http://localhost:1234/v1',
-            model: 'local-model',
-          }),
-        }),
-      }));
+      expect(mockSaveConfig).not.toHaveBeenCalled();
       expect(mockLLMClientCtor).toHaveBeenCalledWith(expect.objectContaining({
         baseUrl: 'http://localhost:1234/v1',
         model: 'local-model',
-        apiKey: undefined,
+        apiKey: '',
       }));
       expect(service.getStatus(session.sessionId)).toMatchObject({
         provider: 'lmstudio',
         model: 'local-model',
       });
+      // F09: the picker's scope is stated, not implied.
+      const committed = service.getEvents(session.sessionId).filter((e: any) => e.type === 'response.committed');
+      const text = (committed[committed.length - 1] as any)?.content ?? '';
+      expect(text).toContain('Switched Studio dialogue model');
+      expect(text).toContain('Studio dialogue only');
+      expect(text).toContain('roles.generator');
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it('a /model switch binds to the requesting session only (F09 per-session scope)', async () => {
+    const port = await getFreePort();
+    const service = new TuiBridgeService();
+    const seen: Array<{ sessionId: string; model: string | undefined }> = [];
+    const realSubmit = service.submitInput.bind(service);
+    vi.spyOn(service, 'submitInput').mockImplementation(async (sessionId: string, input: any, llm?: any) => {
+      seen.push({ sessionId, model: llm?.getConfig?.().model });
+      return realSubmit(sessionId, { ...input, text: '/help' }, llm);
+    });
+    const server = new TuiBridgeServer(service, {
+      host: '127.0.0.1', port,
+      llm: { getConfig: () => ({ baseUrl: 'https://api.openai.com/v1', model: 'launch-model' }), getHarnessExecutorProjection: () => ({}) } as any,
+    });
+    await server.start();
+    try {
+      const mk = async () => ((await (await fetch(`http://127.0.0.1:${port}/api/tui/session`, { method: 'POST' })).json()) as { sessionId: string }).sessionId;
+      const [a, b] = [await mk(), await mk()];
+      const send = (id: string, text: string) => fetch(`http://127.0.0.1:${port}/api/tui/session/${id}/input`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: 'chat', clientIntent: 'chat', text }) });
+      await send(a, '/model lmstudio local-model');
+      await send(a, 'hello from A');
+      await send(b, 'hello from B');
+      expect(seen.find((x) => x.sessionId === a)?.model).toBe('local-model');
+      expect(seen.find((x) => x.sessionId === b)?.model).toBe('launch-model');
     } finally {
       await server.stop();
     }
@@ -356,16 +362,7 @@ describe('TuiBridgeServer model picker', () => {
         body: JSON.stringify({ mode: 'chat', clientIntent: 'chat', text: '/model glm glm-5.1' }),
       });
 
-      expect(mockSaveConfig).toHaveBeenCalledWith(expect.objectContaining({
-        defaultProvider: 'glm',
-        providers: expect.objectContaining({
-          glm: expect.objectContaining({
-            baseUrl: 'https://api.z.ai/api/anthropic',
-            model: 'glm-5.1',
-            apiKey: 'glm-key',
-          }),
-        }),
-      }));
+      expect(mockSaveConfig).not.toHaveBeenCalled();
       expect(mockLLMClientCtor).toHaveBeenCalledWith(expect.objectContaining({
         baseUrl: 'https://api.z.ai/api/anthropic',
         model: 'glm-5.1',
@@ -416,16 +413,7 @@ describe('TuiBridgeServer model picker', () => {
         body: JSON.stringify({ mode: 'chat', clientIntent: 'chat', text: '/model glm' }),
       });
 
-      expect(mockSaveConfig).toHaveBeenCalledWith(expect.objectContaining({
-        defaultProvider: 'glm',
-        providers: expect.objectContaining({
-          glm: expect.objectContaining({
-            baseUrl: 'https://api.z.ai/api/anthropic',
-            model: 'GLM-5v-turbo',
-            apiKey: 'glm-key',
-          }),
-        }),
-      }));
+      expect(mockSaveConfig).not.toHaveBeenCalled();
       expect(mockLLMClientCtor).toHaveBeenCalledWith(expect.objectContaining({
         baseUrl: 'https://api.z.ai/api/anthropic',
         model: 'GLM-5v-turbo',
@@ -524,16 +512,7 @@ describe('TuiBridgeServer model picker', () => {
         body: JSON.stringify({ mode: 'chat', clientIntent: 'chat', text: '/model minimax m3' }),
       });
 
-      expect(mockSaveConfig).toHaveBeenCalledWith(expect.objectContaining({
-        defaultProvider: 'minimax',
-        providers: expect.objectContaining({
-          minimax: expect.objectContaining({
-            baseUrl: 'https://api.minimax.io/anthropic',
-            model: 'MiniMax-M3',
-            apiKey: 'minimax-key',
-          }),
-        }),
-      }));
+      expect(mockSaveConfig).not.toHaveBeenCalled();
       expect(mockLLMClientCtor).toHaveBeenCalledWith(expect.objectContaining({
         baseUrl: 'https://api.minimax.io/anthropic',
         model: 'MiniMax-M3',
@@ -579,14 +558,7 @@ describe('TuiBridgeServer model picker', () => {
         body: JSON.stringify({ mode: 'chat', clientIntent: 'chat', text: '/model 1' }),
       });
 
-      expect(mockSaveConfig).toHaveBeenCalledWith(expect.objectContaining({
-        defaultProvider: 'openai',
-        providers: expect.objectContaining({
-          openai: expect.objectContaining({
-            model: 'gpt-5.4-mini',
-          }),
-        }),
-      }));
+      expect(mockSaveConfig).not.toHaveBeenCalled();
       expect(service.getStatus(session.sessionId)).toMatchObject({
         provider: 'openai',
         model: 'gpt-5.4-mini',
@@ -625,15 +597,7 @@ describe('TuiBridgeServer model picker', () => {
         body: JSON.stringify({ mode: 'chat', clientIntent: 'chat', text: '/provider openrouter deepseek' }),
       });
 
-      expect(mockSaveConfig).toHaveBeenCalledWith(expect.objectContaining({
-        defaultProvider: 'openrouter',
-        providers: expect.objectContaining({
-          openrouter: expect.objectContaining({
-            model: 'deepseek/deepseek-v4.1-flash-1017',
-            apiKey: 'live-key',
-          }),
-        }),
-      }));
+      expect(mockSaveConfig).not.toHaveBeenCalled();
       expect(service.getStatus(session.sessionId)).toMatchObject({
         provider: 'openrouter',
         model: 'deepseek/deepseek-v4.1-flash-1017',

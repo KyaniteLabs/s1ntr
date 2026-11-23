@@ -1,3 +1,4 @@
+// @no-cli-spawn: child_process is mocked; the CLI is never spawned
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

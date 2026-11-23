@@ -23,6 +23,8 @@ const AXIS_LABELS: Record<DescriptorAxis, string> = {
 };
 
 const ALL_AXES = Object.keys(AXIS_LABELS) as DescriptorAxis[];
+/** Axis order of every extracted descriptor (and so of TasteModelWeights.axisWeights). */
+export const DESCRIPTOR_AXES: readonly DescriptorAxis[] = ALL_AXES;
 
 export interface BehaviorDescriptorExtractorConfig {
   /** Which axes to extract (default: all six) */

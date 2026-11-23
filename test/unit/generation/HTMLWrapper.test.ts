@@ -75,7 +75,7 @@ describe("HTMLWrapper", () => {
 		it("passes a descriptor-first meta page through intact instead of dumping it into a p5 <script>", () => {
 			const page =
 				'<!--SINTER-META-DESCRIPTOR {"name":"x","runtime":"canvas","libraries":[],"renderTarget":"canvas","notes":"n"} -->\n<!DOCTYPE html><html><head><meta charset="utf-8"><title>T</title></head><body><canvas id="c"></canvas><script>document.querySelector("canvas").getContext("2d").fillRect(0,0,10,10);</script></body></html>';
-			const result = HTMLWrapper.wrap(page, { domain: "meta" });
+			const result = HTMLWrapper.wrap(page, { domain: "custom" });
 			// Descriptor survives in the artifact and the page is NOT re-wrapped as p5.
 			expect(result).toContain("SINTER-META-DESCRIPTOR");
 			expect(result).toContain("<canvas");

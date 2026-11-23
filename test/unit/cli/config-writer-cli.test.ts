@@ -4,7 +4,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// Each case spawns the real CLI (cold node start + dist import); the 5s default timed out under host load.
+vi.setConfig({ testTimeout: 90_000 });
 
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -36,6 +39,7 @@ describe('CLI config writers', () => {
     await execFileAsync(process.execPath, [binPath, ...args], {
       cwd: repoRoot,
       env: { ...process.env, HOME: home, NODE_ENV: 'test', DOTENV_CONFIG_QUIET: 'true' },
+      timeout: 80_000,
     });
 
     const config = JSON.parse(await fs.readFile(configPath, 'utf-8'));

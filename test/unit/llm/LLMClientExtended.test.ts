@@ -3,6 +3,7 @@ import os from 'os';
 import path from 'path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { err } from 'neverthrow';
+import { runWithGeneratorOverride } from '../../../src/llm/generatorOverrideContext.js';
 
 // ============================================================================
 // SECURITY NOTICE: All API keys in this file are FAKE test values.
@@ -352,6 +353,38 @@ describe('LLMClient constructor and config', () => {
     expect(config.apiKey).toBe('env-key-456');
   });
 
+  it('keeps the generic bearer bound to its configured endpoint', () => {
+    process.env.LIMINAL_LLM_BASE_URL = 'https://generic-route.invalid/v1';
+    process.env.LIMINAL_LLM_API_KEY = 'generic-test-key';
+    expect(new LLMClient({ baseUrl: 'https://explicit-route.invalid/v1' }).getConfig().apiKey).toBeUndefined();
+    expect(new LLMClient({ baseUrl: 'https://GENERIC-ROUTE.invalid:443/v1/' }).getConfig().apiKey)
+      .toBe('generic-test-key');
+  });
+
+  it('does not mix a branded route with a generic credential in another namespace', () => {
+    vi.stubEnv('SINTER_LLM_BASE_URL', 'https://branded-route.invalid/v1');
+    vi.stubEnv('LLM_BASE_URL', 'https://bare-route.invalid/v1');
+    vi.stubEnv('LLM_API_KEY', 'bare-route-key');
+    try {
+      expect(new LLMClient().getConfig()).toMatchObject({ baseUrl: 'https://branded-route.invalid/v1' });
+      expect(new LLMClient().getConfig().apiKey).toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('keeps a Harness bearer off a separately selected Studio route before role loading', () => {
+    vi.stubEnv('SINTER_HARNESS_BASE_URL', 'https://harness-route.invalid/v1');
+    vi.stubEnv('SINTER_HARNESS_API_KEY', 'harness-test-key');
+    vi.stubEnv('SINTER_STUDIO_BASE_URL', 'https://studio-route.invalid/v1');
+    try {
+      expect(new LLMClient({ role: 'studio' }).getConfig().apiKey).toBeUndefined();
+      expect(new LLMClient({ role: 'harness' }).getConfig().apiKey).toBe('harness-test-key');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('reads OPENAI_API_KEY as fallback for apiKey', () => {
     process.env.OPENAI_API_KEY = 'openai-key-789';
 
@@ -426,6 +459,33 @@ describe('LLMClient constructor and config', () => {
     } finally {
       await fs.rm(projectDir, { recursive: true, force: true });
     }
+  });
+
+  it('does not inherit a cached Studio credential when choosing a keyless local endpoint', async () => {
+    const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sinter-studio-endpoint-'));
+    try {
+      await fs.mkdir(path.join(projectDir, 'config'), { recursive: true });
+      await fs.writeFile(path.join(projectDir, 'config', 'sinter.json'), JSON.stringify({ roles: {
+        studio: { baseUrl: 'https://api.openai.com/v1', model: 'studio-cloud', apiKey: 'fake-studio-key' },
+      } }));
+      await LLMClient.loadRoles(projectDir);
+      expect(new LLMClient({ role: 'studio' }).getConfig().apiKey).toBe('fake-studio-key');
+      const local = new LLMClient({ role: 'studio', provider: 'lmstudio', model: 'chosen-local',
+        baseUrl: 'http://127.0.0.1:1234/v1' }).getConfig();
+      expect(local.baseUrl).toBe('http://127.0.0.1:1234/v1');
+      expect(local.apiKey).toBeUndefined();
+    } finally {
+      await fs.rm(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps cloud credentials and authorization headers out of a keyless local generator override', () => {
+    const local = runWithGeneratorOverride({ baseUrl: 'http://127.0.0.1:1234/v1', model: 'local' },
+      () => new LLMClient({ role: 'generator', provider: 'openai', baseUrl: 'https://api.openai.com/v1',
+        model: 'cloud', apiKey: 'fake-cloud-key', headers: { Authorization: 'Bearer fake-cloud-key' } }).getConfig());
+    expect(local).toMatchObject({ baseUrl: 'http://127.0.0.1:1234/v1', model: 'local' });
+    expect(local.apiKey).toBeUndefined();
+    expect(local.headers).toBeUndefined();
   });
 
   it('accepts deprecated apiStyle without error', () => {
@@ -617,6 +677,48 @@ describe('LLMClient clearGlobalCache', () => {
   });
 });
 
+describe('LLMClient opaque provider failure (#1597)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('names the provider and the elapsed time when a provider answers success:false with no error', async () => {
+    const client = new LLMClient({ provider: 'glm', model: 'glm-5.3' } as any);
+    const internal = client as any;
+    let now = 1_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    vi.spyOn(RetryManager, 'executeWithRetry').mockImplementation(async (fn: () => Promise<unknown>) => fn());
+    internal.resolveModel = vi.fn(async () => 'glm-5.3');
+    internal.syncResolvedModel = vi.fn();
+    internal.detectProvider = vi.fn(() => 'glm');
+    internal.generateWithBreaker = vi.fn(async (_provider: string, fn: () => Promise<unknown>) => fn());
+    internal.getProvider = vi.fn(async () => ({
+      name: 'glm',
+      getModel: () => 'glm-5.3',
+      getConfig: () => ({ baseUrl: 'https://api.z.ai/api/anthropic', model: 'glm-5.3' }),
+    }));
+    internal.getFallbackProviders = vi.fn(() => []);
+    internal.executeProviderAttempt = vi.fn(async () => {
+      now += 7_000; // the provider sat on the request for 7 s, then said nothing useful
+      return { success: false };
+    });
+
+    const failure = await client.generate('sys', 'user').then(() => null, (e: Error) => e);
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure!.message).toMatch(/glm/);
+    expect(failure!.message).toMatch(/7(\.0)?s/);
+    expect(failure!.message).not.toBe('Provider returned unsuccessful response');
+  });
+
+  it('names the provider on the mapProviderResponse path too', () => {
+    const client = new LLMClient({ provider: 'glm', model: 'glm-5.3' } as any);
+    const mapped = (client as any).mapProviderResponse({ success: false });
+    expect(mapped.success).toBe(false);
+    expect(mapped.error).toMatch(/glm/);
+    expect(mapped.error).not.toBe('Provider returned unsuccessful response');
+  });
+});
+
 describe('LLMClient fallback diagnostics', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -687,6 +789,53 @@ describe('LLMClient fallback diagnostics', () => {
     expect(result.code).toContain('createCanvas');
     expect(result.provenance?.fallbackUsed).toBe(true);
     expect(result.provenance?.fallbackTo).toBe('glm:glm-5.3');
+  });
+
+  describe('fallback usage accounting (#1704)', () => {
+    const makeClient = () => {
+      const client = new LLMClient({ provider: 'minimax', model: 'minimax-m3' } as any);
+      const internal = client as any;
+      vi.spyOn(RetryManager, 'executeWithRetry').mockImplementation(async (fn: () => Promise<unknown>) => fn());
+      internal.resolveModel = vi.fn(async () => 'minimax-m3');
+      internal.syncResolvedModel = vi.fn();
+      internal.detectProvider = vi.fn(() => 'minimax');
+      internal.generateWithBreaker = vi.fn(async (_provider: string, fn: () => Promise<unknown>) => fn());
+      internal.getProvider = vi.fn(async () => ({
+        name: 'minimax',
+        getModel: vi.fn(() => 'minimax-m3'),
+        getConfig: vi.fn(() => ({ baseUrl: 'https://api.minimax.io/v1', model: 'minimax-m3' })),
+        generate: vi.fn(async () => ({
+          isErr: () => false,
+          value: { success: false, content: '', error: 'fetch failed', usage: { inputTokens: 100, outputTokens: 50 } },
+        })),
+      }));
+      internal.getFallbackProviders = vi.fn(() => [{
+        name: 'glm',
+        getModel: vi.fn(() => 'glm-5.3'),
+        getConfig: vi.fn(() => ({ baseUrl: 'https://api.z.ai/api/anthropic', model: 'glm-5.3' })),
+        generate: vi.fn(async () => ({
+          isErr: () => false,
+          value: {
+            success: true,
+            content: 'function setup() { createCanvas(10, 10); }\nfunction draw() {}',
+            usage: { inputTokens: 10, outputTokens: 5 },
+          },
+        })),
+      }]);
+      return client;
+    };
+
+    it('generate() sums the failed primary usage with the successful fallback usage', async () => {
+      const result = await makeClient().generate('sys', 'user', undefined, true);
+      expect(result.provenance?.fallbackUsed).toBe(true);
+      expect(result.usage).toEqual({ inputTokens: 110, outputTokens: 55 });
+    });
+
+    it('complete() sums the failed primary usage with the successful fallback usage', async () => {
+      const result = await makeClient().complete({ prompt: 'hello' });
+      expect(result.fallbackUsed).toBe(true);
+      expect(result.usage).toEqual({ inputTokens: 110, outputTokens: 55 });
+    });
   });
 
   it('continues past a generate() fallback that returns Ok(success:false) to the next provider (K3 P0)', async () => {

@@ -1,0 +1,27 @@
+## 01-scan.txt
+# organ: improvement | step: scan | data: real
+$ node <repo>/bin/sinter improve scan
+# cwd: <repo> (repo: <repo>)
+# --- stdout
+
+Sinter self-healing harden report
+Harden mode: gate status is incomplete; 1 blind spots found.
+
+Proposals:
+  improve-ml-value-gates [leverage 13.3, ROI 16.7, score 87] Prove or hide ML feature value
+    category: ML value improvement
+    target: Every marketed ML feature has a passing proof command and value metric
+    verify: pnpm run proof:ml-value
+
+ML value labels:
+  taste-learning: experimental (pnpm test -- TasteModelRuntime PreferenceDatasetBuilder)
+  emergence-garden: experimental (pnpm test -- Phase16AutonomousGardener EmergenceAutonomy)
+  compost: experimental (pnpm test -- CompostMill)
+  routing: proven-claimed (no passing proof receipt) (pnpm test -- ModelRouter RoutingData)
+  aesthetic-guardrails: experimental (pnpm test -- GuardrailSystem CreativeEvaluator)
+  failure-pattern-detection: proven-claimed (no passing proof receipt) (pnpm test -- FailureLogger PatternDetector)
+  prompt-enhancement: experimental (pnpm test -- prompt-enhancer prompt-validation)
+
+# --- stderr
+# exit: 0
+

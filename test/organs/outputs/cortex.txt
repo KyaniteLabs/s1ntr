@@ -1,0 +1,5 @@
+# organ: cortex | BudgetTracker | data: real, in-process call
+cost 400: afford, recorded
+cost 400: afford, recorded
+cost 100: refused
+usage={"actionsTaken":2,"actionsLimit":2,"tokenEstimate":800,"tokenLimit":1000}

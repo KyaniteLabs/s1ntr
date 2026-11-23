@@ -19,6 +19,7 @@ import { PostHogClient } from "../analytics/PostHogClient.js";
 import { Logger } from "../utils/Logger.js";
 import { Domain } from "../types/domains.js";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 
 export interface SiteEvolveOptions {
@@ -104,19 +105,19 @@ export async function runSiteSeed(options: SiteSeedOptions = {}): Promise<void> 
 	let seeded = 0;
 	for (const template of STARTER_SLOTS.slice(0, count)) {
 		if (existingIds.has(template.id)) {
-			Logger.info("SiteCommand", `Slot "${template.id}" already exists — skipping`);
+			console.log(`Slot "${template.id}" already exists — skipping`); // eslint-disable-line no-console -- CLI output
 			continue;
 		}
 		slotManager.setSlot(template);
 		seeded++;
-		Logger.info("SiteCommand", `Seeded slot "${template.id}" (${template.page}, domain: ${template.domains[0]})`);
+		console.log(`Seeded slot "${template.id}" (${template.page}, domain: ${template.domains[0]})`); // eslint-disable-line no-console -- CLI output
 	}
 
 	if (seeded > 0) {
 		await slotManager.save();
-		Logger.info("SiteCommand", `Seeded ${seeded} slot(s) → ${statePath}`);
+		console.log(`Seeded ${seeded} slot(s) → ${statePath}`); // eslint-disable-line no-console -- CLI output
 	} else {
-		Logger.info("SiteCommand", `All ${count} requested slot(s) already exist — nothing to seed`);
+		console.log(`All ${count} requested slot(s) already exist — nothing to seed (${statePath})`); // eslint-disable-line no-console -- CLI output
 	}
 }
 
@@ -152,6 +153,20 @@ export function startSiteEvolveLoop(
 	};
 }
 
+/**
+ * One evolution cycle under a journal-reserved, receipted generator grant (same governed path as
+ * `sinter fix`). Unique key per cycle: a later cycle must run again, not replay.
+ */
+async function runGovernedCycle(daemon: LivingSiteDaemon, dryRun: boolean | undefined): Promise<void> {
+  const { runProductionCliCycleEffect } = await import("./LiminalProductionProviderEffect.js");
+  await runProductionCliCycleEffect({
+    idempotencyKey: `production-site-evolve:${randomUUID()}`,
+    binding: { surface: "site-evolve", dryRun: dryRun === true },
+    maxGeneratorAttempts: daemon.generatorAttemptLimit(),
+    effect: async () => { await daemon.runCycle(dryRun); return { completed: true }; },
+  });
+}
+
 export async function runSiteEvolve(
 	options: SiteEvolveOptions = {},
 ): Promise<void> {
@@ -161,6 +176,9 @@ export async function runSiteEvolve(
 	if (options.interval) {
 		config.cycleIntervalMs = options.interval;
 	}
+	// Operators who do not serve from the default nginx path point the daemon at their own asset directory.
+	const assetDirOverride = process.env.SINTER_SITE_ASSET_DIR ?? process.env.LIMINAL_SITE_ASSET_DIR;
+	if (assetDirOverride) config.assetDir = assetDirOverride;
 
 	const slotManager = new SlotManager(statePath);
 	const posthog = new PostHogClient();
@@ -171,7 +189,7 @@ export async function runSiteEvolve(
 
 	if (options.once) {
 		Logger.info("SiteCommand", "Running single evolution cycle");
-		await daemon.runCycle(options.dryRun);
+		await runGovernedCycle(daemon, options.dryRun);
 		await posthog.shutdown();
 		return;
 	}
@@ -184,7 +202,7 @@ export async function runSiteEvolve(
 
 	const run = async () => {
 		try {
-			await daemon.runCycle(options.dryRun);
+			await runGovernedCycle(daemon, options.dryRun);
 		} catch (err) {
 			Logger.error("SiteCommand", "Cycle failed:", err);
 		}

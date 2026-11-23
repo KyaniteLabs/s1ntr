@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   formatDegradedWhy,
   formatGovernedHeadline,
+  governedExitCode,
+  NOT_ACCEPTED_EXIT_CODE,
   formatScoreLine,
   isDegradedResult,
   isEmptySkeleton,
@@ -131,7 +133,7 @@ describe('isDegradedResult (degraded-evaluator triggers)', () => {
 });
 
 describe('formatScoreLine (W1.1 honesty display contract)', () => {
-  it("degraded via failureClass 'infra' → no number, 'degraded (no real score)' + suffix", () => {
+  it("degraded via failureClass 'infra' → no number, 'unscored (judge could not score)' + suffix", () => {
     const line = formatScoreLine({
       ...usableComplete,
       finalScore: 0,
@@ -139,7 +141,7 @@ describe('formatScoreLine (W1.1 honesty display contract)', () => {
       evaluationFailureClass: 'infra',
     });
     expect(line).toBe(
-      '⭐ Quality score: degraded (no real score) (failureClass=infra, confidence=0.00)',
+      '⭐ Quality score: unscored (judge could not score) (failureClass=infra, confidence=0.00)',
     );
     // No fabricated numeric score anywhere on the line.
     expect(line).not.toMatch(/Quality score:\s*[\d.]/);
@@ -153,7 +155,7 @@ describe('formatScoreLine (W1.1 honesty display contract)', () => {
       evaluationFailureClass: 'scorer',
     });
     expect(line).toBe(
-      '⭐ Quality score: degraded (no real score) (failureClass=scorer, confidence=0.00)',
+      '⭐ Quality score: unscored (judge could not score) (failureClass=scorer, confidence=0.00)',
     );
     expect(line).not.toMatch(/Quality score:\s*[\d.]/);
   });
@@ -165,7 +167,7 @@ describe('formatScoreLine (W1.1 honesty display contract)', () => {
       evaluationConfidence: 0,
     });
     expect(line).toBe(
-      '⭐ Quality score: degraded (no real score) (failureClass=unknown, confidence=0.00)',
+      '⭐ Quality score: unscored (judge could not score) (failureClass=unknown, confidence=0.00)',
     );
   });
 
@@ -216,5 +218,23 @@ describe('formatGovernedHeadline', () => {
       .toBe('🎯 Reason: the evaluator could not score it');
     expect(formatGovernedHeadline({ admissionEligible: true, identityValid: false })).toEqual(
       ['⚠️  Generated, but not accepted', '🎯 Reason: it did not pass the quality gate']);
+  });
+});
+
+describe('governedExitCode', () => {
+  it('exits 0 only for an admitted piece with a healthy evaluator', () => {
+    expect(governedExitCode({ admissionEligible: true, degraded: false, identityValid: true })).toBe(0);
+  });
+
+  it('exits with the distinct not-accepted code whenever the headline says not accepted', () => {
+    expect(NOT_ACCEPTED_EXIT_CODE).toBe(3);
+    for (const input of [
+      { admissionEligible: false, rejectionReasons: ['rendered-evidence-failed'] },
+      { admissionEligible: true, degraded: true },
+      { admissionEligible: true, identityValid: false },
+    ]) {
+      expect(governedExitCode(input)).toBe(NOT_ACCEPTED_EXIT_CODE);
+      expect(formatGovernedHeadline(input)[0]).toContain('not accepted');
+    }
   });
 });

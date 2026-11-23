@@ -67,3 +67,27 @@ it('captures a chain that ends in a compressor, and stops after disconnect', asy
   expect(tail).toBe(0);
   await page.close();
 });
+
+it.each([0, 0.1])('detects whether the extra context with gain %s made the take incomplete', async gain => {
+  const page = await browser.newPage();
+  try {
+    await page.addInitScript(audioCapturePageInit, 16384);
+    await page.goto('data:text/html,<title>Multiple audio contexts</title>');
+    await page.evaluate(async secondaryGain => {
+      for (const amplitude of [0.1, secondaryGain]) {
+        const ctx = new AudioContext();
+        const oscillator = ctx.createOscillator();
+        const output = ctx.createGain();
+        output.gain.value = amplitude;
+        oscillator.connect(output);
+        output.connect(ctx.destination);
+        oscillator.start();
+        await ctx.resume();
+      }
+    }, gain);
+    await page.waitForTimeout(600);
+    const invalid = await page.evaluate(() =>
+      (window as unknown as { __audioCaptureIncomplete?: boolean }).__audioCaptureIncomplete === true);
+    expect(invalid).toBe(gain !== 0);
+  } finally { await page.close(); }
+});

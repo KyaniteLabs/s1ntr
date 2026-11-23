@@ -78,6 +78,7 @@ const VALUE_TYPES = new Set<ControlValueType>(['number', 'string', 'boolean']);
 const DOMAINS = new Set<DomainType>([
   'p5', 'three', 'shader', 'tone', 'music', 'strudel', 'hydra',
   'ascii', 'video', 'html', 'textgen', 'group',
+  'svg', 'kinetic', 'glsl', 'nbe', 'custom',
 ]);
 const STALE_BEHAVIORS = new Set<StaleBehavior>(['hold', 'zero', 'drop', 'error']);
 

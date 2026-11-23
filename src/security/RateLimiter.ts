@@ -4,6 +4,7 @@
 
 import rateLimit from 'express-rate-limit';
 import { Request, Response } from 'express';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Logger } from '../utils/Logger.js';
 import { logRateLimitViolation } from './SecurityLogger.js';
 
@@ -146,4 +147,93 @@ export function getLimiterForEndpoint(endpoint: string) {
     return sandboxLimiter;
   }
   return standardLimiter;
+}
+
+// ── Framework-free limiter used by the TUI bridge (moved from TuiBridgeServer so there is one implementation) ──
+export interface IpRateState {
+  hits: number[];
+}
+
+export interface IpRateConfig {
+  windowMs: number;
+  max: number;
+  /** 429 body fields, mirroring the original express-rate-limit handlers. */
+  error: string;
+  message: string;
+}
+
+/**
+ * Env parsing mirroring the original `src/security/RateLimiter.ts` factory:
+ * window values are minutes clamped to [1, 1440], max values are requests
+ * clamped to [1, 10000]; anything unparseable falls back to the default.
+ */
+export function rateLimitEnvMinutes(envVar: string, defaultMinutes: number): number {
+  const val = process.env[envVar];
+  if (!val) return defaultMinutes;
+  const parsed = parseInt(val, 10);
+  if (Number.isNaN(parsed) || parsed < 1 || parsed > 1440) return defaultMinutes;
+  return parsed;
+}
+
+export function rateLimitEnvMax(envVar: string, defaultMax: number): number {
+  const val = process.env[envVar];
+  if (!val) return defaultMax;
+  const parsed = parseInt(val, 10);
+  if (Number.isNaN(parsed) || parsed < 1 || parsed > 10000) return defaultMax;
+  return parsed;
+}
+
+/**
+ * Minimal in-memory IP-keyed rate limiter that mirrors the original
+ * `express-rate-limit` thresholds (standard/export/sandbox) without pulling
+ * Express into the bridge. Sliding window, `RateLimit-*` headers on every
+ * response, and a 429 with the original JSON body shape (`error`, `message`,
+ * `retryAfter`) when the window is exceeded.
+ */
+export class IpRateLimiter {
+  private readonly states = new Map<string, IpRateState>();
+  private readonly label: string;
+  private readonly config: IpRateConfig;
+  constructor(label: string, config: IpRateConfig) {
+    this.label = label;
+    this.config = config;
+  }
+  consume(req: IncomingMessage, res: ServerResponse): boolean {
+    const key = (req.socket?.remoteAddress ?? 'unknown') + ':' + this.label;
+    const now = Date.now();
+    const cutoff = now - this.config.windowMs;
+    let state = this.states.get(key);
+    if (!state) { state = { hits: [] }; this.states.set(key, state); }
+    state.hits = state.hits.filter((t) => t > cutoff);
+    const remainingAfter = Math.max(0, this.config.max - state.hits.length - 1);
+    // Sliding window: the limit frees up when the oldest hit in the window
+    // expires, so report the real reset rather than a fresh full window.
+    const resetSeconds = state.hits.length > 0
+      ? Math.max(1, Math.ceil((state.hits[0] + this.config.windowMs - now) / 1000))
+      : Math.ceil(this.config.windowMs / 1000);
+    res.setHeader('RateLimit-Limit', String(this.config.max));
+    res.setHeader('RateLimit-Remaining', String(remainingAfter));
+    res.setHeader('RateLimit-Reset', String(resetSeconds));
+    if (state.hits.length >= this.config.max) {
+      Logger.warn('RateLimiter', `Rate limit exceeded for IP: ${req.socket?.remoteAddress ?? 'unknown'}`, {
+        path: req.url,
+        method: req.method,
+        limit: this.config.max,
+        windowMs: this.config.windowMs,
+      });
+      logRateLimitViolation(req.url ?? 'unknown', {
+        ip: req.socket?.remoteAddress ?? undefined,
+        details: { method: req.method, limit: this.config.max, windowMs: this.config.windowMs },
+      });
+      res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': String(resetSeconds) });
+      res.end(JSON.stringify({
+        error: this.config.error,
+        message: this.config.message,
+        retryAfter: Math.ceil(resetSeconds / 60) + ' minutes',
+      }));
+      return false;
+    }
+    state.hits.push(now);
+    return true;
+  }
 }

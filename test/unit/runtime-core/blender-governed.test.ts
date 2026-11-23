@@ -60,40 +60,9 @@ describe('governed blender generate (#1628)', () => {
   });
 });
 
-const SCENE = `import { makeScene2D, Circle } from '@revideo/2d';
-import { createRef, all, waitFor } from '@revideo/core';
-export default makeScene2D('Orbit', function* (view) {
-  const c = createRef<Circle>();
-  const ring = createRef<Circle>();
-  view.fill('#05040a');
-  view.add(<Circle ref={ring} size={520} stroke={'#4ee6c8'} lineWidth={6} opacity={0.4} />);
-  view.add(<Circle ref={c} size={240} fill={'#9a7cff'} />);
-  yield* all(c().scale(1.6, 2), c().position.x(300, 2), ring().rotation(180, 2));
-  yield* all(c().position.x(-300, 2), c().fill('#ff7ab6', 2), ring().opacity(1, 2));
-  yield* all(c().position.x(0, 1.5), c().scale(1, 1.5), ring().size(640, 1.5));
-  yield* waitFor(1);
-});`;
-
-describe('governed revideo generate (#1628)', () => {
-  it('is a governed production domain; nbe is not (no model step)', () => {
-    expect(isLiminalProductionDomain('revideo')).toBe(true);
-    expect(isLiminalProductionDomain('nbe')).toBe(false);
-  });
-
-  it('keeps the scene source as the playable and teaches the scene rules', async () => {
-    const generate = vi.fn().mockResolvedValue({ success: true, code: SCENE });
-    const effects = createLiminalProductionEffects({
-      generator: { getConfig: () => ({ provider: 'fake', model: 'generator' }), generate } as never,
-      evaluator: {} as never, renderer: fakeRenderer() as never,
-      generatorIdentity: 'fake/generator', evaluatorIdentity: 'fake/evaluator', rendererIdentity: 'fake/renderer',
-    });
-    const artifact = await effects.generate({ identity: 'fake/generator', domain: 'revideo',
-      prompt: 'An orbit that breathes', startTransport: vi.fn(async () => 1), failTransport: vi.fn(async () => {}) });
-
-    expect(artifact.playable.trim()).toBe(SCENE.trim());
-    expect(artifact.playable).not.toContain('data-revideo-timeline-preview');
-    const prompts = JSON.stringify(generate.mock.calls[0]);
-    expect(prompts).toContain('makeScene2D');
-    expect(prompts).toContain('the render is offline');
+describe('governed domains (revideo removed as an art domain)', () => {
+  it('nbe stays governed; revideo is no longer a production domain', () => {
+    expect(isLiminalProductionDomain('revideo')).toBe(false);
+    expect(isLiminalProductionDomain('nbe')).toBe(true);
   });
 });

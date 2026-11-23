@@ -17,6 +17,7 @@ const { mockReadFile, mockWriteFile, mockMkdir, mockStat, mockAccess, mockCopyFi
   mockWriteFileAtomic: vi.fn(),
 }));
 
+vi.mock('../../../src/utils/fileLock.js', () => ({ withFileLock: async (_p: string, fn: () => unknown) => fn() }));
 vi.mock('fs/promises', () => ({
   default: {
     readFile: mockReadFile,
@@ -547,6 +548,7 @@ describe('getEffectiveConfig', () => {
   it('env vars take precedence over file config', async () => {
     process.env.LIMINAL_LLM_MODEL = 'env-model';
     process.env.LIMINAL_LLM_API_KEY = 'env-key';
+    process.env.LIMINAL_LLM_BASE_URL = 'http://explicit-env-route/v1';
 
     const fileConfig = JSON.stringify({
       defaultProvider: 'file-provider',
@@ -562,7 +564,20 @@ describe('getEffectiveConfig', () => {
     const config = await getEffectiveConfig(undefined, '/project/dir');
     expect(config.model).toBe('env-model');
     expect(config.apiKey).toBe('env-key');
-    expect(config.baseUrl).toBe('http://project-url');
+    expect(config.baseUrl).toBe('http://explicit-env-route/v1');
+  });
+
+  it('does not send a saved or shell bearer to a path chosen by the project', async () => {
+    process.env.LIMINAL_LLM_API_KEY = 'ambient-test-marker';
+    process.env.OPENAI_API_KEY = 'vendor-test-marker';
+    const baseUrl = 'https://project-route.invalid/v1';
+    mockReadFile.mockResolvedValueOnce(JSON.stringify({ defaultProvider: 'openai',
+      providers: { openai: { baseUrl: 'https://api.openai.com/v1', apiKey: 'saved-test-marker' } },
+    })).mockResolvedValueOnce(JSON.stringify({ llm: { baseUrl, model: 'gpt-5.4' } }));
+
+    const config = await getEffectiveConfig(undefined, '/project/dir');
+    expect(config.baseUrl).toBe(baseUrl);
+    expect(config.apiKey).toBeUndefined();
   });
 
   it('maps legacy provider name inception to lmstudio', async () => {

@@ -21,7 +21,8 @@ import {
 } from '../../src/runtime-core/LiminalCommandFilePersistence.js';
 import { rebuildOperationTrace } from '../../src/runtime-core/LiminalReceiptProjector.js';
 import { LiminalOperationKernel } from '../../src/runtime-core/LiminalOperationKernel.js';
-import { classifyEffectFailure, LiminalEffectBroker } from '../../src/runtime-core/LiminalEffectBroker.js';
+import { LiminalProductCommandPort } from '../../src/runtime-core/LiminalProductCommandPort.js';
+import { UnsentTransportError, classifyEffectFailure, LiminalEffectBroker } from '../../src/runtime-core/LiminalEffectBroker.js';
 import { encodeLiminalDurableValue, liminalDurablePayloadDigest }
   from '../../src/runtime-core/LiminalPayloadDigest.js';
 import { assertProviderAttemptAllowed, assertRoleBoundProviderAttempt }
@@ -410,7 +411,7 @@ describe('Liminal product command authority path', () => {
     expect(evaluationTransport).not.toHaveBeenCalled();
   });
 
-  it('releases transport cap on provider failure, allowing same-key retry', async () => {
+  it('retains a possible charge after a provider server error', async () => {
     let generateCalls = 0;
     const generate = vi.fn(async (input: { startTransport: () => Promise<number>;
       failTransport: (reason?: string) => Promise<void> }) => {
@@ -439,16 +440,12 @@ describe('Liminal product command authority path', () => {
     const releaseCommand = { ...command, idempotencyKey: 'release-proof',
       maxTransportAttempts: 2 };
 
-    // First journey: generation fails after transport, transport released.
+    // An HTTP 500 does not establish that generation was unbilled.
     await expect(runLiminalCommandJourney(service, releaseCommand))
       .rejects.toThrow('PROVIDER_HTTP_500');
 
-    // Same idempotency key: generation retries because the transport cap was
-    // released by failTransportAttempt, and the failed effect reservation was
-    // dropped by reserveEffect (#865).
-    const result = await runLiminalCommandJourney(service, releaseCommand);
-    expect(result.artifacts.sourceDigest).toMatch(/^[0-9a-f]{64}$/);
-    expect(generate).toHaveBeenCalledTimes(2);
+    await expect(runLiminalCommandJourney(service, releaseCommand)).rejects.toThrow('EFFECT_OUTCOME_UNRESOLVED');
+    expect(generate).toHaveBeenCalledTimes(1);
   });
 
   it('rejects evidence digest mismatch and handwritten receipt forgery', async () => {
@@ -558,7 +555,7 @@ describe('Liminal product command authority path', () => {
     }
   });
 
-  it('allows retrying a failed durable effect via the file-backed journal (#865)', async () => {
+  it('allows retrying a provably unsent durable effect via the file-backed journal (#865)', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'liminal-effect-retry-'));
     try {
       const file = path.join(root, 'journal.json');
@@ -570,7 +567,7 @@ describe('Liminal product command authority path', () => {
       // First attempt: reserve → start → fail
       const r1 = await journal.reserveEffect(admission.operationId, 'generation', { provider: 'fake' });
       await journal.startEffect(r1);
-      await journal.finishEffect(r1, 'failed', { error: 'boom' });
+      await journal.finishEffect(r1, 'unsent', { error: 'boom' });
       // Retry: reserveEffect must succeed (not throw EFFECT_OUTCOME_UNRESOLVED)
       const r2 = await journal.reserveEffect(admission.operationId, 'generation', { provider: 'fake' });
       expect(r2.effectId).not.toBe(r1.effectId);
@@ -608,7 +605,7 @@ describe('Liminal product command authority path', () => {
     expect(cached).toEqual({ html: '<div/>' });
   });
 
-  it('classifies transport timeouts as ambiguous and definite errors as failed (#1323)', () => {
+  it('classifies untyped outcomes as ambiguous (#1323)', () => {
     const timeout = Object.assign(new Error('The operation was aborted due to timeout'),
       { name: 'TimeoutError' });
     expect(classifyEffectFailure(timeout)).toBe('ambiguous');
@@ -617,10 +614,10 @@ describe('Liminal product command authority path', () => {
     expect(classifyEffectFailure(new Error('fetch failed', {
       cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }) }))).toBe('ambiguous');
     expect(classifyEffectFailure('socket hang up')).toBe('ambiguous');
-    expect(classifyEffectFailure(new Error('HTTP 400 invalid request'))).toBe('failed');
-    expect(classifyEffectFailure(new Error('LIMINAL_PRODUCT_STORE_LEASE_TIMEOUT'))).toBe('failed');
-    expect(classifyEffectFailure(undefined)).toBe('failed');
-    expect(classifyEffectFailure(null)).toBe('failed');
+    expect(classifyEffectFailure(new Error('HTTP 400 invalid request'))).toBe('ambiguous');
+    expect(classifyEffectFailure(new Error('LIMINAL_PRODUCT_STORE_LEASE_TIMEOUT'))).toBe('ambiguous');
+    expect(classifyEffectFailure(undefined)).toBe('ambiguous');
+    expect(classifyEffectFailure(null)).toBe('ambiguous');
   });
 
   it('records a timed-out effect as ambiguous and blocks a same-key rerun (#1323)', async () => {
@@ -650,11 +647,11 @@ describe('Liminal product command authority path', () => {
     let calls = 0;
     const effect = async () => {
       calls++;
-      if (calls === 1) throw new Error('HTTP 400 invalid request');
+      if (calls === 1) throw new UnsentTransportError('local validation refused dispatch');
       return { source: 'second' };
     };
     await expect(broker.invoke({ operationId: admission.operationId, kind: 'generation',
-      authority: {}, effect })).rejects.toThrow('HTTP 400');
+      authority: {}, effect })).rejects.toThrow('local validation refused dispatch');
     await expect(broker.invoke({ operationId: admission.operationId, kind: 'generation',
       authority: {}, effect })).resolves.toEqual({ source: 'second' });
     expect(calls).toBe(2);
@@ -675,7 +672,10 @@ describe('Liminal product command authority path', () => {
         expect(await journal.attemptsConsumed(op)).toBe(1);
         await journal.reserveTransportAttempt(op, 2, {});
         await journal.failTransportAttempt(op, new Error('HTTP 500'));
-        expect(await journal.attemptsConsumed(op)).toBe(1);
+        expect(await journal.attemptsConsumed(op)).toBe(2);
+        await journal.reserveTransportAttempt(op, 3, {});
+        await journal.failTransportAttempt(op, new UnsentTransportError('local preflight'));
+        expect(await journal.attemptsConsumed(op)).toBe(2);
         await expect(journal.failTransportAttempt('operation:missing', new Error('HTTP 500')))
           .rejects.toThrow('UNKNOWN_LIMINAL_OPERATION');
       }
@@ -1330,18 +1330,52 @@ describe('Liminal product command authority path', () => {
     expect(evaluate).toHaveBeenCalledTimes(1);
   });
 
-  it('verifies a file-backed reevaluation with historical durable payload digests', async () => {
+  it('L3-14: a re-render judges the parent source, and a broken one names its failure class', async () => {
+    let renders = 0;
+    const sources: Array<string | undefined> = [];
+    const evaluate = vi.fn(async (input: { startTransport: () => Promise<unknown>; source?: string;
+      identity: string; evidenceDigest: string | null }) => {
+      await input.startTransport();
+      sources.push(input.source);
+      return { score: 0.7, degraded: false, identityValid: true,
+        evaluatorIdentity: input.identity, evidenceDigest: input.evidenceDigest };
+    });
+    const service = new LiminalCommandService({
+      effects: {
+        generate: async input => {
+          await input.startTransport();
+          return { source: 'Tone.Transport.start(); // the real source', playable: '<canvas/>', provenance: 'fake' };
+        },
+        render: async () => (++renders === 3
+          ? { ...rendered(), runtimeErrors: ['ReferenceError: p5 is not defined'] } : rendered()),
+        evaluate,
+      } as never,
+      artifacts: new InMemoryLiminalArtifactStore(),
+      journal: new InMemoryLiminalOperationJournal(),
+      authority: createTestReceiptAuthority('rerender-source-secret'),
+    });
+    const parent = await service.execute(command);
+    await service.rerenderAndReevaluate(command, parent, {
+      idempotencyKey: 'rerender-source', maxTransportAttempts: 1, actionAuthorityDigest: '8'.repeat(64) });
+    expect(sources).toEqual(['Tone.Transport.start(); // the real source', 'Tone.Transport.start(); // the real source']);
+    await expect(service.rerenderAndReevaluate(command, parent, {
+      idempotencyKey: 'rerender-source-broken', maxTransportAttempts: 1,
+      actionAuthorityDigest: '7'.repeat(64) })).rejects.toThrow(/REEVALUATION_RENDERED_EVIDENCE_INVALID: render/);
+  });
+
+  it('verifies a saved native render stamp and historical payload digests on file-backed reevaluation', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'liminal-file-reevaluation-'));
     try {
       const journal = new FileLiminalOperationJournal(path.join(root, 'journal.json'));
       const receiptSecret = 'file-reevaluation-secret';
       const receiptAuthority = createTestReceiptAuthority(receiptSecret);
+      const nativeObservation = { ...rendered(), rendered: true };
       const service = new LiminalCommandService({ effects: {
         generate: async input => {
           await input.startTransport();
           return { source: 'x', playable: '<canvas/>', provenance: 'file-proof' };
         },
-        render: async () => rendered(),
+        render: async () => nativeObservation,
         evaluate: async input => {
           await input.startTransport();
           return { score: 0.75, degraded: false, identityValid: true,
@@ -1351,7 +1385,13 @@ describe('Liminal product command authority path', () => {
       journal,
       authority: receiptAuthority });
       const parent = await service.execute(command);
-      const result = await service.reevaluate(command, parent, rendered(), {
+      expect(parent.evidence.rendered).toBe(true);
+      await expect(service.reevaluate(command, parent, rendered(), {
+        idempotencyKey: 'file-reevaluation-without-native-stamp', maxTransportAttempts: 1,
+        actionAuthorityDigest: '8'.repeat(64),
+      })).rejects.toThrow('REEVALUATION_RENDERED_EVIDENCE_INVALID');
+      const stored = await service.readVerifiedResult(command.idempotencyKey);
+      const result = await service.reevaluate(command, parent, { ...rendered(), rendered: stored?.evidence.rendered }, {
         idempotencyKey: 'file-backed-reevaluation', maxTransportAttempts: 1,
         actionAuthorityDigest: '9'.repeat(64),
       });
@@ -1362,7 +1402,7 @@ describe('Liminal product command authority path', () => {
         domain: undefined } as never);
       await expect(service.readVerifiedResult('file-backed-reevaluation', command))
         .rejects.toThrow('LIMINAL_RESULT_TRACE_INVALID');
-      await expect(service.reevaluate(command, parent, rendered(), {
+      await expect(service.reevaluate(command, parent, nativeObservation, {
         idempotencyKey: 'file-backed-reevaluation', maxTransportAttempts: 1,
         actionAuthorityDigest: '8'.repeat(64),
       }, result)).rejects.toThrow('LIMINAL_RESULT_TRACE_INVALID');
@@ -1417,12 +1457,26 @@ describe('Liminal product command authority path', () => {
       journal: new InMemoryLiminalOperationJournal(),
       authority: createTestReceiptAuthority('governed-digest-secret'),
     });
-    const result = await service.execute({ ...command, idempotencyKey: 'governed-digests',
-      prompt: providerInput, sourceHeadSha: '6'.repeat(40),
-      safeMode: 'governed-production',
-      teaching: { targetScope: 'visual', snapshotDigest } });
+    const request = { ...command, idempotencyKey: 'governed-digests',
+      prompt: 'Base prompt', sourceHeadSha: '6'.repeat(40),
+      safeMode: 'governed-production' as const,
+      teaching: { targetScope: 'visual', snapshotDigest } };
+    let compiledInput = providerInput;
+    const port = new LiminalProductCommandPort(service, undefined, undefined, {
+      compile: async input => ({
+        command: { ...input, prompt: compiledInput },
+        receipt: { preProviderInputDigest: createHash('sha256').update(input.prompt).digest('hex'),
+          finalProviderInputDigest: createHash('sha256').update(compiledInput).digest('hex'),
+          compilationDigest: '8'.repeat(64) },
+      }),
+    });
+    const projection = await port.submitCreate('cli', request);
+    if (projection.kind !== 'create') throw new Error('Expected completed Create');
+    const result = await port.readVerifiedCreateResult(request, projection);
     expect(result.receipt.providerInputDigest).toBe(createHash('sha256')
       .update(providerInput).digest('hex'));
     expect(result.receipt.empiricalContextDigests).toEqual([snapshotDigest]);
+    compiledInput = 'A different compiled prompt';
+    await expect(port.readVerifiedCreateResult(request, projection)).rejects.toThrow('LIMINAL_RESULT_TRACE_INVALID');
   });
 });

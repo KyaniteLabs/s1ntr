@@ -88,6 +88,16 @@ describe('isCodeComplete — shared domain-aware helper (D8)', () => {
       const code = '<svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="40"';
       expect(isCodeComplete(code, 'svg')).toBe(false);
     });
+
+    it('accepts a complete nbe HTML document', () => {
+      const code = '<!DOCTYPE html><html><body><canvas id="stage"></canvas></body></html>';
+      expect(isCodeComplete(code, 'nbe')).toBe(true);
+    });
+
+    it('rejects a truncated nbe document with no closing tag', () => {
+      const code = '<!DOCTYPE html><html><body><canvas id="stage">';
+      expect(isCodeComplete(code, 'nbe')).toBe(false);
+    });
   });
 
   describe('text domains (ascii / textgen)', () => {

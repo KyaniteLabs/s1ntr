@@ -36,12 +36,12 @@ export const CLUSTERS = {
     'src/music/',
     'src/audio/',
     'src/musicToVisual/',
-    'src/sing/',
     'src/aesthetic/',
     'src/perception/',
     'src/brain/',
     'src/creative-intelligence/',
     'src/media/',
+    'src/footage/',
     'src/reverse/',
   ],
   'C-evo': [
@@ -124,6 +124,7 @@ export const CLUSTERS = {
   ],
   'C-workspace-gui': [
     'gui/',
+    'hermes-plugin/',
   ],
   'C-workspace-packages': [
     'packages/',

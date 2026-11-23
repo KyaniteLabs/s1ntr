@@ -1,4 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 // The npm page and the public mirror are the first things a new user sees.
@@ -50,5 +52,14 @@ describe('public package metadata', () => {
     };
     const broken = relativeLinks(read('README.md')).filter((target) => !shipped(target));
     expect(broken).toEqual([]);
+  });
+
+  // #1595: puppeteer's install-time browser download fails on a half-filled cache and npm
+  // rolls back the whole global install. The package ships a config that skips it; the
+  // browser preflight installs the browser on first use instead.
+  it('ships a .puppeteerrc.cjs that skips the install-time browser download', () => {
+    const config = createRequire(import.meta.url)(resolve('.puppeteerrc.cjs')) as { skipDownload?: boolean };
+    expect(config.skipDownload).toBe(true);
+    expect(pkg.files).toContain('.puppeteerrc.cjs');
   });
 });

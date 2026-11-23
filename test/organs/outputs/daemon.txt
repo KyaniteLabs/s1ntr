@@ -1,0 +1,2 @@
+# organ: daemon | DEFAULT_DAEMON_CONFIG (sinter site evolve runs this daemon) | data: real, in-process call
+{"assetDir":"<path>","minSampleSize":200,"cycleIntervalMs":21600000,"wildcardIntervalDays":7,"minVisualScore":0.65}

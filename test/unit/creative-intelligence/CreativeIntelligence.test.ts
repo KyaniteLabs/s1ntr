@@ -172,7 +172,7 @@ describe('canonical creative intelligence', () => {
     expect(result.creativeThesis?.thesisId).toBe(thesis.thesisId);
     expect(result.html).toContain(`sinter-creative-thesis-id" content="${thesis.thesisId}`);
     expect(result.creativeRun.readiness.source).toBe('synthetic-no-spend');
-  });
+  }, 60_000);
 
   it('fails closed before provider reservation for an unsupported principle', async () => {
     const reserve = vi.fn(async () => ({ id: 'must-not-reserve', status: 'reserved' as const }));

@@ -7,6 +7,7 @@
  */
 
 import { Logger } from '../utils/Logger.js';
+import { prepareBrowserScratch } from '../utils/scratchSpace.js';
 
 export interface SandboxConfig {
   /** When true, disables Chrome sandbox (USE WITH CAUTION) */
@@ -91,6 +92,7 @@ export async function launchPlaywrightChromium<O extends object, B>(
   chromium: { launch(options: O & { chromiumSandbox?: boolean }): Promise<B> },
   options: O,
 ): Promise<B> {
+  prepareBrowserScratch();   // profile dir off the data volume + free-space check
   if (process.env.LIMINAL_DISABLE_SANDBOX === 'true') {
     return chromium.launch({ ...options, chromiumSandbox: false });
   }

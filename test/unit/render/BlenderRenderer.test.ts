@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
+  BLENDER_DEFAULT_TIMEOUT_MS,
   BLENDER_INSTALL_HINT,
   BLENDER_MAX_RESOLUTION,
   BLENDER_MAX_SAMPLES,
@@ -45,6 +46,14 @@ afterEach(() => {
 });
 
 describe('renderBlender', () => {
+  it('default timeout leaves headroom over measured <fleet-node> renders (36-91 s on 4 niced cores)', async () => {
+    expect(BLENDER_DEFAULT_TIMEOUT_MS).toBeGreaterThanOrEqual(180_000);
+    const seen: { spec?: BlenderRunSpec } = {};
+    const runner: BlenderRunner = async (spec) => { seen.spec = spec; return { exitCode: 1, stdout: '', stderr: 'x', timedOut: false } as BlenderRunResult; };
+    await renderBlender('import bpy', { runner });
+    expect(seen.spec?.timeoutMs).toBe(BLENDER_DEFAULT_TIMEOUT_MS);
+  });
+
   it('happy path: runs blender headless, returns the PNG bytes, size and a path for the judge', async () => {
     const seen: { spec?: BlenderRunSpec } = {};
     const keep = mkdtempSync(path.join(os.tmpdir(), 'blender-keep-'));

@@ -17,7 +17,7 @@ function dependencyScripts(recipe: ControlRecipe): string {
   ].filter(Boolean).join('\n');
 }
 
-function embeddedRuntime(recipe: ControlRecipe): string {
+export function embeddedRuntime(recipe: ControlRecipe): string {
   const json = scriptSafe(JSON.stringify(recipe));
   return `
 const recipe = ${json};

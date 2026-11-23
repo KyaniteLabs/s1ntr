@@ -13,7 +13,7 @@ import { AnthropicProvider } from '../../../src/llm/providers/AnthropicProvider.
 
 const root = path.join(tmpdir(), `anthropic-thinking-cap-${process.pid}`);
 const config: ProviderConfig = {
-  baseUrl: 'https://zai.example.test/api/anthropic', model: 'glm-5.3', apiKey: 'test-key',
+  baseUrl: 'https://anthropic.example.test', model: 'claude-sonnet-4-5', apiKey: 'test-key',
   temperature: 0.5, maxTokens: 4096, timeout: 5000,
 };
 const fetchSpy = vi.fn(async () => new Response('{}', { status: 500 }));
@@ -22,6 +22,8 @@ function sentBody(): { max_tokens: number; thinking?: { budget_tokens: number } 
   const init = (fetchSpy.mock.calls[0] as unknown as [string, RequestInit])[1];
   return JSON.parse(String(init.body));
 }
+
+const glm = (model: string): ProviderConfig => ({ ...config, baseUrl: 'https://zai.example.test/api/anthropic', model });
 
 const req = (thinking?: ProviderRequest['thinking']): ProviderRequest =>
   ({ systemPrompt: '', userPrompt: 'draw', maxTokens: 4096, thinking }) as ProviderRequest;
@@ -62,5 +64,25 @@ describe('Anthropic wire: thinking never eats the answer budget (#1652)', () => 
     const body = sentBody();
     expect(body.thinking).toBeUndefined();
     expect(body.max_tokens).toBe(4096);
+  });
+
+  // z.ai GLM 5.3 thinks unasked and ignores budget_tokens, so only max_tokens
+  // bounds it: v16 canaries 2026-11-16 spent all 32000 tokens thinking with no text.
+  it.each(['glm-5.3', 'glm-5.3-flash'])('%s: thinking off still gets the 131072 output ceiling', async (model) => {
+    await new AnthropicProvider(glm(model)).generate(req({ enabled: false }));
+    const body = sentBody();
+    expect(body.thinking).toBeUndefined();
+    expect(body.max_tokens).toBe(131_072);
+  });
+
+  it('glm-5.3: thinking on keeps budget_tokens and the same ceiling, generate and stream', async () => {
+    await new AnthropicProvider(glm('glm-5.3')).generate(req({ enabled: true, budgetTokens: 16_000 }));
+    expect(sentBody()).toMatchObject({ max_tokens: 131_072, thinking: { budget_tokens: 16_000 } });
+    fetchSpy.mockClear();
+    const drain = async () => {
+      for await (const _e of new AnthropicProvider(glm('glm-5.3')).stream(req({ enabled: false }))) { /* drain */ }
+    };
+    await drain().catch(() => undefined);
+    expect(sentBody().max_tokens).toBe(131_072);
   });
 });

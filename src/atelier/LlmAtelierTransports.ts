@@ -131,7 +131,9 @@ export class LlmAtelierTransports {
         const text = await complete('evaluator', eye,
           'Grounding probe. Answer strictly YES or NO only.',
           `Does this HTML render a control marked data-atelier-control="${control}" that is visible to the operator? Answer YES or NO.\n\n${html.slice(0, 24000)}`);
-        const answer = text.trim().toUpperCase();
+        // Models answer "Yes." or "No!"; trailing sentence punctuation is not ambiguity (#1709).
+        // Anything beyond the bare word still throws (#1491: "NO, do not answer YES").
+        const answer = text.trim().replace(/[.!]+$/, '').toUpperCase();
         if (answer !== 'YES' && answer !== 'NO') throw new Error('ATELIER_INVALID_RESPONSE (probe)');
         return answer === 'YES';
       },

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { env, mirrorBrandEnv } from '../../../src/utils/env.js';
 
 describe('env utilities', () => {
@@ -66,5 +66,31 @@ describe('env utilities', () => {
       // PATH is not branded, should not create SINTER_PATH
       expect(process.env['SINTER_PATH']).toBe(beforeSinter);
     });
+  });
+});
+
+afterEach(() => vi.unstubAllEnvs());
+
+describe('branded endpoint credentials', () => {
+  it('mirrors a URL and key pair to an unused prefix', () => {
+    vi.stubEnv('SINTER_GENERATOR_BASE_URL', undefined);
+    vi.stubEnv('SINTER_GENERATOR_API_KEY', undefined);
+    vi.stubEnv('LIMINAL_GENERATOR_BASE_URL', 'https://legacy-route.invalid/v1');
+    vi.stubEnv('LIMINAL_GENERATOR_API_KEY', 'legacy-route-key');
+
+    mirrorBrandEnv();
+    expect(process.env.SINTER_GENERATOR_BASE_URL).toBe('https://legacy-route.invalid/v1');
+    expect(process.env.SINTER_GENERATOR_API_KEY).toBe('legacy-route-key');
+  });
+
+  it('leaves a legacy key on its original endpoint when both prefixes are set', () => {
+    vi.stubEnv('SINTER_LLM_BASE_URL', 'https://current-route.invalid/v1');
+    vi.stubEnv('SINTER_LLM_API_KEY', undefined);
+    vi.stubEnv('LIMINAL_LLM_BASE_URL', 'https://legacy-route.invalid/v1');
+    vi.stubEnv('LIMINAL_LLM_API_KEY', 'legacy-route-key');
+
+    mirrorBrandEnv();
+    expect(process.env.SINTER_LLM_API_KEY).toBeUndefined();
+    expect(process.env.LIMINAL_LLM_API_KEY).toBe('legacy-route-key');
   });
 });

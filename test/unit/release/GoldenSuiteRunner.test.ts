@@ -205,3 +205,21 @@ describe('GoldenSuiteRunner', () => {
     });
   });
 });
+
+describe('GoldenSuiteRunner timeout (Sol F05)', () => {
+  it('rejects a slow evaluation at the timeout and leaves no pending timer', async () => {
+    const suite = makeSuite([{ id: 'slow', minScore: 0.1 }]);
+    const runner = new GoldenSuiteRunner({ timeoutMs: 20 });
+    (runner as unknown as { fabric: unknown }).fabric = { evaluate: () => new Promise(() => undefined) };
+    await expect(runner.run(suite, withCandidates(suite))).rejects.toThrow(/timed out after 20ms/);
+  });
+
+  it('clears the timer after a fast evaluation', async () => {
+    const suite = makeSuite([{ id: 'fast', minScore: 0.1 }]);
+    const runner = new GoldenSuiteRunner({ timeoutMs: 60_000 });
+    (runner as unknown as { fabric: unknown }).fabric = createMockFabricRunner(0.9);
+    const before = (process as unknown as { _getActiveHandles(): unknown[] })._getActiveHandles().length;
+    await runner.run(suite, withCandidates(suite));
+    expect((process as unknown as { _getActiveHandles(): unknown[] })._getActiveHandles().length).toBeLessThanOrEqual(before);
+  });
+});

@@ -1,0 +1,13 @@
+## 01-spec-real-assets.txt
+# organ: composition | step: spec-real-assets | data: real
+$ node <repo>/bin/sinter composite --spec <out>/_data/spec.json
+# cwd: <out>/_proj (repo: <repo>)
+# --- stdout
+Composition Spec Analysis
+  Layers: 2
+  [image -> svg] confidence=n/a reason=n/a
+  [audio -> tone] confidence=0.75 reason=Matched keywords: tone
+Done.
+# --- stderr
+# exit: 0
+

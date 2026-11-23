@@ -30,6 +30,8 @@ export interface SandboxSpec {
   args: string[];
   cwd: string;
   env: Record<string, string>;
+  /** Codec mode. Mount exactly these files and require isolation. */
+  readOnlyFiles?: readonly string[];
 }
 
 export interface SandboxDeps {
@@ -92,7 +94,8 @@ function unavailable(detail: string): SandboxPlan {
 }
 
 export function buildSandboxedCommand(platform: NodeJS.Platform, spec: SandboxSpec, deps: SandboxDeps): SandboxPlan {
-  if (deps.hostEnv[BLENDER_UNSANDBOXED_ENV] === '1') {
+  const codec = spec.readOnlyFiles !== undefined;
+  if (!codec && deps.hostEnv[BLENDER_UNSANDBOXED_ENV] === '1') {
     return {
       ok: true,
       sandbox: 'none',
@@ -122,13 +125,20 @@ export function buildSandboxedCommand(platform: NodeJS.Platform, spec: SandboxSp
       return unavailable(`the Blender binary directory "${binaryDir}" is / or contains the home directory, so binding it would expose the home; install Blender somewhere else (for example /opt/blender)`);
     }
 
-    const argv: string[] = ['--unshare-all', '--die-with-parent', '--new-session', '--json-status-fd', String(BWRAP_STATUS_FD)];
+    const argv: string[] = ['--unshare-all', '--die-with-parent', '--new-session'];
+    if (!codec) argv.push('--json-status-fd', String(BWRAP_STATUS_FD));
     // tmpfs first: the binds below may live under /tmp and must be mounted on top of it.
     argv.push('--size', String(TMPFS_BYTES), '--tmpfs', '/tmp', '--proc', '/proc', '--dev', '/dev');
     for (const dir of RO_SYSTEM_DIRS) argv.push('--ro-bind-try', dir, dir);
     for (const file of RO_SYSTEM_FILES) argv.push('--ro-bind-try', file, file);
     if (!RO_SYSTEM_DIRS.some((dir) => isUnder(binaryDir, dir))) argv.push('--ro-bind', binaryDir, binaryDir);
-    argv.push('--ro-bind', inputDir, inputDir);
+    if (spec.readOnlyFiles) {
+      for (const file of new Set(spec.readOnlyFiles.map(deps.realpath))) {
+        argv.push('--ro-bind', file, file);
+      }
+    } else {
+      argv.push('--ro-bind', inputDir, inputDir);
+    }
     argv.push('--bind', outDir, outDir);
     argv.push('--chdir', outDir, '--clearenv');
     for (const [key, value] of Object.entries(spec.env)) argv.push('--setenv', key, value);

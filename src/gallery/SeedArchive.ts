@@ -126,4 +126,24 @@ export class SeedArchive {
     }
     return data as SeedData;
   }
+
+  /**
+   * Every entry in the archive, oldest file name first. A missing archive is an empty list; an entry that
+   * does not parse is skipped (one damaged file must not hide the rest).
+   */
+  async listSeeds(prefix = ''): Promise<SeedData[]> {
+    let names: string[];
+    try { names = await fs.readdir(this.archiveDir); } catch (error) {
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return [];
+      throw error;
+    }
+    const out: SeedData[] = [];
+    for (const name of names.filter(n => n.startsWith(prefix) && n.endsWith('.json')).sort()) {
+      try {
+        const entry = await this.loadSeed(name.slice(0, -'.json'.length));
+        if (entry) out.push(entry);
+      } catch { /* skip a damaged entry */ }
+    }
+    return out;
+  }
 }

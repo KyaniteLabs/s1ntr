@@ -34,7 +34,8 @@ async function createPngBase64(kind: 'varied' | 'solid' | 'transparent' | 'clipp
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const idx = (y * width + x) * 4;
-      const clipped = kind === 'clipped' && x >= 6;
+      // Jagged edge: a ragged bloom, not a solid rectangular panel (see CLIPPED_SOLID_PANEL_MIN_FILL).
+      const clipped = kind === 'clipped' && x >= 6 - (y % 2);
       data[idx] = clipped ? 255 : x * (kind === 'clipped' ? 12 : 32);
       data[idx + 1] = clipped ? 255 : y * (kind === 'clipped' ? 12 : 32);
       data[idx + 2] = clipped ? 255 : (x + y) * (kind === 'clipped' ? 6 : 16);
@@ -229,6 +230,35 @@ describe('render evidence perception mapping', () => {
       expect(measure?.meanLuminance).toBeGreaterThan(0.2);
       expect(measure?.meanLuminance).toBeLessThan(0.8); // the varied late frame's measure
       expect(measure?.verdict).toBe('ok');
+    });
+
+    it('L3-07: a uniform loading frame followed by a healthy late frame passes perception', async () => {
+      const evidence: RenderEvidence = {
+        timingMs: 120, infraUnavailable: false, candidateFailure: false,
+        screenshot: { mimeType: 'image/png', dataBase64: await createPngBase64('solid'), width: 8, height: 8 },
+        lateScreenshot: { mimeType: 'image/png', dataBase64: await createPngBase64('varied'), width: 8, height: 8 },
+      };
+      expect((await evaluateRenderEvidencePerception(evidence, 'p5')).passed).toBe(true);
+      expect((await evaluateRenderEvidencePerception(evidence, 'svg')).passed).toBe(true);
+    });
+
+    it('L3-07: a valid early frame does not rescue a late frame that is uniformly blank', async () => {
+      const evidence: RenderEvidence = {
+        timingMs: 120, infraUnavailable: false, candidateFailure: false,
+        screenshot: { mimeType: 'image/png', dataBase64: await createPngBase64('varied'), width: 8, height: 8 },
+        lateScreenshot: { mimeType: 'image/png', dataBase64: await createPngBase64('solid'), width: 8, height: 8 },
+      };
+      expect((await evaluateRenderEvidencePerception(evidence, 'p5')).passed).toBe(false);
+      expect((await evaluateRenderEvidencePerception(evidence, 'svg')).passed).toBe(false);
+    });
+
+    it('L3-07: an undecodable late frame is bad evidence, not a fallback to the early frame', async () => {
+      const evidence: RenderEvidence = {
+        timingMs: 120, infraUnavailable: false, candidateFailure: false,
+        screenshot: { mimeType: 'image/png', dataBase64: await createPngBase64('varied'), width: 8, height: 8 },
+        lateScreenshot: { mimeType: 'image/png', dataBase64: Buffer.from('not a png').toString('base64'), width: 8, height: 8 },
+      };
+      expect((await evaluateRenderEvidencePerception(evidence, 'p5')).passed).toBe(false);
     });
 
     it('keeps a clipped late frame authoritative during perception evaluation', async () => {

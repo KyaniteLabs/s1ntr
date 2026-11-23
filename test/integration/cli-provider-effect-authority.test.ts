@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { runProductionCliProviderEffect } from
+import { runProductionCliCycleEffect, runProductionCliProviderEffect } from
   '../../src/cli/LiminalProductionProviderEffect.js';
 import { generateMusic } from '../../src/music/generateMusic.js';
 import { generateVisuals } from '../../src/generateVisuals.js';
@@ -131,6 +131,7 @@ describe('governed CLI provider effect (#710): live-music and fix transports', (
     const out = await runProductionCliProviderEffect({
       idempotencyKey: 'production-live-music:test-1',
       binding: { surface: 'cli-live-music', prompt: 'aurora' },
+      maxGeneratorAttempts: 2,
       outputRoot: root,
       effect: async () => {
             const music = await generateMusic({ prompt: 'aurora', platform: 'strudel', llm });
@@ -145,6 +146,49 @@ describe('governed CLI provider effect (#710): live-music and fix transports', (
     expect(out.visuals.code).toBe(HYDRA);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(runtime.close).toHaveBeenCalledOnce();
+  });
+
+  // Sol F17: the project sync contract must reach the wire for BOTH generators, not just a stdout line.
+  it('live-music sends the project sync contract to both the music and the visuals request', async () => {
+    const root = await tempRoot();
+    const runtime = factory();
+    const llm = new LLMClient({ role: 'generator' });
+    const { withLiveSync } = await import('../../src/music/liveSyncContract.js');
+    const synced = withLiveSync('aurora', { syncMode: 'osc', oscHost: '127.0.0.1:57120' });
+    await runProductionCliProviderEffect({
+      idempotencyKey: 'production-live-music:sync-1',
+      binding: { surface: 'cli-live-music', prompt: 'aurora' },
+      maxGeneratorAttempts: 2,
+      outputRoot: root,
+      effect: async () => {
+        const music = await generateMusic({ prompt: synced, sourcePrompt: 'aurora', platform: 'strudel', llm });
+        nextCode = () => '```js\n' + HYDRA + '\n```';
+        const visuals = await generateVisuals({ prompt: synced, platform: 'hydra', llm });
+        return { music, visuals };
+      },
+    }, runtime.create);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    for (const call of fetchMock.mock.calls) {
+      const body = String((call[1] as { body?: unknown }).body);
+      expect(body).toContain('Sync mode: osc');
+      expect(body).toContain('OSC host: 127.0.0.1:57120');
+    }
+  });
+
+  it.each(['gui-live-music', 'gui-live-visuals'])('counts each %s transport against one attempt', async surface => {
+    const run = factory();
+    const client = new LLMClient({ role: 'generator' });
+    const root = await tempRoot();
+    await expect(runProductionCliProviderEffect({
+      idempotencyKey: `production-live-music:${surface}:test`,
+      binding: { surface, prompt: 'aurora' },
+      outputRoot: root,
+      effect: async () => {
+        await client.generate('system', 'first');
+        await client.generate('system', 'second');
+      },
+    }, run.create)).rejects.toThrow('TRANSPORT_ATTEMPT_CAP_EXHAUSTED');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('fix: LLMModeAgent reaches the provider under a grant and is rejected without one', async () => {
@@ -173,6 +217,31 @@ describe('governed CLI provider effect (#710): live-music and fix transports', (
     } finally {
       process.chdir(cwd);
     }
+  });
+
+  it('journals each generator transport and blocks an attempt beyond the cycle cap', async () => {
+    const root = await tempRoot();
+    const client = new LLMClient({ role: 'generator' });
+    const run = factory();
+    const key = 'production-cycle:test-cap';
+    await expect(runProductionCliCycleEffect({
+      idempotencyKey: key,
+      binding: { surface: 'test-cycle' },
+      maxGeneratorAttempts: 2,
+      outputRoot: root,
+      effect: async () => {
+        await client.generate('system', 'first piece');
+        await client.generate('system', 'second piece');
+        await client.generate('system', 'third piece');
+        throw new Error('later cycle stage failed');
+      },
+    }, run.create)).rejects.toThrow(/TRANSPORT_ATTEMPT_CAP_EXHAUSTED|later cycle stage failed/);
+    const journal = JSON.parse(await readFile(path.join(root, 'operation-journal.json'), 'utf8'));
+    const operation = journal.operations[key];
+    expect(operation.attemptsConsumed).toBe(2);
+    expect(journal.events.filter((event: { type: string; operationId: string }) =>
+      event.type === 'transport-started' && event.operationId === operation.operationId)).toHaveLength(2);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it('settles the grant and closes the runtime when the effect throws', async () => {

@@ -12,6 +12,8 @@
  * @module aesthetic/critics/LLMJudgeCritic
  */
 
+import { evaluatorCall } from '../../core/EvaluatorScope.js';
+import { JUDGE_PASSING_THRESHOLD } from '../qualityFloor.js';
 import type { AestheticReport, AestheticViolation, DesignConstraints } from '../types.js';
 import type { ProviderImageInput } from '../../llm/ProviderTypes.js';
 import { Logger } from '../../utils/Logger.js';
@@ -61,7 +63,7 @@ export interface LLMClientLike {
 // ---------------------------------------------------------------------------
 
 const DEFAULT_JUDGE_CONFIG: LLMJudgeConfig = {
-  passingThreshold: 0.6,
+  passingThreshold: JUDGE_PASSING_THRESHOLD,
   maxTokens: 500,
   includeReasoning: true,
   dimensions: ['color', 'layout', 'overall', 'creativity'],
@@ -265,7 +267,7 @@ export async function analyzeWithLLMJudge(
       ?? (llmConfig?.baseUrl ? detectProviderFromUrl(llmConfig.baseUrl) : undefined);
     const promptTier = resolvePromptTier(llmConfig?.model ?? '', provider);
     const systemPrompt = tiered({ full: SYSTEM_PROMPT, compact: COMPACT_SYSTEM_PROMPT }, promptTier);
-    const result = await llm.generate(systemPrompt, prompt, undefined, true, imageInputs, { jsonMode: promptTier === 'compact' });
+    const result = await evaluatorCall(() => llm.generate(systemPrompt, prompt, undefined, true, imageInputs, { jsonMode: promptTier === 'compact' }));
 
     if (!result.success || !result.code) {
       Logger.warn('LLMJudgeCritic', 'LLM judge call failed, failing closed (passed=false)');

@@ -143,6 +143,25 @@ renderer.render(scene, new THREE.PerspectiveCamera());
     expect(result.error).toContain('OrbitControls');
   });
 
+  // Two v16 dance pieces imported EffectComposer / TransformControls this way, passed validation,
+  // then failed at render with an unresolved module specifier.
+  it.each([
+    'import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";',
+    "import { TransformControls } from 'three/addons/controls/TransformControls.js';",
+    "import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';",
+  ])('rejects addon imports the page cannot resolve: %s', (line) => {
+    const gen = new TestableThreeGenerator();
+    const result = gen.validateForTest(`import * as THREE from "three";\n${line}\nconst s = new THREE.Scene(); requestAnimationFrame(() => {});`);
+    expect(result.valid).toBe(false);
+    expect(result.error).toContain('examples modules');
+  });
+
+  it('still accepts plain three imports', () => {
+    const gen = new TestableThreeGenerator();
+    const result = gen.validateForTest('import * as THREE from "three";\nconst s = new THREE.Scene(); const r = new THREE.WebGLRenderer(); function loop(){ r.render(s, cam); requestAnimationFrame(loop); } loop();');
+    expect(result.error ?? '').not.toContain('examples modules');
+  });
+
   it('rejects full HTML documents during generation validation', () => {
     const gen = new TestableThreeGenerator();
     const result = gen.validateForTest('<!DOCTYPE html><html><body><script>new THREE.Scene()</script></body></html>');

@@ -3,6 +3,7 @@ import importlib.util
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 import tempfile
 import unittest
 
@@ -33,6 +34,14 @@ class OperatorStatusTest(unittest.TestCase):
         value = {'pid': 12, 'start': 'exact-start', 'at': 1788868860}
         value.update(changes)
         (self.data / 'operator-admission-held.json').write_text(json.dumps(value))
+
+    def test_configured_request_and_receipt(self):
+        self.hold()
+        self.ack()
+        (self.data / 'operator-admission-hold.json').rename(self.root / 'request')
+        (self.data / 'operator-admission-held.json').rename(self.root / 'receipt')
+        with patch.dict('os.environ', SINTER_OPERATOR_ADMISSION_HOLD='request', SINTER_OPERATOR_ADMISSION_ACK='receipt'):
+            self.assertEqual(module.status(self.root, self.api)['state'], 'held')
 
     def test_no_hold_reports_only_verified_supervision(self):
         self.assertEqual(module.status(self.root, self.api), {'state': 'active', 'ownerVerified': True})

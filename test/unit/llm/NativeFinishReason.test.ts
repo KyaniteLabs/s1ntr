@@ -29,4 +29,11 @@ describe('raisedOutputBudget', () => {
   it('names the cap in the truncation check', () => {
     expect(truncationCheck(4096)).toMatch(/^GENERATION_TRUNCATED: the reply stopped at the 4096-token output cap/);
   });
+
+  it('says the cap is the answer budget on top of thinking for an LFM3 seat (v2r1: 40 runs read 4096 while the wire cap was 12288)', () => {
+    const lfm3 = truncationCheck(4096, 'LiquidAI/LFM3-1.7B');
+    expect(lfm3).toMatch(/4096-token answer budget/);
+    expect(lfm3).toMatch(/after up to 8192 thinking tokens/);
+    expect(truncationCheck(4096, 'gpt-5')).not.toMatch(/thinking/);
+  });
 });

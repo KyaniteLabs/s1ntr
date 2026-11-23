@@ -21,10 +21,10 @@ describe('HeadlessRenderer blender delegation', () => {
     const renderer = new HeadlessRenderer();
     const initialize = vi.spyOn(renderer, 'initialize');
 
-    const result = await renderer.render(SCRIPT, { domain: 'blender' });
+    const result = await renderer.render(SCRIPT, { domain: 'blender', hardDeadlineMs: 7_123 });
 
     expect(renderBlenderMock).toHaveBeenCalledTimes(1);
-    expect(renderBlenderMock).toHaveBeenCalledWith(SCRIPT);
+    expect(renderBlenderMock).toHaveBeenCalledWith(SCRIPT, { timeoutMs: 7_123 });
     expect(initialize).not.toHaveBeenCalled();
     expect(result.success).toBe(true);
     expect(result.rendered).toBe(true);
@@ -43,6 +43,13 @@ describe('HeadlessRenderer blender delegation', () => {
     const open = await new HeadlessRenderer().render(SCRIPT, { domain: 'blender' });
     expect(open.containment?.networkIsolated).toBe(false);
     expect(open.containment?.permissionsDenied).toBe(false);
+  });
+
+  it('carries the failure kind through, so a missing binary is not mistaken for a bad script', async () => {
+    renderBlenderMock.mockResolvedValue({ success: false, failureKind: 'binary-missing', error: 'Blender executable not found: "blender"', logs: [] });
+    const result = await new HeadlessRenderer().render(SCRIPT, { domain: 'blender' });
+    expect(result.success).toBe(false);
+    expect(result.failureKind).toBe('binary-missing');
   });
 
   it('a bad script is a candidate failure the judge sees, not infrastructure', async () => {

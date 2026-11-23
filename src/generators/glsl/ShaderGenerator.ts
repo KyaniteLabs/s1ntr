@@ -6,6 +6,7 @@ import { TierBasedGenerator, type TierBasedGeneratorOptions } from '../TierBased
 import { Logger } from '../../utils/Logger.js';
 import { GLSLValidator } from '../../core/validators/GLSLValidator.js';
 import { answerCode, pickCodeBlock, splitThinking } from '../../llm/ModelOutput.js';
+import { hoistGLSLDirectives, normalizeGLSLDialect } from './GLSLNormalizer.js';
 
 // Common shader helper functions that LLMs idiomatically CALL without defining
 // (e.g. rot/noise/fbm from shadertoy). The validator rejects these as undefined,
@@ -111,7 +112,7 @@ export class ShaderGenerator extends TierBasedGenerator {
     if (deadUniforms.length > 0) {
       return {
         valid: false,
-        error: `Shader declares uniforms the host never sets: ${[...new Set(deadUniforms)].join(', ')}. Use only u_time, u_resolution, u_mouse.`,
+        error: `Shader declares uniforms the host never sets: ${[...new Set(deadUniforms)].join(', ')}. The host supplies exactly: uniform float u_time; uniform vec2 u_resolution; uniform vec2 u_mouse; — delete the dead declarations or fold their values into constants.`,
       };
     }
 
@@ -207,16 +208,22 @@ export class ShaderGenerator extends TierBasedGenerator {
 
   wrapForGallery(code: string): string {
     code = this.sanitizeShaderCode(code);
-    const hasPrecision = /\bprecision\s+(lowp|mediump|highp)\s+float\s*;/.test(code);
     const hasTime = /\buniform\s+float\s+(u_time|iTime)\s*;/.test(code);
     const hasResolution = /\buniform\s+vec2\s+(u_resolution|iResolution)\s*;/.test(code);
     const hasMain = /\bvoid\s+main\s*\(/.test(code);
     const hasMainImage = /\bvoid\s+mainImage\s*\(/.test(code);
+    // `#version` must be the first token and an ES 1.00 `#extension` must precede
+    // every other token, so the injected declarations go AFTER those lines.
+    const { header, body } = hoistGLSLDirectives(code);
     const shaderSource = [
-      hasPrecision ? '' : 'precision mediump float;',
+      header,
+      // Always lead with a default float precision: the injected uniforms below
+      // would otherwise precede the shader's own precision line and fail with
+      // "No precision specified for (float)". A later redeclaration is legal.
+      'precision mediump float;',
       hasTime ? '' : 'uniform float u_time;',
       hasResolution ? '' : 'uniform vec2 u_resolution;',
-      code,
+      body,
       hasMainImage && !hasMain ? 'void main(){mainImage(gl_FragColor,gl_FragCoord.xy);}' : '',
     ].filter(Boolean).join('\n');
     const usesGlsl300 = /^\s*#version\s+300\s+es/m.test(shaderSource);
@@ -246,6 +253,7 @@ export class ShaderGenerator extends TierBasedGenerator {
       'const vs=' + JSON.stringify(vertexShader) + ';\n' +
       'const fs=' + encodedShader + ';\n' +
       'function createShader(type,src){const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)){throw new Error(gl.getShaderInfoLog(s)||"shader compile failed")}return s;}\n' +
+      'gl.getExtension("OES_standard_derivatives");\n' +
       'const v=createShader(gl.VERTEX_SHADER,vs);\n' +
       'const f=createShader(gl.FRAGMENT_SHADER,fs);\n' +
       'const prog=gl.createProgram();gl.attachShader(prog,v);gl.attachShader(prog,f);gl.linkProgram(prog);if(!gl.getProgramParameter(prog,gl.LINK_STATUS)){throw new Error(gl.getProgramInfoLog(prog)||"shader link failed")}gl.useProgram(prog);\n' +
@@ -476,6 +484,16 @@ export class ShaderGenerator extends TierBasedGenerator {
   }
 
   private repairCommonLocalModelIssues(code: string): string {
+    // Dialect normalize FIRST: desktop #version headers, ES3/WebGL1 in/out
+    // mismatches, C math names, 1e6.0 literals, uTime/U_Time spellings — the
+    // deterministic layer of the LFM3 failure classes, fixed before any lint
+    // gets to see the code.
+    const normalized = normalizeGLSLDialect(code);
+    if (normalized.fixes.length > 0) {
+      Logger.debug('ShaderGenerator', `GLSL dialect normalized: ${normalized.fixes.join(', ')}`);
+    }
+    code = normalized.code;
+
     // The WebGL1 fragment-shader render harness embeds the shader source directly
     // and mishandles `#ifdef GL_ES ... #endif` precision guards: it strips the
     // opener and leaves the `#endif`, producing "unexpected #endif without a

@@ -30,6 +30,7 @@ import {
   learnCreativeJudgment,
 } from '../../../src/learning/CreativeJudgmentCalibration.js';
 
+vi.setConfig({ testTimeout: 60_000 }); // Full production graph and file-store recovery.
 afterEach(() => { vi.unstubAllEnvs(); });
 
 const NOW = '2026-08-01T12:00:00.000Z';

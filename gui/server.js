@@ -19,6 +19,7 @@ import { logSecurityEvent } from '../dist/security/SecurityLogger.js';
 import { collectRepositoryOpportunityEvidence, scanGreenSystemOpportunities } from '../dist/improvement/OpportunityScanner.js';
 import { buildGuiBridgeInput } from './bridgeInput.js';
 import { prepareComposition } from '../dist/composition/CompositionGraph.js';
+import { PreviewStore, normaliseSession } from './previewStore.js';
 import { bootstrapProductionDreamRuntime, bootstrapProductionLiminalRuntime }
   from '../dist/runtime-core/ProductionLiminalRuntime.js';
 
@@ -152,16 +153,30 @@ function buildDeterministicOrganism(prompt, traits = {}, seed = {}) {
 }
 
 // In-memory store for "Run in preview" so GET /preview can serve the code
-const previewStore = new Map();
+const previewStore = new PreviewStore();
 let productionRuntimePromise;
 let productionDreamRuntimePromise;
+// F08: a rejected init must not be cached forever, and a saved config must reach the next Create.
 function productionRuntime() {
-  productionRuntimePromise ??= bootstrapProductionLiminalRuntime();
+  if (!productionRuntimePromise) {
+    const p = bootstrapProductionLiminalRuntime();
+    productionRuntimePromise = p;
+    p.catch(() => { if (productionRuntimePromise === p) productionRuntimePromise = undefined; });
+  }
   return productionRuntimePromise;
 }
 function productionDreamRuntime() {
-  productionDreamRuntimePromise ??= bootstrapProductionDreamRuntime();
+  if (!productionDreamRuntimePromise) {
+    const p = bootstrapProductionDreamRuntime();
+    productionDreamRuntimePromise = p;
+    p.catch(() => { if (productionDreamRuntimePromise === p) productionDreamRuntimePromise = undefined; });
+  }
   return productionDreamRuntimePromise;
+}
+/** Drop the cached runtimes so the next command re-reads the saved config. */
+function resetProductionRuntimes() {
+  productionRuntimePromise = undefined;
+  productionDreamRuntimePromise = undefined;
 }
 const productionCommands = {
   submitCreate: (...args) => productionRuntime().then(runtime => runtime.port.submitCreate(...args)),
@@ -221,11 +236,56 @@ const P5_SENSOR_POLICY_SCRIPT = `
   </script>`;
 const STUDIO_HSTS_HEADER = 'max-age=31536000; includeSubDomains';
 
+// Opt-in embed allowlist for the S1NTR Hermes Desktop plugin (and any other
+// trusted host UI). SINTER_EMBED_ORIGINS is a comma-separated list of absolute
+// origins ("http://127.0.0.1:9121,https://desktop.example"). While unset the
+// studio keeps its default posture: X-Frame-Options SAMEORIGIN and an SSE gate
+// that admits only localhost/127.0.0.1 browsers. When set, the common headers
+// switch to a CSP `frame-ancestors 'self' …` that also admits the listed
+// origins (X-Frame-Options is dropped — frame-ancestors is the modern, and in
+// Chromium/Firefox the overriding, enforcement path), and the SSE origin gate
+// admits them too. Malformed entries are ignored, never fatal.
+const EMBED_ORIGINS_ENV = 'SINTER_EMBED_ORIGINS';
+let embedOriginsCache = { raw: null, origins: [] };
+
+function parseEmbedOrigins(value) {
+  // Each entry is normalized to URL.origin, so "https://x/" or "https://x:443" still matches the
+  // browser's Origin header ("https://x"). Entries with a path, query or fragment are dropped.
+  const origins = String(value || '')
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((origin) => {
+      try {
+        const url = new URL(origin);
+        const bare = Boolean(url.protocol && url.host) && url.pathname === '/' && !url.search && !url.hash;
+        return bare && url.origin !== 'null' ? url.origin : null;
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+  return [...new Set(origins)];
+}
+
+function embedOrigins() {
+  const raw = process.env[EMBED_ORIGINS_ENV];
+  if (embedOriginsCache.raw !== raw) {
+    embedOriginsCache = { raw, origins: parseEmbedOrigins(raw) };
+  }
+  return embedOriginsCache.origins;
+}
+
 function setStudioCommonSecurityHeaders(res) {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Strict-Transport-Security', STUDIO_HSTS_HEADER);
-  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  const origins = embedOrigins();
+  if (origins.length) {
+    res.setHeader('Content-Security-Policy', `frame-ancestors 'self' ${origins.join(' ')}`);
+  } else {
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  }
 }
 
 function setPreviewSecurityHeaders(res, options = {}) {
@@ -534,6 +594,11 @@ function validateSSEOrigin(req, res, next) {
   try {
     const url = new URL(origin);
     if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') {
+      return next();
+    }
+    // Trusted embed origins (SINTER_EMBED_ORIGINS) may open Studio pages —
+    // including the SSE event streams — from a non-localhost host UI.
+    if (embedOrigins().includes(origin.toLowerCase())) {
       return next();
     }
   } catch { /* invalid URL, deny */ }
@@ -1209,6 +1274,7 @@ export function createApp(configPath, port = 5174, options = {}) {
       };
       const result = await updateConfig(update, cfgPath);
       if (result.isErr()) return res.status(400).json({ error: result.error.message });
+      resetProductionRuntimes();
       res.json({ ok: true });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -1220,8 +1286,9 @@ export function createApp(configPath, port = 5174, options = {}) {
     try {
       const code = typeof req.body?.code === 'string' ? req.body.code : '';
       const version = Number.isInteger(req.body?.version) && req.body.version > 0 ? req.body.version : 1;
-      previewStore.set(version, code);
-      const url = `${backendOrigin}/preview?version=${version}`;
+      const session = normaliseSession(req.body?.session ?? req.get('x-sinter-session'));
+      if (!previewStore.set(session, version, code)) return res.status(413).json({ error: 'preview code exceeds the preview budget' });
+      const url = `${backendOrigin}/preview?version=${version}${session ? `&session=${encodeURIComponent(session)}` : ''}`;
       res.status(200).json({ url });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -1231,7 +1298,7 @@ export function createApp(configPath, port = 5174, options = {}) {
   // Serve preview page (p5 + stored code) so iframe can show the sketch
   app.get('/preview', (req, res) => {
     const version = Math.max(1, parseInt(String(req.query.version), 10) || 1);
-    const code = previewStore.get(version);
+    const code = previewStore.get(normaliseSession(req.query.session), version);
     if (typeof code !== 'string') {
       const html = `<!DOCTYPE html>
 <html lang="en">
@@ -1765,12 +1832,26 @@ export function createApp(configPath, port = 5174, options = {}) {
     }
   });
 
-  // Live Music: generate Strudel / Hydra code from prompt
+  // Live Music: generate Strudel / Hydra code from prompt. Same contract as the CLI (Sol F17): project `live`
+  // settings become a sync contract in the prompt, and the call runs under the governed provider effect.
+  const liveSyncPrompt = async (prompt) => {
+    const { liveSettingsFromProjectConfig, withLiveSync } = await import('../dist/music/liveSyncContract.js');
+    const { loadProjectConfig } = await import('../dist/config/ConfigLoader.js');
+    return withLiveSync(prompt, liveSettingsFromProjectConfig(await loadProjectConfig(process.cwd())));
+  };
+  const governedLive = async (surface, prompt, effect) => {
+    const { runProductionCliProviderEffect } = await import('../dist/cli/LiminalProductionProviderEffect.js');
+    return runProductionCliProviderEffect({
+      idempotencyKey: `production-live-music:${surface}:${crypto.randomUUID()}`,
+      binding: { surface, prompt }, effect });
+  };
   app.post('/api/live-music/music', async (req, res) => {
     try {
       const prompt = typeof req.body?.prompt === 'string' ? req.body.prompt.trim() : 'ambient';
       const { generateMusic } = await import('../dist/index.js');
-      const out = await generateMusic({ prompt, platform: 'strudel' });
+      const synced = await liveSyncPrompt(prompt);
+      const out = await governedLive('gui-live-music', prompt,
+        () => generateMusic({ prompt: synced, sourcePrompt: prompt, platform: 'strudel' }));
       res.status(200).json({ code: out.code, source: out.source });
     } catch (err) {
       res.status(500).json({ error: err.message || String(err) });
@@ -1781,7 +1862,8 @@ export function createApp(configPath, port = 5174, options = {}) {
     try {
       const prompt = typeof req.body?.prompt === 'string' ? req.body.prompt.trim() : 'reactive';
       const { generateVisuals } = await import('../dist/index.js');
-      const out = await generateVisuals({ prompt, platform: 'hydra' });
+      const synced = await liveSyncPrompt(prompt);
+      const out = await governedLive('gui-live-visuals', prompt, () => generateVisuals({ prompt: synced, platform: 'hydra' }));
       res.status(200).json({ code: out.code });
     } catch (err) {
       res.status(500).json({ error: err.message || String(err) });

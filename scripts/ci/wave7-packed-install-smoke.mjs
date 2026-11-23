@@ -27,7 +27,7 @@ try {
   for (const asset of vendorAssets) {
     await readVendorAsset(asset).catch(() => missingVendor.push(asset));
   }
-  const helpOk = help.includes('Creative Coding Agent') && help.includes('organism <inspect|react|context>');
+  const helpOk = help.includes('a tool for coding art') && help.includes('organism <inspect|react|context>');
   const passed = helpOk && vendorAssets.length > 0 && missingVendor.length === 0;
   console.log(JSON.stringify({ gate: 'packed-install-smoke', passed, helpOk, vendorAssets: vendorAssets.length, missingVendor, tarball: path.basename(tarballName) }));
   if (!passed) process.exitCode = 1;

@@ -37,6 +37,8 @@ export interface FitnessObservationInput {
   failureClass: FitnessFailureClass;
   activeAdaptationIds?: string[];
   timestamp?: string;
+  /** Wall time of the run that produced this observation, in ms. */
+  durationMs?: number;
 }
 
 export interface FitnessObservation {
@@ -61,6 +63,8 @@ export interface FitnessObservation {
   graduationEligible: boolean;
   activeAdaptationIds: string[];
   cohort: FitnessCohort;
+  /** Wall time of the producing run in ms. Rows written before this field existed omit it. */
+  durationMs?: number;
 }
 
 export interface FitnessObservationStoreOptions {
@@ -71,6 +75,8 @@ export interface FitnessObservationStoreOptions {
   maxBytes?: number;
   maxArchives?: number;
   lockTimeoutMs?: number;
+  /** Durable producers may record once per stable run ID within the retained log. */
+  uniqueRunId?: boolean;
 }
 
 export interface FitnessObservationGroup {
@@ -81,12 +87,31 @@ export interface FitnessObservationGroup {
   lastSeen: string | null;
 }
 
+/** One provider/model seat's own record on one medium: evidence for the operator, never a switch. */
+export interface FitnessSeatMediumStats {
+  /** Observations that carry real evaluator evidence (scoreState is not 'unscored'). */
+  scoredCount: number;
+  meanScore: number | null;
+  /** Observations whose failureClass is not 'none'. */
+  failureCount: number;
+  totalCount: number;
+  /** Mean wall time over runs that recorded it; null when none did. */
+  meanDurationMs: number | null;
+}
+
 export interface FitnessObservationReport extends FitnessObservationGroup {
   malformedCount: number;
+  /** medium -> "provider/model" -> the user's own outcomes (scores, failures, wall time). */
+  byMediumSeat: Record<string, Record<string, FitnessSeatMediumStats>>;
+  /** medium -> seat with the highest mean score over at least `minScored` scored runs (null when none qualifies). */
+  bestSeatByMedium: Record<string, string | null>;
   byDomain: Record<string, FitnessObservationGroup>;
   byModel: Record<string, FitnessObservationGroup>;
   byCohort: Record<FitnessCohort, FitnessObservationGroup>;
 }
+
+/** A seat needs this many scored runs on a medium before it is named best (evidence, not a switch). */
+const MIN_SCORED_FOR_BEST = 3;
 
 const EMPTY_GROUP = (): FitnessObservationGroup => ({
   count: 0,
@@ -148,6 +173,8 @@ export function createFitnessObservation(input: FitnessObservationInput): Fitnes
     graduationEligible: honest && provider !== null && model !== null,
     activeAdaptationIds,
     cohort: activeAdaptationIds.length > 0 ? 'treatment' : 'control',
+    ...(typeof input.durationMs === 'number' && Number.isFinite(input.durationMs) && input.durationMs >= 0
+      ? { durationMs: Math.round(input.durationMs) } : {}),
   };
 }
 
@@ -222,6 +249,11 @@ export async function appendFitnessObservation(
   }
   const release = await acquireLock(`${filePath}.lock`, options.lockTimeoutMs ?? 5_000);
   try {
+    if (options.uniqueRunId) {
+      const { observations } = await readFitnessObservations(options);
+      const prior = observations.find(row => row.runId === observation.runId);
+      if (prior) return { filePath, observation: prior };
+    }
     await rotateIfNeeded(
       filePath,
       Buffer.byteLength(line),
@@ -277,6 +309,7 @@ function isFitnessObservation(value: unknown): value is FitnessObservation {
     && row.honest === honest
     && row.graduationEligible === eligible
     && adaptationsValid
+    && (row.durationMs === undefined || (typeof row.durationMs === 'number' && Number.isFinite(row.durationMs) && row.durationMs >= 0))
     && row.cohort === cohort;
 }
 
@@ -345,16 +378,40 @@ export function aggregateFitnessObservations(
   const report: FitnessObservationReport = {
     ...EMPTY_GROUP(),
     malformedCount,
+    byMediumSeat: {},
+    bestSeatByMedium: {},
     byDomain: {},
     byModel: {},
     byCohort: { control: EMPTY_GROUP(), treatment: EMPTY_GROUP() },
   };
+  const durationCounts = new Map<FitnessSeatMediumStats, number>();
   for (const observation of observations) {
     addToGroup(report, observation);
     addToGroup(groupFor(report.byDomain, observation.domain), observation);
     const lane = `${observation.provider ?? 'unattributed'}/${observation.model ?? 'unattributed'}`;
     addToGroup(groupFor(report.byModel, lane), observation);
     addToGroup(report.byCohort[observation.cohort], observation);
+    const seats = report.byMediumSeat[observation.domain] ?? (report.byMediumSeat[observation.domain] = {});
+    const seat = seats[lane] ?? (seats[lane] = { scoredCount: 0, meanScore: null, failureCount: 0, totalCount: 0, meanDurationMs: null });
+    seat.totalCount += 1;
+    if (observation.failureClass !== 'none') seat.failureCount += 1;
+    if (typeof observation.durationMs === 'number') {
+      const n = durationCounts.get(seat) ?? 0;
+      seat.meanDurationMs = ((seat.meanDurationMs ?? 0) * n + observation.durationMs) / (n + 1);
+      durationCounts.set(seat, n + 1);
+    }
+    if (observation.scoreState !== 'unscored') {
+      seat.meanScore = ((seat.meanScore ?? 0) * seat.scoredCount + observation.score) / (seat.scoredCount + 1);
+      seat.scoredCount += 1;
+    }
+  }
+  for (const [medium, seats] of Object.entries(report.byMediumSeat)) {
+    let best: string | null = null;
+    for (const [lane, seat] of Object.entries(seats)) {
+      if (seat.scoredCount < MIN_SCORED_FOR_BEST || seat.meanScore === null) continue;
+      if (best === null || seat.meanScore > (seats[best]?.meanScore ?? -Infinity)) best = lane;
+    }
+    report.bestSeatByMedium[medium] = best;
   }
   return report;
 }

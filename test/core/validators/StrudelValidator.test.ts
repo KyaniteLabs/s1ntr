@@ -137,4 +137,13 @@ stack(
       expect(StrudelValidator.getMinSize()).toBe(1);
     });
   });
+
+  describe('tempo', () => {
+    it('tells the model how to set tempo when it writes .bpm()', () => {
+      const errors = StrudelValidator.validate('note("c3 e3 g3").s("sawtooth").bpm(120)').errors;
+      const message = errors.find((error) => error.includes(".bpm()")) ?? '';
+      expect(message).toContain('.cpm(');
+      expect(message).toContain('120');
+    });
+  });
 });

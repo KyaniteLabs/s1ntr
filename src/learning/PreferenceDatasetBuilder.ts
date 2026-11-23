@@ -161,6 +161,14 @@ export class PreferenceDatasetBuilder {
         }
       }
 
+      // Reject → the rejected artifact loses to its nearest neighbours (human channel), whatever the evaluator scored it.
+      if (entry.preference.action === 'reject') {
+        const others = entries.filter(e => e.id !== entry.id && e.preference?.action !== 'reject');
+        for (const neighbor of nearestNeighbors(entry, others, 3)) {
+          pairs.push(this.makePair(neighbor, entry, 'reject', 0.8, entry.preference.capturedAt, 'human'));
+        }
+      }
+
       // More-like-this → explicit positive signal
       if (entry.preference.action === 'more-like-this') {
         if (!this.includeInferred) continue;
@@ -187,7 +195,8 @@ export class PreferenceDatasetBuilder {
     if (this.includeInferred && this.includeScoreGapPairs) {
       const humanKeys = new Set(humanPairs.map(p => unorderedKey(p.winner.id, p.loser.id)));
       const candidates: Array<{ pair: PreferencePair; gap: number }> = [];
-      const byScore = [...entries].sort((a, b) => b.qualityScore - a.qualityScore);
+      // an owner-rejected artifact may not win a pseudo pair: the evaluator's score must not outvote the owner
+      const byScore = entries.filter(e => e.preference?.action !== 'reject').sort((a, b) => b.qualityScore - a.qualityScore);
       for (let i = 0; i < byScore.length; i++) {
         const winner = byScore[i];
         let made = 0;

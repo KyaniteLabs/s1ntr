@@ -162,10 +162,15 @@ export class CycleDriver {
     } else if (!incumbent) {
       decision = { accepted: true, reason: 'deterministic-pareto-improvement' };
     } else if (deterministicTie(metrics, incumbent.metrics)) {
-      const wins = await this.pairwise(html, incumbent.html);
-      decision = wins
-        ? { accepted: true, reason: 'pairwise-tiebreak' }
-        : { accepted: false, reason: 'deterministic-tie-pairwise-loss' };
+      // A critique that throws during the tie-break must not abort the cycle (#1710):
+      // the incumbent stays and the report says the tie-break could not run.
+      let wins: boolean | null;
+      try { wins = await this.pairwise(html, incumbent.html); } catch { wins = null; }
+      decision = wins === null
+        ? { accepted: false, reason: 'pairwise-critique-failed' }
+        : wins
+          ? { accepted: true, reason: 'pairwise-tiebreak' }
+          : { accepted: false, reason: 'deterministic-tie-pairwise-loss' };
       ensemble = { ...ensemble, pairwiseWinsIncumbent: wins };
     } else {
       decision = { accepted: false, reason: 'frozen-regression' };

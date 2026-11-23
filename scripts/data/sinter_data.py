@@ -117,9 +117,9 @@ def detect_domain(source):
     # html compositions
     if '<!doctype html' in s or '<div' in s and 'canvas' not in s:
         return 'html'
-    # meta: self-referential system art
+    # custom (formerly meta): self-referential system art
     if 'meta' in s and ('trend' in s or 'score' in s or 'fleet' in s):
-        return 'meta'
+        return 'custom'
     # p5: the browser-canvas default floor (never 'unknown' — CEO law)
     return 'p5'
 

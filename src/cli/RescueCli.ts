@@ -37,7 +37,9 @@ function buildRepairClient(): RepairClient | null {
     return {
       generate: async (system, user) => {
         if (isAnthropic) {
-          const res = await fetch(`${seat.baseUrl!.replace(/\/$/, '')}/v1/messages`, {
+          // A configured Anthropic base often already ends in /v1; never double it (Sol F11).
+          const anthropicBase = seat.baseUrl!.replace(/\/+$/, '').replace(/\/v1$/, '');
+          const res = await fetch(`${anthropicBase}/v1/messages`, {
             method: 'POST',
             headers: { 'x-api-key': seat.apiKey ?? '', 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
             body: JSON.stringify({ model: seat.model, max_tokens: maxTokens, system, messages: [{ role: 'user', content: user }] }),
@@ -83,7 +85,7 @@ export async function runRescueCommand(cmdArgs: string[], flags: { sweep?: boole
     return;
   }
   const target = cmdArgs.find(arg => !arg.startsWith('--')) ?? '.omx/atelier/rejects/code';
-  const noLlm = cmdArgs.includes('--no-llm');
+  const noLlm = flags.noLlm === true || cmdArgs.includes('--no-llm');
   if (!existsSync(target)) {
     console.error(`usage: sinter rescue <rejects-dir|file> [--no-llm] — no such path: ${target}`);
     process.exit(1);

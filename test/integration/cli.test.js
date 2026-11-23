@@ -6,23 +6,13 @@ import { describe, it, expect, beforeAll, afterEach, test } from 'vitest';
 import { spawn } from 'child_process';
 import fs from 'fs/promises';
 import path from 'path';
+import os from 'os';
+import { startFakeProvider, fakeProviderEnv, runSinterAsync, goodJudgeReply, LIVELY_HTML } from '../helpers/fakeProviderServer.ts';
 
 const cliPath = path.join(process.cwd(), 'bin/sinter');
 
-// Check if LM Studio is available and responsive enough for E2E tests
-async function isLLMAvailable() {
-  // In test environments, skip LLM-dependent CLI tests unless explicitly enabled,
-  // because local LLM endpoints are often too slow for reliable E2E testing.
-  if (process.env.NODE_ENV === 'test' && !process.env.RUN_SLOW_LLM_TESTS) {
-    return false;
-  }
-  try {
-    const res = await fetch('http://localhost:1234/v1/models', { signal: AbortSignal.timeout(1000) });
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
+// Sol L3-18: the LM Studio endpoint is a fake OpenAI-compatible loopback server (same pattern as the governed-Create e2e),
+// so these assertions always run; nothing depends on a model being loaded on this host.
 
 describe('CLI Integration Tests', () => {
   let testOutputDir;
@@ -57,45 +47,38 @@ describe('CLI Integration Tests', () => {
       expect(result.stdout).not.toContain('Generating: provider help');
     }, 10000);
 
-    test('should generate with fast LM Studio model', async () => {
-      // Skip if no LLM available
-      if (!await isLLMAvailable()) {
-        console.log('[SKIP] No LLM available at localhost:1234');
-        return;
-      }
-      const result = await runCLI([
-        '--prompt', 'simple blue circle',
-        '--output', testOutputDir,
-        '--max-iterations', '1'
-      ]);
-      // Debug output
-      if (result.exitCode !== 0) {
-        console.log('[DEBUG] stdout:', result.stdout);
-        console.log('[DEBUG] stderr:', result.stderr);
-      }
-      expect(result.exitCode).toBe(0);
-      expect(result.stdout).toContain('Sinter');
-    }, TEST_TIMEOUT);
+    test('should generate against a fake LM Studio endpoint: saved files and a persisted decision', async () => {
+      const fake = await startFakeProvider({ generate: () => LIVELY_HTML, judge: () => goodJudgeReply(0.8) });
+      const work = await fs.mkdtemp(path.join(os.tmpdir(), 'cli-lmstudio-'));
+      try {
+        const env = fakeProviderEnv(fake, { home: path.join(work, 'home'), stateRoot: path.join(work, 'state') });
+        const result = await runSinterAsync(['--prompt', 'simple blue circle', '--domain', 'html', '--output', testOutputDir, '--max-iterations', '1'], env);
+        if (result.status !== 0) console.log('[DEBUG]', result.out.slice(-1500));
+        expect(result.status).toBe(0);
+        expect(fake.generated.length).toBeGreaterThan(0);   // the model endpoint really was called
+        expect(fake.judged.length).toBeGreaterThan(0);      // and judged: acceptance is not a banner
+        expect(result.out).toMatch(/Signed receipt: [0-9a-f]{64}/);
+        const produced = await fs.readdir(testOutputDir);
+        expect(produced.length).toBeGreaterThan(0);
+      } finally { await fake.close(); await fs.rm(work, { recursive: true, force: true }); }
+    }, 300000);
 
-    test('--mode live-music --prompt "ambient" --output <dir> produces files in output dir', async () => {
-      // Skip if no LLM available
-      if (!await isLLMAvailable()) {
-        console.log('[SKIP] No LLM available at localhost:1234');
-        return;
-      }
-      const result = await runCLI([
-        '--mode', 'live-music',
-        '--prompt', 'ambient',
-        '--output', testOutputDir
-      ]);
-      expect(result.exitCode).toBe(0);
-      expect(result.stdout).toMatch(/strudel|hydra|\.js|\.tidal/);
-      const files = await fs.readdir(testOutputDir);
-      expect(files.length).toBeGreaterThan(0);
-      const hasMusic = files.some(f => /strudel\.(js|tidal)/i.test(f) || f === 'strudel.js');
-      const hasVisual = files.some(f => /hydra\.js/i.test(f));
-      expect(hasMusic || hasVisual).toBe(true);
-    }, 45000);
+    test('--mode live-music --prompt "ambient" --output <dir> produces files in output dir (fake endpoint)', async () => {
+      const strudel = 's("bd sd").slow(2)';
+      const fake = await startFakeProvider({ generate: () => strudel, judge: () => goodJudgeReply(0.8) });
+      const work = await fs.mkdtemp(path.join(os.tmpdir(), 'cli-lmstudio-'));
+      try {
+        const env = fakeProviderEnv(fake, { home: path.join(work, 'home'), stateRoot: path.join(work, 'state') });
+        const result = await runSinterAsync(['--mode', 'live-music', '--prompt', 'ambient', '--output', testOutputDir], env);
+        if (result.status !== 0) console.log('[DEBUG]', result.out.slice(-1500));
+        expect(result.status).toBe(0);
+        expect(fake.generated.length).toBeGreaterThan(0);
+        expect(result.out).toMatch(/strudel|hydra|\.js|\.tidal/);
+        const files = await fs.readdir(testOutputDir);
+        expect(files.length).toBeGreaterThan(0);
+        expect(files.some(f => /strudel\.(js|tidal)/i.test(f) || /hydra\.js/i.test(f))).toBe(true);
+      } finally { await fake.close(); await fs.rm(work, { recursive: true, force: true }); }
+    }, 300000);
   });
 });
 

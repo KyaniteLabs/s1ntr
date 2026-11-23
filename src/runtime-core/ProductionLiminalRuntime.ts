@@ -41,6 +41,7 @@ import { LiminalProductCommandPort, FileLiminalProductCommandStore,
 import { bootstrapProductionLiminalOwnerReviewAuthority }
   from './LiminalOwnerReviewAuthority.js';
 import { FileGenerationCheckpointStore } from './GenerationCheckpoints.js';
+import { JUDGE_REASONING_LEVELS, JUDGE_STRICTNESS_LEVELS, type JudgeReasoning, type JudgeStrictness, type TwoStageOptions } from '../core/TwoStageJudge.js';
 import { createLiminalProductionEffects,
   isLiminalProductionDomain, type LiminalProductionDomain,
   type LiminalRendererPort } from './LiminalProductionEffects.js';
@@ -79,6 +80,10 @@ export interface ProductionDreamRuntimeOptions {
     readonly holdout: { readonly custodyId: string; readonly bytes: string;
       readonly selectorDigest: string; readonly custodianDigest: string;
       readonly protocol: DreamTransferCommitmentProtocol };
+    /** Further precommitted holdouts. With any, each study is assigned its own holdout and activation needs distinct ones (F02). */
+    readonly extraHoldouts?: readonly { readonly custodyId: string; readonly bytes: string;
+      readonly selectorDigest: string; readonly custodianDigest: string;
+      readonly protocol: DreamTransferCommitmentProtocol }[];
     readonly producer: DreamTransferProducer;
     readonly observer: DreamRenderedObserver;
     readonly evaluators: readonly [DreamTransferEvaluator, DreamTransferEvaluator];
@@ -96,6 +101,8 @@ function dreamAuthorityBody(options: ProductionDreamRuntimeOptions) {
     executorIdentityDigest: options.executorIdentityDigest,
     transfer: options.transfer ? { holdout: { ...options.transfer.holdout,
       bytesDigest: sha256(options.transfer.holdout.bytes), bytes: undefined },
+    ...(options.transfer.extraHoldouts?.length ? { extraHoldouts: options.transfer.extraHoldouts.map(item => ({
+      ...item, bytesDigest: sha256(item.bytes), bytes: undefined })) } : {}),
     producerIdentityDigest: options.transfer.producerIdentityDigest,
     observerIdentityDigest: options.transfer.observerIdentityDigest,
     rendererIdentityDigest: options.transfer.rendererIdentityDigest,
@@ -138,6 +145,8 @@ export interface ProductionLiminalRuntimeOptions {
   /** Artifact custody may be separate from the journal and product-store root. */
   readonly artifactRoot?: string;
   readonly generator?: LLMClient;
+  readonly stableLibraryPrompt?: boolean;
+  readonly disableGenerationCheckpoints?: boolean;
   readonly evaluator?: LLMClient;
   readonly renderer?: LiminalRendererPort;
   readonly rendererIdentity?: string;
@@ -152,7 +161,16 @@ export interface ProductionLiminalRuntimeOptions {
   /** Exact test seam; production resolves both refs from the live repository. */
   readonly sourceRefs?: { readonly sourceHeadSha: string; readonly canonicalMainSha: string };
   readonly repoRoot?: string;
+  /** Shared home of activated-knowledge.json; defaults to SINTER_LIMINAL_KNOWLEDGE_ROOT, then `root`. */
+  readonly knowledgeRoot?: string;
   readonly dream?: ProductionDreamRuntimeOptions;
+}
+
+export function resolveKnowledgeRoot(options: { readonly knowledgeRoot?: string },
+  env: Readonly<Record<string, string | undefined>>, root: string): string {
+  const knowledgeRoot = options.knowledgeRoot ?? env.SINTER_LIMINAL_KNOWLEDGE_ROOT ?? root;
+  if (!path.isAbsolute(knowledgeRoot)) throw new Error('LIMINAL_KNOWLEDGE_ROOT_NOT_ABSOLUTE');
+  return knowledgeRoot;
 }
 
 export interface ProductionLiminalCreateInput {
@@ -165,6 +183,9 @@ export interface ProductionLiminalCreateInput {
   readonly teaching?: LiminalCreativeCommand['teaching'];
   /** Nonce that starts a new operation after an UNKNOWN effect outcome (#1323). */
   readonly retryUnknownOutcome?: string;
+  /** Stable identity of one sampling attempt (seat, prompt, repetition). Two attempts at the same prompt get distinct Create keys;
+   *  the same attempt stays idempotent (audit F03). Never a retry nonce. */
+  readonly attemptId?: string;
 }
 
 export interface ProductionLiminalRuntime {
@@ -201,9 +222,14 @@ function identity(client: LLMClient): string {
   return `${config.provider ?? 'configured'}/${config.model}`;
 }
 
+/** Shared state root that `sinter dream *` uses when no root is given. */
+export function defaultSharedRuntimeRoot(): string {
+  return path.join(os.homedir(), '.sinter', 'liminal-runtime');
+}
+
 function runtimeRoot(value?: string): string {
   const root = value ?? process.env.SINTER_LIMINAL_RUNTIME_ROOT
-    ?? path.join(os.homedir(), '.sinter', 'liminal-runtime');
+    ?? defaultSharedRuntimeRoot();
   if (!path.isAbsolute(root)) throw new Error('LIMINAL_RUNTIME_ROOT_NOT_ABSOLUTE');
   return root;
 }
@@ -288,8 +314,15 @@ export function resolveProductionSourceRefs(
   return Object.freeze(refs as ProductionSourceRefs);
 }
 
-function commandFactory(sourceRefs: ProductionLiminalRuntime['sourceRefs'],
-  identities: ProductionLiminalRuntime['identities']) {
+export const MIN_STAGED_CREATE_PROVIDER_CALLS = 4;
+
+export function twoStageJudgeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return /^(1|true|on)$/i.test(env.SINTER_TWO_STAGE_JUDGE ?? '');
+}
+
+export function commandFactory(sourceRefs: ProductionLiminalRuntime['sourceRefs'],
+  identities: ProductionLiminalRuntime['identities'],
+  stagedJudge?: { readonly reasoning: JudgeReasoning; readonly strictness: JudgeStrictness }) {
   return (input: ProductionLiminalCreateInput): LiminalCreativeCommand => {
     if (!input.prompt.trim()) throw new Error('LIMINAL_PRODUCTION_PROMPT_REQUIRED');
     if (!isLiminalProductionDomain(input.domain)) {
@@ -301,7 +334,7 @@ function commandFactory(sourceRefs: ProductionLiminalRuntime['sourceRefs'],
       throw new Error('LIMINAL_PRODUCTION_LAYERS_REQUIRED');
     }
     const settings = Object.freeze({ prompt: input.prompt, domain, layers,
-      maxTransportAttempts: input.maxTransportAttempts ?? 2,
+      maxTransportAttempts: input.maxTransportAttempts ?? (stagedJudge ? MIN_STAGED_CREATE_PROVIDER_CALLS : 2),
       evalMode: input.evalMode ?? 'strict-browser',
       renderAuthorization: input.renderAuthorization ?? 'isolated-playwright',
       safeMode: 'governed-production' as const, teaching: input.teaching });
@@ -309,9 +342,16 @@ function commandFactory(sourceRefs: ProductionLiminalRuntime['sourceRefs'],
       || settings.maxTransportAttempts < 1) {
       throw new Error('LIMINAL_PRODUCTION_TRANSPORT_CAP_INVALID');
     }
-    const authorityPackageDigest = sha256(input.retryUnknownOutcome
-      ? { sourceRefs, identities, settings, retryUnknownOutcome: input.retryUnknownOutcome }
-      : { sourceRefs, identities, settings });
+    if (stagedJudge && settings.maxTransportAttempts < MIN_STAGED_CREATE_PROVIDER_CALLS) {
+      throw new Error(`LIMINAL_STAGED_TRANSPORT_CAP_TOO_LOW: staged Create requires at least ${MIN_STAGED_CREATE_PROVIDER_CALLS} provider calls`);
+    }
+    if (input.attemptId !== undefined && !input.attemptId.trim()) {
+      throw new Error('LIMINAL_PRODUCTION_ATTEMPT_ID_INVALID');
+    }
+    const authorityPackageDigest = sha256({ sourceRefs, identities, settings,
+      ...(stagedJudge ? { stagedJudge } : {}),
+      ...(input.retryUnknownOutcome ? { retryUnknownOutcome: input.retryUnknownOutcome } : {}),
+      ...(input.attemptId ? { attemptId: input.attemptId } : {}) });
     return Object.freeze({ schema: 'sinter.liminal-command', schemaVersion: 1,
       kind: 'generate-candidate',
       idempotencyKey: `production-create:${sourceRefs.sourceHeadSha}:${authorityPackageDigest}`,
@@ -348,8 +388,24 @@ export function spineExplicitClient(role: 'generator' | 'evaluator'): LLMClient 
   if (!resolved) return new LLMClient({ role });
   const { provider, baseUrl, apiKey, model, timeout, maxTokens,
     temperature, thinking, glmCodingPlanSeat } = resolved;
-  return new LLMClient({ role, provider, baseUrl, apiKey, model, timeout,
+  return new LLMClient({ role, provider, baseUrl, apiKey: apiKey ?? '', model, timeout,
     maxTokens, temperature, thinking, glmCodingPlanSeat });
+}
+
+/**
+ * Sol L3-10: the staged judge (#1731: code audit + visual-bugs + aesthetics) is wired into Create behind
+ * SINTER_TWO_STAGE_JUDGE=1. It is a flag, not the default, because it changes spend (3 judge requests per take
+ * instead of 1) and the receipt shape. The auditor runs on the evaluator seat (text only); reasoning and strictness
+ * come from SINTER_JUDGE_REASONING (medium|high|xhigh, default high) and SINTER_JUDGE_STRICTNESS (default standard).
+ * A bad value is an error, never a silent default.
+ */
+export function twoStageJudgeFromEnv(evaluator: LLMClient, env: NodeJS.ProcessEnv = process.env): TwoStageOptions | undefined {
+  if (!twoStageJudgeEnabled(env)) return undefined;
+  const reasoning = (env.SINTER_JUDGE_REASONING ?? 'high') as JudgeReasoning;
+  const strictness = (env.SINTER_JUDGE_STRICTNESS ?? 'standard') as JudgeStrictness;
+  if (!JUDGE_REASONING_LEVELS.includes(reasoning)) throw new Error(`SINTER_JUDGE_REASONING must be one of ${JUDGE_REASONING_LEVELS.join('|')}, got "${reasoning}"`);
+  if (!JUDGE_STRICTNESS_LEVELS.includes(strictness)) throw new Error(`SINTER_JUDGE_STRICTNESS must be one of ${JUDGE_STRICTNESS_LEVELS.join('|')}, got "${strictness}"`);
+  return { auditor: { client: evaluator, reasoning, strictness }, vision: { client: evaluator, reasoning, strictness } };
 }
 
 export async function createProductionLiminalRuntime(
@@ -363,6 +419,9 @@ export async function createProductionLiminalRuntime(
   
 const generator = options.generator ?? spineExplicitClient('generator');
   const evaluator = options.evaluator ?? spineExplicitClient('evaluator');
+  const twoStageJudge = twoStageJudgeFromEnv(evaluator);
+  const stagedJudgeProfile = twoStageJudge
+    ? { reasoning: twoStageJudge.vision.reasoning, strictness: twoStageJudge.vision.strictness } : undefined;
   const renderer = options.renderer ?? HeadlessRenderer.getInstance();
   const identities = Object.freeze({ generator: identity(generator),
     evaluator: identity(evaluator),
@@ -370,8 +429,10 @@ const generator = options.generator ?? spineExplicitClient('generator');
     studio: options.studioIdentity ?? identity(new LLMClient({ role: 'studio' })),
     renderer: options.rendererIdentity ?? 'headless-renderer/playwright' });
   const sourceRefs = resolveProductionSourceRefs(options);
+  // Per-run state stays in `root`; learned knowledge outlives runs, so it may live in one shared root.
+  const knowledgeRoot = resolveKnowledgeRoot(options, process.env, root);
   const activatedKnowledge = new FileActivatedKnowledgeStore(
-    path.join(root, 'activated-knowledge.json'));
+    path.join(knowledgeRoot, 'activated-knowledge.json'));
   const doctrine = options.doctrineStore ?? new AuthoredCreativeDoctrineStore();
   const authorityKey = path.join(os.homedir(), '.sinter', 'authority',
     'liminal-command-receipt.key');
@@ -387,9 +448,10 @@ const generator = options.generator ?? spineExplicitClient('generator');
   const artGenerationSeconds = Number(process.env.SINTER_ART_GENERATION_WALL_SECONDS);
   const createAuthority = new LiminalCommandService({
     effects: createLiminalProductionEffects({ generator, evaluator, renderer,
+      stableLibraryPrompt: options.stableLibraryPrompt, twoStageJudge,
       generatorIdentity: identities.generator, evaluatorIdentity: identities.evaluator,
       rendererIdentity: identities.renderer,
-      checkpoints: new FileGenerationCheckpointStore(path.join(root, 'generation-checkpoints')),
+      ...(options.disableGenerationCheckpoints ? {} : { checkpoints: new FileGenerationCheckpointStore(path.join(root, 'generation-checkpoints')) }),
       ...(Number.isSafeInteger(artGenerationSeconds) && artGenerationSeconds > 0
         ? { generationWallMs: artGenerationSeconds * 1000 } : {}) }),
     artifacts: new FileLiminalArtifactStore(path.join(artifactRoot, 'artifacts')),
@@ -416,18 +478,32 @@ const generator = options.generator ?? spineExplicitClient('generator');
       decisions.resolver);
     const dreamStore = new FileDreamProductProjectionStore(
       path.join(root, 'dream-projections.json'));
+    const transferKeys = options.dream.transfer
+      ? resolveProductionDreamKeys(knowledgeSigningKey, options.dream.transfer.hostKey) : undefined;
+    const holdoutVault = transferKeys
+      ? new FileDreamHoldoutVault(path.join(root, 'dream-holdouts.json'), transferKeys.holdoutEncryptionKey)
+      : undefined;
+    // Precommit the whole pool before any plan exists: each study then reserves its own holdout (F02).
+    const precommitted = holdoutVault && options.dream.transfer
+      ? [options.dream.transfer.holdout, ...(options.dream.transfer.extraHoldouts ?? [])]
+        .map(item => holdoutVault.precommit(item.custodyId, item.bytes, item))
+      : [];
+    const pooled = precommitted.length > 1;
     dream = new DreamProductCommandPort(port,
       new DreamResearchController(new FileDreamResearchPolicyStore(
         path.join(root, 'dream-policies', `${sha256(options.dream.template.campaignId)}.json`))),
       service, options.dream.executor(decisions.issuer, dreamRenderedEvidence), dreamStore,
-      options.dream.budget, options.dream.template);
+      options.dream.budget, options.dream.template,
+      pooled ? (aggregateId => holdoutVault!.assign(aggregateId).commitment.commitmentDigest) : undefined,
+      async (createKey, artifactDigest) => {
+        // A missing or unverifiable parent can contribute its signed criterion only.
+        try { return (await port.verifiedArtifact(createKey, artifactDigest)).source; }
+        catch { return null; }
+      });
     if (options.dream.transfer) {
-      const keys = resolveProductionDreamKeys(knowledgeSigningKey,
-        options.dream.transfer.hostKey);
-      const hostKey = keys.holdoutEncryptionKey;
-      const vault = new FileDreamHoldoutVault(path.join(root, 'dream-holdouts.json'), hostKey);
-      const holdout = vault.precommit(options.dream.transfer.holdout.custodyId,
-        options.dream.transfer.holdout.bytes, options.dream.transfer.holdout);
+      const keys = transferKeys!;
+      const vault = holdoutVault!;
+      const holdout = precommitted[0]!;
       if (holdout.commitment.commitmentDigest
         !== options.dream.template.context.transferCommitmentDigest) {
         throw new Error('DREAM_RUNTIME_HOLDOUT_PRECOMMIT_MISMATCH');
@@ -441,7 +517,8 @@ const generator = options.generator ?? spineExplicitClient('generator');
           maxTransportAttempts: 1, effect: input.effect,
         }));
       dreamTransfer = new DreamTransferCommandPort(dreamStore, service, runner,
-        { holdout, producer: options.dream.transfer.producer,
+        { holdout: pooled ? (aggregateId: string) => vault.assign(aggregateId) : holdout,
+          producer: options.dream.transfer.producer,
           producerIdentityDigest: options.dream.transfer.producerIdentityDigest,
           observer: options.dream.transfer.observer,
           evaluators: options.dream.transfer.evaluators },
@@ -464,7 +541,7 @@ const generator = options.generator ?? spineExplicitClient('generator');
     sourceRefs, ...(dream ? { dream } : {}), ...(dreamTransfer ? { dreamTransfer } : {}),
     ...(dreamActivation ? { dreamActivation } : {}),
     ...(compoundCreate ? { compoundCreate } : {}),
-    createCommand: commandFactory(sourceRefs, identities),
+    createCommand: commandFactory(sourceRefs, identities, stagedJudgeProfile),
     close: async () => { dreamJournal?.close(); await renderer.close(); } });
 }
 
@@ -480,6 +557,18 @@ async function builtInDreamOptions(input: { generator: LLMClient; evaluator: LLM
   }
   const holdoutBytes = await readFile(holdoutFile, 'utf8');
   if (!holdoutBytes.trim()) throw new Error('DREAM_PRODUCTION_HOLDOUT_EMPTY');
+  // Activation needs two independent studies, so a second precommitted holdout is required for a complete Dream cycle (F02).
+  const extraFiles = (process.env.SINTER_DREAM_HOLDOUT_FILES ?? '').split(path.delimiter).filter(Boolean);
+  const extraBytes: string[] = [];
+  for (const file of extraFiles) {
+    if (!path.isAbsolute(file)) throw new Error('DREAM_PRODUCTION_CONFIG_REQUIRED');
+    const bytes = await readFile(file, 'utf8');
+    if (!bytes.trim()) throw new Error('DREAM_PRODUCTION_HOLDOUT_EMPTY');
+    extraBytes.push(bytes);
+  }
+  if (new Set([holdoutBytes, ...extraBytes]).size !== extraBytes.length + 1) {
+    throw new Error('DREAM_PRODUCTION_HOLDOUT_DUPLICATE');
+  }
   const maxProviderAttempts = resolveProductionDreamProviderAttemptBudget(
     process.env.SINTER_DREAM_MAX_PROVIDER_ATTEMPTS);
   const campaignId = process.env.SINTER_DREAM_CAMPAIGN_ID ?? 'production-dream';
@@ -506,13 +595,17 @@ async function builtInDreamOptions(input: { generator: LLMClient; evaluator: LLM
     observer: observerProxy, leaseAuthority });
   const findingDigest = sha256({ declaration: declaration.declarationDigest,
     policy: policy.policyDigest });
-  const transferContext = sha256({ campaignId, holdout: sha256(holdoutBytes) });
-  const protocol = { originContextDigest: sha256({ campaignId, origin: true }),
-    controlContextDigest: transferContext, treatmentContextDigest: transferContext,
-    findingDigest, controlFindingDigest: null, treatmentFindingDigest: findingDigest };
-  const holdout = { custodyId: `production:${sha256(holdoutBytes).slice(0, 24)}`,
-    bytes: holdoutBytes, selectorDigest: sha256({ campaignId, selector: 'sealed-v1' }),
-    custodianDigest: sha256({ host: input.identities.harness }), protocol };
+  const holdoutSpec = (bytes: string) => {
+    const transferContext = sha256({ campaignId, holdout: sha256(bytes) });
+    return { custodyId: `production:${sha256(bytes).slice(0, 24)}`,
+      bytes, selectorDigest: sha256({ campaignId, selector: 'sealed-v1' }),
+      custodianDigest: sha256({ host: input.identities.harness }),
+      protocol: { originContextDigest: sha256({ campaignId, origin: true }),
+        controlContextDigest: transferContext, treatmentContextDigest: transferContext,
+        findingDigest, controlFindingDigest: null, treatmentFindingDigest: findingDigest } };
+  };
+  const holdout = holdoutSpec(holdoutBytes);
+  const extraHoldouts = extraBytes.map(holdoutSpec);
   const transferCommitmentDigest = new DreamHoldoutVault().seal(holdoutBytes, holdout)
     .commitment.commitmentDigest;
   const activationPolicy = sealDreamActivationPolicy({
@@ -563,7 +656,7 @@ async function builtInDreamOptions(input: { generator: LLMClient; evaluator: LLM
     generator: dreamClientIdentity(input.generator) }),
   observerIdentityDigest: sha256({ adapter: HeadlessDreamObserver.name,
     rendererEnvironmentDigest }), rendererIdentityDigest: rendererEnvironmentDigest!,
-  holdout, producer, observer: observerProxy, evaluators, activationPolicy,
+  holdout, ...(extraHoldouts.length ? { extraHoldouts } : {}), producer, observer: observerProxy, evaluators, activationPolicy,
   compound: { policy: compoundPolicy, judges } } });
 }
 

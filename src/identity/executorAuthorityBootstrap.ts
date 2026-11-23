@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { canonicalCliSeatUrl, parseHermesSeat } from './cliSeatUrl.js';
+import { canonicalCliSeatUrl, isAgyGeminiModel, parseHermesSeat } from './cliSeatUrl.js';
 import {
   chmodSync,
   existsSync,
@@ -103,11 +103,16 @@ export function classifyProviderSurface(
       return 'claude-cli-seat';
     }
     // Hermes runs with its fallback chain off (--ignore-user-config), so the
-    // named model is the one that answers. Funding stays metered: the seat
-    // fronts API keys, so it needs the same receipt + ceiling as any API call.
-    if (provider === 'cli' && parseHermesSeat(baseUrl)) return 'hermes-cli-seat';
+    // named model is the one that answers. The openai-codex provider is the
+    // flat-rate ChatGPT/Codex subscription login, so it is a subscription seat.
+    // Every other Hermes provider (openai-api included) fronts API keys: funding
+    // stays metered and needs the same receipt + ceiling as any API call.
+    if (provider === 'cli') {
+      const hermes = parseHermesSeat(baseUrl);
+      if (hermes) return hermes.provider === 'openai-codex' ? 'hermes-codex-seat' : 'hermes-cli-seat';
+    }
     if (provider === 'cli' && cliSeatUrl === 'cli://agy'
-      && options?.model === 'gemini-3.7-flash-medium') return 'agy-cli-seat';
+      && isAgyGeminiModel(options?.model)) return 'agy-cli-seat';
     if (provider === 'cli' && cliSeatUrl === 'cli://command-code'
       && options?.model === 'deepseek/deepseek-v4-pro') return 'command-code-cli-seat';
     hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
@@ -173,7 +178,7 @@ export function classifyProviderSurface(
 }
 
 const ADAPTERS: readonly HostAdapterDescriptor[] = [
-  ['cliproxy-seat', true], ['kimi-cliproxy', true], ['codex-cli-seat', true], ['claude-cli-seat', true], ['agy-cli-seat', true], ['command-code-cli-seat', true], ['grok-cli-seat', true], ['hermes-cli-seat', true], ['kilo-gateway-entitlement', true],
+  ['cliproxy-seat', true], ['kimi-cliproxy', true], ['codex-cli-seat', true], ['claude-cli-seat', true], ['agy-cli-seat', true], ['command-code-cli-seat', true], ['grok-cli-seat', true], ['hermes-cli-seat', true], ['hermes-codex-seat', true], ['kilo-gateway-entitlement', true],
   ['openai-direct', true], ['anthropic-direct', true], ['google-direct', true],
   ['glm-direct', true], ['glm-coding-plan-seat', true], ['minimax-token-plan-seat', true], ['minimax-direct', true],
   ['moonshot-direct', true],
@@ -268,6 +273,45 @@ function loadOrCreateKey(rootDir: string, requireExisting: boolean): HostTrustKe
   return { keyId: parsed.keyId, secret };
 }
 
+/**
+ * A Hermes openai-codex seat is subscription funded only while the Hermes login
+ * is a live ChatGPT subscription login. The URL alone proves nothing: an
+ * API-key login or a lapsed subscription behind the same URL would spend
+ * metered credit. Read Hermes's own auth store each attempt; fail closed.
+ */
+function assertHermesCodexSubscription(env: NodeJS.ProcessEnv, now: Date): void {
+  const home = env.HERMES_HOME?.trim() || join(homedir(), '.hermes');
+  let entry: { auth_mode?: unknown; last_refresh?: unknown; tokens?: Record<string, unknown> } | undefined;
+  try {
+    const store = JSON.parse(readFileSync(join(home, 'auth.json'), 'utf8')) as
+      { providers?: Record<string, typeof entry> };
+    entry = store.providers?.['openai-codex'];
+  } catch {
+    throw new ExecutorAuthorityUnavailableError('hermes-codex-seat needs a readable Hermes login (auth.json)');
+  }
+  const tokens = entry?.tokens;
+  if (entry?.auth_mode !== 'chatgpt' || typeof tokens?.refresh_token !== 'string' || !tokens.refresh_token
+    || typeof tokens.access_token !== 'string' || !tokens.access_token) {
+    throw new ExecutorAuthorityUnavailableError(
+      'hermes-codex-seat is not a ChatGPT subscription login (refusing API-key or incomplete login)');
+  }
+  // Only the access token is kept fresh; the id_token is stale by design.
+  let claims: { exp?: unknown; 'https://api.openai.com/auth'?: { chatgpt_plan_type?: unknown } } = {};
+  try {
+    claims = JSON.parse(Buffer.from(String(tokens.access_token).split('.')[1] ?? '', 'base64url').toString('utf8'));
+  } catch { /* unreadable token carries no plan claim */ }
+  const plan = claims['https://api.openai.com/auth']?.chatgpt_plan_type;
+  if (typeof plan !== 'string' || !plan) {
+    throw new ExecutorAuthorityUnavailableError('hermes-codex-seat token has no ChatGPT plan claim');
+  }
+  // An expired access token is normal between refreshes; a long-stale refresh is a dead login.
+  const lastRefresh = Date.parse(String(entry.last_refresh ?? ''));
+  const exp = typeof claims.exp === 'number' ? claims.exp * 1000 : NaN;
+  if (!(exp > now.getTime()) && !(now.getTime() - lastRefresh < 30 * 86_400_000)) {
+    throw new ExecutorAuthorityUnavailableError('hermes-codex-seat login has lapsed (refresh it with hermes login)');
+  }
+}
+
 function exhaustionFor(reason?: string): ExhaustionClass | undefined {
   if (!reason) return undefined;
   if (/quota|billing cycle|usage limit/i.test(reason)) return 'subscription-quota-exhausted';
@@ -275,6 +319,29 @@ function exhaustionFor(reason?: string): ExhaustionClass | undefined {
   if (/auth|credential|401|403/i.test(reason)) return 'seat-unavailable';
   if (/spend|budget|ceiling/i.test(reason)) return 'metered-spend-exhausted';
   return 'capacity-unknown';
+}
+
+/**
+ * An unknown-surface ledger record must show up in the event ledger, not only on stderr,
+ * so a surface this build no longer knows cannot hide. Best effort and bounded:
+ * the surface is hashed (the raw name is host-controlled text) and telemetry
+ * never breaks bootstrap (#1783).
+ */
+function recordUnknownSurface(file: string, attestation: ExecutorAttestation): void {
+  void import('../telemetry/EventLedger.js')
+    .then(({ recordEvent }) => recordEvent({
+      event: 'identity.ledgerRecordUnknownSurface',
+      model: null, provider: null, role: null, runId: null, episodeId: null, domain: null,
+      inputHash: null, verdict: 'warning', latencyMs: null, costUsd: null, evidenceRefs: [],
+      payload: {
+        reason: 'unknown-surface',
+        file,
+        attestationId: attestation.subject.attestationId,
+        surfaceSha256: sha256Hex(String(attestation.subject.surface)),
+        issuedAt: attestation.subject.issuedAt,
+      },
+    }))
+    .catch(() => { /* telemetry must never break bootstrap */ });
 }
 
 /** Load the protected host key and durable replay/attempt ledgers. */
@@ -292,6 +359,7 @@ export function bootstrapExecutorAuthority(options: BootstrapOptions = {}): Harn
   // on-disk file and recheck its nonce on each read. A changed or torn file
   // never inherits a prior verification result.
   const verifiedHistory = new Map<string, { digest: string; record: ExecutorAttemptRecord }>();
+  const reportedSkips = new Set<string>();
   const readHistory = (): ExecutorAttemptRecord[] => readdirSync(attemptsDir)
     .filter(name => name.endsWith('.json'))
     .map(name => {
@@ -315,7 +383,21 @@ export function bootstrapExecutorAuthority(options: BootstrapOptions = {}): Harn
       }
       const verified = verifyExecutorAttestation(registry, attestation, attestation.subject.issuedAt,
         { historical: true });
-      if (!verified.ok) throw new ExecutorAuthorityUnavailableError(`attempt ledger verification failed: ${verified.reason}`);
+      const unknownSurface = !verified.ok && verified.reason === 'wrong-surface';
+      if (unknownSurface) {
+        // Reached only after the signature, key and expiry checks passed, so the
+        // record is authentic: a surface this build no longer knows. Only adapter
+        // resolution is skipped. The record stays in history so its quota counters,
+        // terminal reason and exhaustion class keep counting; a forged or foreign
+        // record still fails closed below (#1783).
+        // eslint-disable-next-line no-console -- intentional operator diagnostic for a stale record
+        console.warn(`[executor-authority] authentic attempt record of an unknown surface kept as history: ${name} (${verified.detail})`);
+        if (!reportedSkips.has(name)) {
+          reportedSkips.add(name);
+          recordUnknownSurface(name, attestation);
+        }
+      }
+      if (!verified.ok && !unknownSurface) throw new ExecutorAuthorityUnavailableError(`attempt ledger verification failed: ${verified.reason}`);
       const record = toExecutorAttemptRecord(attestation);
       verifiedHistory.set(name, { digest: sha256Hex(content), record });
       return record;
@@ -348,6 +430,9 @@ export function bootstrapExecutorAuthority(options: BootstrapOptions = {}): Harn
       return { seat, funding: rebound };
     }
     const seatDigest = context.seatDigest;
+    if (context.surface === 'hermes-codex-seat') {
+      assertHermesCodexSubscription(runtimeEnv, options.now?.() ?? new Date());
+    }
     const seat: SeatBinding = { seatId: `${context.surface}:${seatDigest.slice(0, 12)}`, seatDigest, surface: context.surface };
     if (context.surface === 'lmstudio-local' || context.surface === 'ollama-cloud'
       || context.surface === 'lan-gateway-litellm') {
@@ -355,7 +440,7 @@ export function bootstrapExecutorAuthority(options: BootstrapOptions = {}): Harn
     }
     if (context.surface === 'cliproxy-seat' || context.surface === 'kimi-cliproxy'
       || context.surface === 'codex-cli-seat' || context.surface === 'claude-cli-seat' || context.surface === 'agy-cli-seat' || context.surface === 'command-code-cli-seat' || context.surface === 'grok-cli-seat'
-      || context.surface === 'glm-coding-plan-seat' || context.surface === 'minimax-token-plan-seat'
+      || context.surface === 'hermes-codex-seat' || context.surface === 'glm-coding-plan-seat' || context.surface === 'minimax-token-plan-seat'
       || context.surface.startsWith('kilo-')) {
       return { seat, funding: subscriptionFunding({ seatDigest, quotaCounters,
         quotaSurface: context.surface === 'codex-cli-seat' ? 'codex-cli-seat'
@@ -363,6 +448,7 @@ export function bootstrapExecutorAuthority(options: BootstrapOptions = {}): Harn
           : context.surface === 'agy-cli-seat' ? 'agy-cli-seat'
           : context.surface === 'command-code-cli-seat' ? 'command-code-cli-seat'
           : context.surface === 'grok-cli-seat' ? 'grok-cli-seat'
+          : context.surface === 'hermes-codex-seat' ? 'hermes-codex-seat'
           : context.surface === 'glm-coding-plan-seat' ? 'glm-coding-plan-seat'
           : context.surface === 'minimax-token-plan-seat' ? 'minimax-token-plan-seat'
           : context.surface === 'cliproxy-seat' || context.surface === 'kimi-cliproxy'
@@ -373,7 +459,7 @@ export function bootstrapExecutorAuthority(options: BootstrapOptions = {}): Harn
     const receipt = runtimeEnv.SINTER_METERED_PRICE_RECEIPT_DIGEST
       ?? runtimeEnv.LIMINAL_METERED_PRICE_RECEIPT_DIGEST;
     if (!receipt || !Number.isFinite(ceiling) || ceiling <= 0) {
-      throw new ExecutorAuthorityUnavailableError(`metered funding evidence missing for ${context.surface}`);
+      throw new ExecutorAuthorityUnavailableError(`metered funding evidence missing for ${context.surface}: supply SINTER_METERED_APPROVED_USD_CEILING (a positive USD amount) and SINTER_METERED_PRICE_RECEIPT_DIGEST (the price receipt digest) to approve metered spend`);
     }
     return { seat, funding: meteredFunding({ meteredReceiptDigest: receipt, approvedUsdCeiling: ceiling, quotaCounters }) };
   };

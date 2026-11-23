@@ -706,7 +706,7 @@ function summarizeRecentActivity(events: WorkbenchBridgeEvent[]): Array<{ label:
           return { label: 'Preview ready', detail: String(event.reason || 'Preview ready without scoring'), status: 'ok' };
         }
         if (event.qualityState === 'degraded') {
-          return { label: 'Complete (degraded)', detail: 'degraded (no real score)', status: 'warning' };
+          return { label: 'Complete (unscored)', detail: 'unscored (judge could not score)', status: 'warning' };
         }
         return { label: 'Complete', detail: `Score ${event.finalScore ?? 'n/a'} in ${event.duration ?? 0}ms`, status: 'ok' };
       }

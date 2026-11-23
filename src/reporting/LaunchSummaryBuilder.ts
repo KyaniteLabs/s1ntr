@@ -7,6 +7,7 @@
 import type { GardenHealthMetrics } from '../autonomy/GardenHealthMonitor.js';
 import type { PolicyChangeRecord } from '../release/PolicyChangeManifest.js';
 import type { CreativeWeakness } from '../autonomy/CreativeWeaknessEmitter.js';
+import type { TasteEvidence } from './TasteEvidence.js';
 
 export interface LaunchReadiness {
   ready: boolean;
@@ -23,6 +24,7 @@ export class LaunchSummaryBuilder {
     health: GardenHealthMetrics,
     changes: PolicyChangeRecord[],
     weaknesses: CreativeWeakness[],
+    tasteEvidence?: TasteEvidence | null,
   ): LaunchReadiness {
     const checks: LaunchReadiness['checks'] = [];
     const blockers: string[] = [];
@@ -73,12 +75,14 @@ export class LaunchSummaryBuilder {
       detail: `${changes.length} changes, ${recentPromotions} promoted`,
     });
 
-    // 6. Taste alignment
+    // The project archive drives readiness. Wall reports are local measurements.
     const tasteOk = health.tasteAlignment >= 0.3;
     checks.push({
       name: 'Taste alignment',
       passed: tasteOk,
-      detail: `${(health.tasteAlignment * 100).toFixed(0)}% (min 30%)`,
+      detail: `${(health.tasteAlignment * 100).toFixed(0)}% of archive (min 30%)`
+        + (tasteEvidence ? `; wall AUC ${tasteEvidence.auc.toFixed(3)} on ${tasteEvidence.votes} votes (advisory)`
+          : '; no wall taste report found'),
     });
     if (!tasteOk) blockers.push('Taste alignment below threshold');
 

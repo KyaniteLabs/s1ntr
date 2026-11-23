@@ -100,6 +100,106 @@ export function extractFragmentSpec(prompt: string): SVGFragmentSpec | null {
 }
 
 /**
+ * Where a fragment-mode generation runs (#1162). `svg` is the only fragment
+ * medium today: an explicit svg domain runs there, the custom catch-all
+ * (formerly `meta`) and an undetected domain route to svg, and any other
+ * explicit domain is refused — p5 instance-mode and Three.js container
+ * fragments are separate issues.
+ */
+export interface FragmentDomainRoute {
+  readonly domain: 'svg';
+  /** Set when a non-svg domain choice was rerouted to svg instead of refused. */
+  readonly reroutedFrom?: 'custom' | 'undetected';
+  /** One human line explaining a reroute; empty when the domain was svg already. */
+  readonly notice: string;
+}
+
+export const FRAGMENT_DOMAIN_ERROR = '--output-mode fragment needs the svg domain. Add --domain svg.';
+
+export function routeFragmentDomain(domain: string | undefined):
+  { ok: true; route: FragmentDomainRoute } | { ok: false; error: string } {
+  if (domain === 'svg') return { ok: true, route: { domain: 'svg', notice: '' } };
+  if (domain === 'custom') {
+    return { ok: true, route: { domain: 'svg', reroutedFrom: 'custom',
+      notice: 'fragment output routes through the svg domain: custom (formerly meta) infers a medium, and svg is the only fragment medium today' } };
+  }
+  if (!domain) {
+    return { ok: true, route: { domain: 'svg', reroutedFrom: 'undetected',
+      notice: 'fragment output defaults to the svg domain: no domain was detected and svg is the only fragment medium today' } };
+  }
+  return { ok: false, error: FRAGMENT_DOMAIN_ERROR };
+}
+
+/** Sample placeholder colours for the host-page token scaffold. Hosts swap these for their palette. */
+const HOST_TOKEN_SAMPLES = ['#e5484d', '#3b5bdb', '#12b886', '#f59f00', '#9c36b5', '#e8590c', '#0b7285', '#343a40'] as const;
+
+/**
+ * Build the host-page proof (#1162): a paste-ready HTML page that declares the
+ * host tokens on :root (with visible, editable swatches) and embeds the accepted
+ * fragment inline. Opening it in a browser shows the fragment rendering with
+ * host colours; editing the token values re-themes it without touching the
+ * fragment. The page owns all motion and honours prefers-reduced-motion.
+ */
+export function buildHostProofPage(fragment: string, spec: SVGFragmentSpec): string {
+  const tokens = spec.tokens;
+  const tokenDecls = tokens.length
+    ? tokens.map((t, i) => `      --${t}: ${HOST_TOKEN_SAMPLES[i % HOST_TOKEN_SAMPLES.length]};`).join('\n')
+    : '      /* The fragment chose its own token names (or currentColor); declare them here. */';
+  const swatches = tokens.map((t) =>
+    `      <span class="token"><span class="swatch" style="background: var(--${t})"></span><code>--${t}</code></span>`)
+    .join('\n');
+  const container = spec.container
+    ? `.fragment-host { width: ${spec.container.width}px; height: ${spec.container.height}px; }`
+    : '.fragment-host { max-width: 640px; }';
+  const motionCss = spec.motion === 'none'
+    ? '    /* Motion: none — the fragment is static by request. */'
+    : spec.motion === 'hover'
+      ? `    /* Motion: hover — demo only. Bind real hover motion to the stable class names inside the fragment. */
+    @media (prefers-reduced-motion: no-preference) {
+      .fragment-host svg { transition: transform 240ms ease; }
+      .fragment-host:hover svg { transform: translateY(-2px); }
+    }`
+      : `    /* Motion: loop — demo only. Bind real looping motion to the stable class names inside the fragment. */
+    @media (prefers-reduced-motion: no-preference) {
+      @keyframes sinter-fragment-drift { from { transform: translateY(0); } to { transform: translateY(-2px); } }
+      .fragment-host svg { animation: sinter-fragment-drift 2.4s ease-in-out infinite alternate; }
+    }`;
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Host page proof — sinter svg fragment</title>
+  <style>
+    /* Host tokens: replace these sample values with your own palette. */
+    :root {
+${tokenDecls}
+    }
+    body { margin: 0; padding: 24px; font: 14px/1.5 system-ui, sans-serif; color: #1f2328; }
+    ${container}
+${motionCss}
+    .tokens { display: flex; gap: 12px; flex-wrap: wrap; margin: 0 0 16px; padding: 0; list-style: none; }
+    .swatch { display: inline-block; width: 14px; height: 14px; border-radius: 3px; border: 1px solid #d0d7de; vertical-align: -2px; margin-right: 6px; }
+    code { background: #f6f8fa; padding: 1px 5px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Host page proof</h1>
+    <p>A sinter svg fragment embedded below. Edit the token values in <code>:root</code> and the artwork re-themes — the fragment itself never changes.</p>
+    <ul class="tokens">
+${swatches || '      <li>No token list was given; the fragment picked its own names.</li>'}
+    </ul>
+    <div class="fragment-host">
+${fragment}
+</div>
+  </main>
+</body>
+</html>
+`;
+}
+
+/**
  * Validate a fragment. Stricter than the embed profile alone: wrappers and
  * scripts are rejected before salvage can quietly strip them, and colours must
  * come from the listed tokens.

@@ -42,15 +42,15 @@ export async function probeAudio(htmlPath: string): Promise<AudioProbeResult> {
     // PREPENDED (addInitScript does not run for setContent documents).
     const { readFileSync } = await import('node:fs');
     const { inlineVendorAssets } = await import('../utils/vendorAssets.js');
-    // The probe must reproduce the PRODUCTION page environment: the renderer's
-    // html-prepended init carries the strudel tempo/pattern shims and the
-    // Dirt-Samples bank preload that stored playables need to actually sound
-    // (PRs #1119/#1122/#1123). Without it the probe hears silence for pieces
-    // the real render plays.
+    // The probe must reproduce the PRODUCTION page environment the renderer
+    // builds: the shared music runtime (strudel tempo/pattern shims and the
+    // Dirt-Samples bank preload, #1732) followed by the audio-capture init.
+    // Without the runtime the probe hears silence for pieces the render plays.
     const { audioCapturePageInit } = await import('../render/HeadlessRenderer.js');
+    const { musicRuntimeScript } = await import('../core/wrappers/musicRuntime.js');
     const raw = readFileSync(htmlPath, 'utf8');
     const inlined = await inlineVendorAssets(raw);
-    const init = '<script>' + INIT_SCRIPT + '</script>'
+    const init = '<script>' + INIT_SCRIPT + '</script>' + musicRuntimeScript()
       + '<script>(' + audioCapturePageInit.toString() + ')();</script>';
     await page.setContent(init + inlined, { waitUntil: 'load', timeout: 20000 });
     // #926: poll for the play control instead of a flat 1500ms sleep — it

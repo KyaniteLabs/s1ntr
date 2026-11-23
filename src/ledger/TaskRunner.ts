@@ -18,6 +18,8 @@ export interface TaskRunnerOptions {
   signal?: AbortSignal;
 }
 
+export const DEFAULT_TASK_ITERATIONS = 3;
+
 export class TaskRunner {
   constructor(
     private ledger: TaskLedger,
@@ -30,7 +32,7 @@ export class TaskRunner {
     const startTime = Date.now();
 
     const result = await RalphLoop.run(prompt, {
-      maxIterations: options?.maxIterations ?? 3,
+      maxIterations: options?.maxIterations ?? DEFAULT_TASK_ITERATIONS,
       evaluationCriteria: task.scoringCriteria,
       signal: options?.signal,
     });

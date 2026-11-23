@@ -43,10 +43,8 @@ import {
 const staticGeneratorNames = [
   'shader',
   'three',
-  'revideo',
-  'hyperframes',
   'dataviz',
-  'meta',
+  'custom',
   'blender',
   'svg',
   'html',
@@ -290,7 +288,7 @@ describe('registerGenerators', () => {
       await registerAllGenerators();
 
       // Should register all static generators
-      expect(mockRegister).toHaveBeenCalledTimes(17);
+      expect(mockRegister).toHaveBeenCalledTimes(15);
       expect(mockRegister.mock.calls.map(([entry]) => entry.name)).toEqual(staticGeneratorNames);
     });
 
@@ -394,8 +392,6 @@ describe('registerGenerators', () => {
         'svg',
         'textgen',
         'kinetic',
-        'revideo',
-        'hyperframes',
       ]));
     });
   });

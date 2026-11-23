@@ -1,0 +1,9 @@
+## 01-mud-camo-real-frame.txt
+# organ: guardrails | step: mud-camo-real-frame | data: real
+$ npx tsx <repo>/scripts/learning/mud-camo-check.ts <reel>/f_14.png
+# cwd: <out>/_proj (repo: <repo>)
+# --- stdout
+{"path":"<reel>/f_14.png","lightP98":0.9935520142712811,"lightP02":0.110422698980134,"chromaP95":0.043159397064750755,"muddyHueShare":0.18318449064953554,"overmixed":false}
+# --- stderr
+# exit: 0
+

@@ -16,6 +16,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 import type { SinterFS } from '../fs/SinterFS.js';
+import { IllegalTaskTransitionError, canTransitionTask } from './types.js';
 import type {
   TaskManifest,
   TaskAttempt,
@@ -86,16 +87,31 @@ export class TaskLedger {
     return tasks;
   }
 
-  /** Update a task's status. Reads, mutates, and writes back. */
+  /**
+   * Move a task to a new status. This is the only status writer after
+   * createTask. Throws if the task does not exist, or
+   * {@link IllegalTaskTransitionError} if the move is not in
+   * TASK_STATUS_TRANSITIONS.
+   */
   updateTaskStatus(taskId: string, status: TaskStatus): void {
     const task = this.loadTask(taskId);
     if (!task) {
       throw new Error(`Task not found: ${taskId}`);
     }
+    this.applyStatus(task, status);
+    this.writeTask(task);
+  }
 
+  private applyStatus(task: TaskManifest, status: TaskStatus): void {
+    if (!canTransitionTask(task.status, status)) {
+      throw new IllegalTaskTransitionError(task.id, task.status, status);
+    }
     task.status = status;
     task.updatedAt = new Date().toISOString();
-    this.fs.writeManifest(`${TASK_PREFIX}/${taskId}/manifest`, task as unknown as Record<string, unknown>);
+  }
+
+  private writeTask(task: TaskManifest): void {
+    this.fs.writeManifest(`${TASK_PREFIX}/${task.id}/manifest`, task as unknown as Record<string, unknown>);
   }
 
   // ─── Attempt Recording ─────────────────────────────────────────
@@ -119,10 +135,8 @@ export class TaskLedger {
     if (task) {
       task.attemptCount += 1;
       task.updatedAt = new Date().toISOString();
-      if (task.status === 'pending') {
-        task.status = 'in-progress';
-      }
-      this.fs.writeManifest(`${TASK_PREFIX}/${attempt.taskId}/manifest`, task as unknown as Record<string, unknown>);
+      if (task.status === 'pending') this.applyStatus(task, 'in-progress');
+      this.writeTask(task);
     }
   }
 
@@ -213,6 +227,15 @@ export class TaskLedger {
 
   /** Record an acceptance or rejection decision. */
   recordDecision(decision: TaskDecision): void {
+    // Refuse an acceptance the task cannot take BEFORE writing the decision,
+    // so a refused move never leaves an orphan 'accepted' decision on disk.
+    if (decision.decision === 'accepted') {
+      const task = this.loadTask(decision.taskId);
+      if (task && !canTransitionTask(task.status, 'completed')) {
+        throw new IllegalTaskTransitionError(decision.taskId, task.status, 'completed');
+      }
+    }
+
     this.fs.writeManifest(
       `${TASK_PREFIX}/${decision.taskId}/decision/${decision.id}`,
       decision as unknown as Record<string, unknown>,

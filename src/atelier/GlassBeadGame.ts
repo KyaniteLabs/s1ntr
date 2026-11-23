@@ -123,11 +123,13 @@ export function indexBeads(cwd: string): { added: number; total: number; backfil
     for (const line of readFileSync(trendPath, 'utf8').split('\n')) {
       if (!line.trim()) continue;
       try {
-        const row = JSON.parse(line) as { domain?: string; axes?: string; artifact?: string };
+        const row = JSON.parse(line) as { domain?: string; axes?: string; artifact?: string; event_type?: string; score?: number };
         if (!row.artifact || !row.domain) continue;
         const m = /D=([\d.]+) A=([\d.]+) R=([\d.]+) N=([\d.]+)/.exec(row.axes ?? '');
-        if (!m) continue;
-        const mean = m.slice(1).map(Number).reduce((a, b) => a + b, 0) / 4;
+        // Governed generates (GovernedProjectRecord) carry one judged score on the 0..1 scale, no per-axis ensemble.
+        const governed = !m && row.event_type === 'governed_scored' && typeof row.score === 'number';
+        if (!m && !governed) continue;
+        const mean = m ? m.slice(1).map(Number).reduce((a, b) => a + b, 0) / 4 : (row.score as number) * 5;
         const id = basename(row.artifact);
         if (known.has(id)) continue;
         const sourcePath = join(row.artifact, 'source.txt');

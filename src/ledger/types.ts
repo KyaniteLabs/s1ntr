@@ -10,8 +10,55 @@ import type { SinterObjectRef } from '../fs/types.js';
 
 // ─── Enums & Status ────────────────────────────────────────────────
 
-/** Task status lifecycle */
-export type TaskStatus = 'pending' | 'in-progress' | 'completed' | 'failed' | 'skipped';
+/**
+ * Task status lifecycle (enforced by TaskLedger.updateTaskStatus — the only
+ * writer of `status` after createTask):
+ *
+ *   createTask ─► pending ──attempt──► in-progress
+ *                   │ │                  │  │
+ *                   │ └──────────────────┼──┴──► failed ──accept──► completed
+ *                   └──accept────────────┴─────────────────────────► completed
+ *                   pending | in-progress ──────────────────────────► skipped
+ *
+ * `completed` and `skipped` are terminal. A late manual accept may still
+ * promote a `failed` task to `completed`. Nothing in the codebase writes
+ * `skipped` today; it stays in the set so manifests carrying it still load.
+ */
+export const TASK_STATUSES = ['pending', 'in-progress', 'completed', 'failed', 'skipped'] as const;
+export type TaskStatus = (typeof TASK_STATUSES)[number];
+export const TASK_STATUS_TRANSITIONS: Readonly<Record<TaskStatus, readonly TaskStatus[]>> = {
+  pending: ['in-progress', 'completed', 'failed', 'skipped'],
+  'in-progress': ['completed', 'failed', 'skipped'],
+  failed: ['completed'],
+  completed: [],
+  skipped: [],
+};
+
+export function isTaskStatus(value: unknown): value is TaskStatus {
+  return typeof value === 'string' && (TASK_STATUSES as readonly string[]).includes(value);
+}
+
+/**
+ * Lenient read of a persisted status: a missing or unrecognised value (a
+ * hand-edited or older manifest) is treated as `pending` for transition
+ * purposes, matching the pre-state-machine behaviour where any move was
+ * allowed. The stored value itself is never rewritten until a legal move
+ * is applied.
+ */
+export function normalizeTaskStatus(value: unknown): TaskStatus {
+  return isTaskStatus(value) ? value : 'pending';
+}
+
+export function canTransitionTask(from: unknown, to: TaskStatus): boolean {
+  return TASK_STATUS_TRANSITIONS[normalizeTaskStatus(from)].includes(to);
+}
+
+export class IllegalTaskTransitionError extends Error {
+  constructor(readonly taskId: string, readonly from: unknown, readonly to: TaskStatus) {
+    super(`Illegal task transition for ${taskId}: ${String(from)} -> ${to}`);
+    this.name = 'IllegalTaskTransitionError';
+  }
+}
 
 /** Task class — determines difficulty, scope, and agent assignment */
 export type TaskClass = 'leaf' | 'wiring' | 'harness-quality' | 'orchestrator';

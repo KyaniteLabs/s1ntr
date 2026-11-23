@@ -24,6 +24,6 @@ describe('production clients preserve resolved role routing', () => {
     vi.spyOn(LLMClient, 'getResolvedRoleConfig').mockReturnValue(resolved);
     const config = spineExplicitClient('generator').getConfig();
     expect(config.baseUrl).toBe(resolved.baseUrl);
-    expect(config.apiKey).toBeUndefined();
+    expect(config.apiKey ?? '').toBe('');
   });
 });

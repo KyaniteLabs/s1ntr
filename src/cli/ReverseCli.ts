@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { ArcValidationError, parseArcJson, parseCuesJson, validateArc, type Arc, type ArcCue }
   from '../reverse/Arc.js';
-import { MAX_ARC_IMAGE_BYTES, deriveArcFromImage, type VisionClient } from '../reverse/ArcVision.js';
+import { MAX_ARC_IMAGE_BYTES, deriveArcFromImage, deriveArcFromImageBytes, type VisionClient } from '../reverse/ArcVision.js';
 import { analyzeSvg, curveToArcSections } from '../reverse/DocumentFeatures.js';
 import { LocalFileError, ingestReferences, readLocalFile } from '../reverse/ReferenceIngest.js';
 import { buildReverseBrief, deriveArcFromCards, scaleArc, type ReverseBrief, type ReverseProvenance }
@@ -95,13 +95,27 @@ export function formatArc(title: string, arc: Arc): string {
     ...(arc.ending ? [`  ending: ${arc.ending}`] : [])].join('\n');
 }
 
-export async function prepareReverse(input: PrepareReverseInput): Promise<PreparedReverse> {
+type ReadImageArc = (file: string, duration: number) => Promise<
+  Awaited<ReturnType<typeof deriveArcFromImageBytes>> & { imageSha256?: string }
+>;
+
+export function prepareReverse(input: PrepareReverseInput): Promise<PreparedReverse> {
+  return prepareReverseWithArc(input, (file, duration) => {
+    if (!input.visionClient) throw new Error(`REVERSE_VISION_CLIENT_MISSING: ${path.basename(file)}: no vision model is available to read the image`);
+    return deriveArcFromImage(file, duration, input.visionClient);
+  });
+}
+
+async function prepareReverseWithArc(input: PrepareReverseInput, readImageArc: ReadImageArc): Promise<PreparedReverse> {
   const { duration } = input;
   const cards = await ingestReferences(input.refs, { ffmpeg: input.ffmpeg });
   const notices: string[] = cards.map((c) => `Reference ${c.file} (${c.kind}) sha256 ${c.sha256.slice(0, 12)}`);
   let arc: Arc | null = null;
   let arcSource = 'none';
+  let arcImageSha256: string | undefined;
   let arcTitle = '';
+  const cuesName = input.cuesPath ? path.basename(input.cuesPath) : '';
+  const cues = input.cuesPath ? parseCuesJson(await readText(input.cuesPath, 'CUES'), cuesName) : undefined;
 
   if (input.arcPath) {
     const name = path.basename(input.arcPath);
@@ -127,15 +141,16 @@ export async function prepareReverse(input: PrepareReverseInput): Promise<Prepar
       arcTitle = `from diagram ${name}`;
     } else if (isImagePath(input.arcPath)) {
       if (duration === undefined) throw new Error(`REVERSE_DURATION_REQUIRED: ${name}: --duration is needed to read an image arc`);
-      if (!input.visionClient) throw new Error(`REVERSE_VISION_CLIENT_MISSING: ${name}: no vision model is available to read the image`);
-      const read = await deriveArcFromImage(input.arcPath, duration, input.visionClient);
+      checkCueRange(cues, cuesName, duration);
+      const read = await readImageArc(input.arcPath, duration);
+      arcImageSha256 = read.imageSha256;
       const s = read.sent;
       notices.push(`Arc image ${name} downscaled ${s.originalWidth}x${s.originalHeight} to ${s.width}x${s.height} `
         + `(${Math.ceil(s.bytes / 1024)} KB) before sending to the vision model. `
         + 'It is the only image sent; --ref media never leaves this machine.');
       arc = read.arc;
       if (Math.abs(arc.sections[arc.sections.length - 1].t_end - duration) > 1e-6) arc = scaleArc(arc, duration);
-      arcSource = read.source;
+      arcSource = `vision:${name}`;
       arcTitle = `read by vision from ${name}`;
     } else {
       throw new Error(`REVERSE_ARC_UNSUPPORTED: ${name}: --arc takes .json, .svg or an image (${[...IMAGE_EXTENSIONS].join(' ')})`);
@@ -149,22 +164,21 @@ export async function prepareReverse(input: PrepareReverseInput): Promise<Prepar
     }
   }
 
-  if (input.cuesPath) {
+  if (cues) {
     if (!arc) throw new Error('REVERSE_CUES_NEED_ARC: --cues needs an arc (pass --arc, or an audio/video --ref to derive one)');
-    const cuesName = path.basename(input.cuesPath);
-    const cues: readonly ArcCue[] = parseCuesJson(await readText(input.cuesPath, 'CUES'), cuesName);
-    const end = arc.sections[arc.sections.length - 1].t_end;
-    const late = cues.find((c) => c.t > end + 1e-6);
-    if (late) {
-      throw new Error(`REVERSE_CUES_OUT_OF_RANGE: ${cuesName}: cue ${late.kind} at ${secs(late.t)}s is after the arc ends at ${secs(end)}s`);
-    }
+    checkCueRange(cues, cuesName, arc.sections[arc.sections.length - 1].t_end);
     arc = { sections: arc.sections, cues: [...arc.cues, ...cues], ...(arc.ending ? { ending: arc.ending } : {}) };
     arcTitle += ` + cues from ${cuesName}`;
   }
   if (arc) notices.push(formatArc(arcTitle, arc));
 
-  const brief = buildReverseBrief({ cards, arc, arcSource, durationSec: duration ?? null });
+  const brief = buildReverseBrief({ cards, arc, arcSource, arcImageSha256, durationSec: duration ?? null });
   return { brief, notices };
+}
+
+function checkCueRange(cues: readonly ArcCue[] | undefined, name: string, end: number): void {
+  const late = cues?.find(cue => cue.t > end + 1e-6);
+  if (late) throw new Error(`REVERSE_CUES_OUT_OF_RANGE: ${name}: cue ${late.kind} at ${secs(late.t)}s is after the arc ends at ${secs(end)}s`);
 }
 
 /**
@@ -172,22 +186,31 @@ export async function prepareReverse(input: PrepareReverseInput): Promise<Prepar
  * generator-role provider grant (same authority path compose uses). Everything
  * else needs no provider and runs directly.
  */
-export async function prepareReverseGoverned(input: ReverseFlags, outputRoot: string): Promise<PreparedReverse> {
-  if (!input.arcPath || !isImagePath(input.arcPath)) return prepareReverse(input);
-  const arcPath = input.arcPath;
-  const image = await readLocalFile(arcPath, MAX_ARC_IMAGE_BYTES).catch((e: Error) => {
-    throw new Error(`REVERSE_ARC_UNREADABLE: ${path.basename(arcPath)}: ${e.message}`);
-  });
-  const digest = createHash('sha256').update(image)
-    .update(String(input.duration ?? '')).digest('hex');
-  // Loaded lazily: the provider stack is only needed when an image arc is read.
-  const { runProductionCliProviderEffect } = await import('./LiminalProductionProviderEffect.js');
-  const { LLMClient } = await import('../llm/LLMClient.js');
-  return runProductionCliProviderEffect({
-    idempotencyKey: `reverse-arc:${digest}`,
-    binding: { surface: 'cli-reverse-arc', imageSha256: digest },
-    outputRoot,
-    effect: () => prepareReverse({ ...input, visionClient: new LLMClient({ role: 'generator' }) }),
+export async function prepareReverseGoverned(
+  input: ReverseFlags,
+  outputRoot: string,
+  { replayImageArcOnly = false } = {},
+): Promise<PreparedReverse> {
+  return prepareReverseWithArc(input, async (arcPath, duration) => {
+    const file = path.basename(arcPath);
+    const image = await readLocalFile(arcPath, MAX_ARC_IMAGE_BYTES).catch((e: Error) => {
+      throw new Error(`REVERSE_ARC_UNREADABLE: ${file}: ${e.message}`);
+    });
+    const imageSha256 = createHash('sha256').update(image).digest('hex');
+    // Replay just the vision reading. References and cues are validated on every invocation.
+    const { runProductionCliProviderEffect } = await import('./LiminalProductionProviderEffect.js');
+    const { LLMClient } = await import('../llm/LLMClient.js');
+    const read = await runProductionCliProviderEffect({
+      idempotencyKey: `reverse-arc-read:${imageSha256}:${duration}`,
+      binding: { surface: 'cli-reverse-arc', imageSha256, duration },
+      outputRoot,
+      maxGeneratorAttempts: 1,
+      effect: () => {
+        if (replayImageArcOnly) throw new Error('LOOPS_RESUME_IMAGE_ARC_MISMATCH: use the saved image and duration or choose a fresh output folder');
+        return deriveArcFromImageBytes(image, file, duration, new LLMClient({ role: 'generator' }));
+      },
+    });
+    return { ...read, imageSha256 };
   });
 }
 

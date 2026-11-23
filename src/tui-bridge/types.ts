@@ -27,6 +27,8 @@ export interface TuiPendingAction {
   kind: 'structured' | 'llm';
   requiresConfirmation: true;
   createdAt: string;
+  /** Structured creative input held for review and passed unchanged on confirmation (Sol G12). */
+  creativeOptions?: { creativePreferences?: Record<string, unknown>; guidanceAnswers?: Record<string, unknown> };
 }
 
 export type TuiRunPhase =
@@ -140,6 +142,8 @@ export interface TuiInputRequest {
   clientIntent?: 'chat' | 'inspect' | 'action' | 'creative';
   executionMode?: 'draft' | 'prove';
   maxIterations?: number;
+  /** Governed improvement loops for a creative request (1-12): loop k+1 edits loop k with its code and judge critique. */
+  loops?: number;
   candidateCount?: number;
   /** Minimum evaluator quality score the iterating loop holds out for (0..1). */
   minQualityScore?: number;

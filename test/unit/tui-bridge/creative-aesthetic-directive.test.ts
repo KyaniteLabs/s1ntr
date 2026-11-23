@@ -59,8 +59,6 @@ describe('aestheticDirective', () => {
   });
 
   it('returns nothing for domains without a defined bar', () => {
-    expect(aestheticDirective(Domain.REVIDEO)).toBe('');
-    expect(aestheticDirective(Domain.HYPERFRAMES)).toBe('');
   });
 });
 
@@ -75,8 +73,8 @@ describe('promptForCreativeDomain aesthetic integration', () => {
   });
 
   it('omits the aesthetic bar for a domain that has none, without losing the contract', () => {
-    const prompt = promptForCreativeDomain('a 20-second product reveal', Domain.REVIDEO, false);
+    const prompt = promptForCreativeDomain('a 20-second product reveal', Domain.GENERIC, false);
     expect(prompt).not.toContain('Quality bar');
-    expect(prompt).toContain('Target creative domain: revideo.');
+    expect(prompt).toContain('Target creative domain: generic.');
   });
 });

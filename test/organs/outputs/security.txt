@@ -1,0 +1,12 @@
+## 01-import-validator.txt
+# organ: security | step: import-validator | data: real
+$ node -e import('<repo>/dist/security/ImportValidator.js').then(m=>{for(const p of ['art/piece.png','../../etc/passwd','/etc/shadow','a/../b.png']){try{console.log('OK  ',p,'->',m.validateImportPath(
+# cwd: <out>/_proj (repo: <repo>)
+# --- stdout
+OK   art/piece.png -> <out>/_proj/art/piece.png
+DENY ../../etc/passwd - Import path ../../etc/passwd escapes project root <out>/_proj
+DENY /etc/shadow - Import path /etc/shadow escapes project root <out>/_proj
+OK   a/../b.png -> <out>/_proj/b.png
+# --- stderr
+# exit: 0
+

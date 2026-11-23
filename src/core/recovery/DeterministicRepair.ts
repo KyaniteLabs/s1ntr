@@ -119,6 +119,41 @@ const TONE_REPAIRS: Repair[] = [
   },
 ];
 
+/** Names a Revideo scene uses without importing them, by package. Common words (all, map, run, loop) are left out: too ambiguous to add. */
+const REVIDEO_2D_NAMES = ['makeScene2D', 'Circle', 'Rect', 'Txt', 'Img', 'Video', 'Line', 'Path', 'Ray', 'Spline', 'Polygon',
+  'Layout', 'Node', 'Grid', 'Code', 'Latex', 'Icon', 'LinearGradient', 'RadialGradient', 'Gradient'];
+const REVIDEO_CORE_NAMES = ['createRef', 'createRefArray', 'createSignal', 'createComputed', 'waitFor', 'waitUntil', 'chain',
+  'sequence', 'delay', 'loopFor', 'useScene', 'useTime', 'useRandom', 'Vector2', 'Easing', 'tween', 'fadeTransition'];
+
+function missingNames(code: string, names: string[]): string[] {
+  return names.filter(n => {
+    const used = new RegExp(`(?<![\\w.$])${n}\\b`).test(code);
+    const bound = new RegExp(`\\b(?:const|let|var|function|class)\\s+${n}\\b|\\bimport\\b[^;]*\\b${n}\\b`).test(code);
+    return used && !bound;
+  });
+}
+
+const REVIDEO_REPAIRS: Repair[] = [
+  {
+    id: 'revideo:imports',
+    apply: code => {
+      const lines: string[] = [];
+      const twoD = missingNames(code, REVIDEO_2D_NAMES);
+      const core = missingNames(code, REVIDEO_CORE_NAMES);
+      if (twoD.length > 0) lines.push(`import { ${twoD.join(', ')} } from '@revideo/2d';`);
+      if (core.length > 0) lines.push(`import { ${core.join(', ')} } from '@revideo/core';`);
+      return lines.length > 0 ? `${lines.join('\n')}\n${code}` : code;
+    },
+  },
+];
+
+const BLENDER_REPAIRS: Repair[] = [
+  {
+    id: 'blender:import',
+    apply: code => (/\bbpy\./.test(code) && !/^\s*(?:import\s+bpy\b|from\s+bpy\b)/m.test(code)) ? `import bpy\n${code}` : code,
+  },
+];
+
 const REPAIRS: Record<string, Repair[]> = {
   three: THREE_REPAIRS,
   hydra: HYDRA_REPAIRS,
@@ -126,6 +161,8 @@ const REPAIRS: Record<string, Repair[]> = {
   glsl: GLSL_REPAIRS,
   shader: GLSL_REPAIRS,
   tone: TONE_REPAIRS,
+  revideo: REVIDEO_REPAIRS,
+  blender: BLENDER_REPAIRS,
 };
 
 /** Apply every repair for the domain; null when none changed anything. */

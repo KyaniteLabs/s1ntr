@@ -284,7 +284,8 @@ describe('TierBasedGenerator (expanded)', () => {
       // generator model is overridden by the default provider.
       mockLoadRoleConfig.mockResolvedValueOnce({
         generator: { provider: 'openai', baseUrl: 'https://gen-role.example/v1', model: 'gen-role-model',
-          apiKey: 'gen-role-key', temperature: 0.7, thinking: { enabled: true, effort: 'max' } },
+          apiKey: 'gen-role-key', temperature: 0.7, timeout: 7_200_000, timeoutOverride: 7_200_000,
+          thinking: { enabled: true, effort: 'max' } },
       });
 
       const gen = new TestGenerator('p5');
@@ -295,7 +296,7 @@ describe('TierBasedGenerator (expanded)', () => {
       expect(mockLoadRoleConfig).toHaveBeenCalledTimes(1);
       expect(mockGetEffectiveConfig).not.toHaveBeenCalled();
       expect((gen as any).llm.getConfig()).toMatchObject({
-        provider: 'openai', thinking: { enabled: true, effort: 'max' },
+        provider: 'openai', timeout: 7_200_000, thinking: { enabled: true, effort: 'max' },
       });
     });
 

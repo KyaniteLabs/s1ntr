@@ -1,16 +1,19 @@
 #!/usr/bin/env node
 import net from "node:net";
+import "./wait-for-dist.mjs";
 // A ./.env may supply API keys and model names only; see loadProjectDotenv.
 const { loadProjectDotenv } = await import("../dist/config/loadProjectDotenv.js");
 loadProjectDotenv();
 
 // Graceful top-level error handling
 process.on('uncaughtException', (err) => {
+  if (process.env.SINTER_DEBUG && err && err.stack) console.error(err.stack);
   console.error(`Error: ${err.message || err}`);
   process.exit(1);
 });
 
 process.on('unhandledRejection', (reason) => {
+  if (process.env.SINTER_DEBUG && reason instanceof Error) console.error(reason.stack);
   console.error(`Error: ${reason instanceof Error ? reason.message : reason}`);
   process.exit(1);
 });
@@ -37,6 +40,8 @@ import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
+// Mirrors TAGLINE in src/types/mediumNames.ts (a test keeps them equal; help must work without dist/).
+const TAGLINE = 'S1NTR: a tool for coding art.';
 if (process.env.SINTER_TRACE_MODULE_LOADS === '1') {
   process.on('exit', () => {
     console.error(`SINTER_TRACE_MODULE_LOADS=${JSON.stringify(Object.keys(require.cache))}`);
@@ -47,6 +52,24 @@ const binDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.join(binDir, '..');
 const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf-8'));
 const args = process.argv.slice(2);
+if (process.env.SINTER_PROOF_ISOLATION === '1') {
+  const { assertProofCannotTouchRealState } = await import('../dist/config/ProofIsolationGuard.js');
+  try {
+    assertProofCannotTouchRealState(process.env.HOME || process.env.USERPROFILE || os.homedir());
+    assertProofCannotTouchRealState(sinterConfigPath());
+    const state = process.env.SINTER_LIMINAL_RUNTIME_ROOT;
+    if (state) assertProofCannotTouchRealState(state);
+  } catch (error) {
+    console.error(error.message);
+    process.exit(2);
+  }
+}
+// Historical inventory has a read-only path and needs no CLI provider bootstrap.
+if (args[0] === 'learn-from-existing-art') {
+  const { runLearnFromExistingArt } = await import('../dist/cli/ExistingArtDigestCli.js');
+  process.exit(await runLearnFromExistingArt(args.slice(1)));
+}
+
 
 // One-time config-home migration (~/.liminal or ~/.atelier to ~/.sinter).
 // Runs before any config read; --help and --version leave files alone.
@@ -185,7 +208,7 @@ function printProviderHelp() {
   console.log('EXAMPLES:');
   console.log('  sinter --configure --provider lmstudio');
   console.log('  sinter provider set-key minimax sk-... --use   # MiniMax-M3, international endpoint, made active');
-  console.log('  GLM_API_KEY=... sinter --provider glm "make a p5 sketch"');
+  console.log('  sinter provider set-key glm <KEY> --use && sinter "make a p5 sketch"   # generate uses the configured seat, not a per-run --provider');
   console.log('  sinter provider status');
   console.log('');
 }
@@ -244,12 +267,20 @@ function probeLocalEndpoint(baseUrl, timeoutMs = 300) {
 
 async function printProviderStatus() {
   const config = readSinterConfig();
-  const active = config.defaultProvider;
   const names = Object.keys(CLI_PROVIDER_DEFAULTS);
+  // The route Generate really takes is the resolved generator seat (file pin, env, or default), not the catalog URL.
+  let seat = null;
+  try { const { LLMClient: Client } = await import('../dist/llm/LLMClient.js'); await Client.loadRoles(); seat = Client.getResolvedRoleConfig('generator'); } catch (e) { if (process.env.SINTER_DEBUG_STATUS) console.error(e); }
+  const { resolveStatusRoute } = await import('../dist/cli/providerStatusRoute.js');
+  const route = resolveStatusRoute(seat, config.defaultProvider,
+    names.map((n) => ({ name: n, baseUrl: CLI_PROVIDER_DEFAULTS[n].baseUrl })));
+  const active = route.activeName;
+  const urlFor = (name) => (name === active && route.probeUrl) ? route.probeUrl : CLI_PROVIDER_DEFAULTS[name].baseUrl;
+  const seatUp = route.probeUrl && seat?.apiKey === undefined ? await probeLocalEndpoint(route.probeUrl) : null;
   const reachable = new Map(await Promise.all(names.map(async (name) => {
     const provider = CLI_PROVIDER_DEFAULTS[name];
     if (provider.requiresKey) return [name, true];
-    return [name, await probeLocalEndpoint(provider.baseUrl)];
+    return [name, await probeLocalEndpoint(urlFor(name))];
   })));
   console.log('');
   console.log('Sinter provider readiness:');
@@ -260,11 +291,13 @@ async function printProviderStatus() {
     const status = !configured
       ? `missing key (set with: sinter provider set-key ${name} <KEY>)`
       : reachable.get(name) === false
-        ? `not reachable at ${provider.baseUrl}`
+        ? `not reachable at ${urlFor(name)}`
         : 'ready';
     const activeMark = name === active ? ' (active)' : '';
     console.log(`  ${name.padEnd(10)} ${status}${activeMark}`);
   }
+  if (route.seatLine) console.log('\n' + route.seatLine + (seatUp === null ? '' : seatUp ? ' (reachable)' : ' (not reachable)'));
+  if (route.mismatchNote) console.log(route.mismatchNote);
   console.log('');
   console.log('Set a key with `sinter provider set-key <name> <KEY> --use`.');
   console.log('');
@@ -345,17 +378,56 @@ function parseNumericFlag(flag, rawValue, { integer = false, min, max, expected 
 }
 
 // Parse flags
+const { normalizeCliCommand, cliSubcommandAlias, COMMAND_ALIASES } = await import('../dist/cli/PromptArgs.js');
 const flags = {};
 let cmd = null;
 let cmdArgs = [];
 let prompt = null;
+let cmdIndex = -1;
+let expandedSubcommand = false;
+// Commands whose own parser owns their flags (Sol audit F02/F03/F16). The global parser below still records the flags it
+// knows (flags.dryRun, flags.output, ...), but it consumes them, so a leaf that re-reads its argv never saw --dry-run,
+// --lane, --verbose, --window, --no-write ... and a leaf-only flag hit "Unknown option" before the leaf ran. For these
+// commands unknown flags are left for the leaf and the leaf receives the raw tokens after the command (leafArgv()).
+const LEAF_OWNED_ARGV = new Set(['ledger', 'compost', 'image', 'gbg', 'taxonomy', 'phases', 'islands', 'mece', 'rotation', 'ship', 'rescore']);
+// Boolean flags that may legitimately precede the command (`sinter --dry-run ledger run X`): re-appended for the leaf.
+const LEAF_FORWARDED_BOOLEANS = ['--dry-run', '--json', '--live', '--verbose', '-v', '--mock'];
+
 let maxIterations = 3;
 let output = null;
 
 for (let i = 0; i < args.length; i++) {
-  const arg = args[i];
-  if (arg === '--help' || arg === '-h') {
+  let arg = args[i];
+  if (cmd && !cmdArgs.length && !expandedSubcommand) {
+    const replacement = cliSubcommandAlias(cmd, arg);
+    if (replacement) {
+      const [canonical, ...prefix] = replacement;
+      expandedSubcommand = true;
+      args[cmdIndex] = cmd = canonical;
+      args.splice(i, 1, ...prefix);
+      if (prefix.length === 0) { i--; continue; }
+      arg = args[i];
+    }
+  }
+  if (cmd === 'dream' && ['autoseal', 'guard'].includes(cmdArgs[0]) && arg !== '--help' && arg !== '-h') {
+    cmdArgs.push(arg); // autoseal/guard parse their own flags and values from cmdArgs
+  } else if (cmd === 'ledger' && cmdArgs.length && cmdArgs[0] !== 'query' && arg !== '--help' && arg !== '-h') {
+    cmdArgs.push(arg);
+  } else if (cmd === 'taste' && ['train', 'eval', 'ingest'].includes(cmdArgs[0]) && arg !== '--help' && arg !== '-h') {
+    cmdArgs.push(arg); // taste consumes its own subcommand arguments
+  } else if (['phases', 'islands'].includes(cmd) && arg !== '--help' && arg !== '-h') {
+    cmdArgs.push(arg); // phases/islands parse --trend/--window/--k-sigma/--epochs/--k/--domain from cmdArgs (PopulationCli)
+  } else if (['judge-evidence', 'legacy-backfill'].includes(cmd) && arg !== '--help' && arg !== '-h') {
+    cmdArgs.push(arg); // the learning-step commands parse their own flags (--write-negatives, --out, ...) from cmdArgs
+  } else if (arg === '--help' || arg === '-h') {
     flags.help = true;
+  } else if (cmd === 'judge' && arg === '--round') {
+    const round = args[++i];
+    if (round !== '2' && round !== '3') {
+      console.error('judge --round expects 2 or 3');
+      process.exit(1);
+    }
+    cmd = round === '2' ? 'second-judge' : 'third-judge';
   } else if (arg === '--version') {
     flags.version = true;
   } else if (arg === '--prompt' || arg === '-p') {
@@ -371,11 +443,40 @@ for (let i = 0; i < args.length; i++) {
       max: Infinity,
       expected: 'a positive integer',
     });
+  } else if (arg === '--teach') {
+    flags.teach = args[++i] ?? '';
+  } else if (arg.startsWith('--retry-unknown=')) {
+    flags.retryUnknown = parseNumericFlag('--retry-unknown', arg.slice('--retry-unknown='.length), {
+      integer: true, min: 1, max: 12, expected: 'a loop number from 1 to 12',
+    });
+  } else if (arg === '--parent') {
+    flags.parent = args[++i] ?? '';
   } else if (arg === '--retry-unknown') {
     flags.retryUnknown = true;
+  } else if (arg === '--max-age-ms') {
+    flags.maxAgeMs = args[++i] ?? '';
+    if (!Number.isFinite(Number(flags.maxAgeMs)) || flags.maxAgeMs === '') { console.error('Error: --max-age-ms needs a number'); process.exit(1); }
+  } else if (arg === '--w9-brief') {
+    flags.w9Brief = args[++i] ?? '';
+    if (!flags.w9Brief.trim()) { console.error('Error: --w9-brief needs list, temporal, narrative or information'); process.exit(1); }
+  } else if (arg === '--concept-graph') {
+    flags.conceptGraph = args[++i] ?? '';
+    if (!flags.conceptGraph.trim()) { console.error('Error: --concept-graph needs a concept-graph JSON file'); process.exit(1); }
+  } else if (arg === '--revise-from') {
+    flags.reviseFrom = args[++i] ?? '';
+    if (!flags.reviseFrom.trim()) { console.error('Error: --revise-from needs the previous loop\'s run folder'); process.exit(1); }
+  } else if (arg === '--revise-loop' || arg === '--revise-of') {
+    const n = Number(args[++i]);
+    if (!Number.isInteger(n) || n < 1) { console.error(`Error: ${arg} needs a positive integer`); process.exit(1); }
+    flags[arg === '--revise-loop' ? 'reviseLoop' : 'reviseOf'] = n;
+  } else if (arg === '--loops') {
+    flags.loops = args[++i] ?? '';
+  } else if (arg === '--attempt') {
+    flags.attempt = args[++i] ?? '';
+    if (!flags.attempt.trim()) { console.error('Error: --attempt needs a non-empty id'); process.exit(1); }
   } else if (arg === '--max-provider-calls') {
     flags.maxProviderCalls = parseNumericFlag('--max-provider-calls', args[++i], {
-      integer: true, min: 0, max: Infinity, expected: 'a non-negative integer',
+      integer: true, min: 1, max: Infinity, expected: 'a positive integer (a cap of 0 cannot run a generation)',
     });
   } else if (arg === '--reasoning') {
     // #1735: per-run reasoning level for every role; same pin as SINTER_LLM_THINKING_EFFORT.
@@ -391,21 +492,24 @@ for (let i = 0; i < args.length; i++) {
   } else if (arg === '--output' || arg === '-o') {
     flags.output = args[++i];
   } else if (arg === '--gallery') {
-    flags.gallery = args[++i];
+    flags.gallery = args[++i] ?? '';
+    if (!flags.gallery.trim() || flags.gallery.startsWith('--')) { console.error('Error: --gallery needs a directory path'); process.exit(1); }
+  } else if (arg === '--plugins-dir') {
+    flags.pluginsDir = args[++i];
   } else if (arg === '--input' || arg === '-f') {
     flags.input = args[++i];
-  } else if (arg === '--domain') {
+  } else if (arg === '--domain' || arg === '--medium') {
     flags.domain = args[++i];
   } else if (arg === '--output-mode') {
-    flags.outputMode = args[++i];
-  } else if (arg === '--ref') {
+    flags.outputMode = args[++i] ?? '';
+  } else if (arg === '--ref' || arg === '--reference') {
     (flags.ref ??= []).push(args[++i]);
-  } else if (arg === '--arc') {
-    flags.arc = args[++i];
+  } else if (arg === '--arc' || arg === '--energy') {
+    flags.arc = args[++i] ?? '';
   } else if (arg === '--duration') {
-    flags.duration = args[++i];
-  } else if (arg === '--cues') {
-    flags.cues = args[++i];
+    flags.duration = args[++i] ?? '';
+  } else if (arg === '--cues' || arg === '--hits') {
+    flags.cues = args[++i] ?? '';
   } else if (arg === '--tokens') {
     flags.tokens = args[++i];
   } else if (arg === '--container') {
@@ -416,10 +520,32 @@ for (let i = 0; i < args.length; i++) {
     flags.lineage = args[++i];
   } else if (arg === '--lane') {
     flags.lane = args[++i];
+  } else if (arg === '--batch-file') {
+    flags.batchFile = args[++i];
+  } else if (arg === '--budget-usd') {
+    flags.budgetUsd = parseNumericFlag('--budget-usd', args[++i], { min: 0.01, max: 100000, expected: 'a positive dollar amount' });
+  } else if (arg === '--batch-model') {
+    flags.batchModel = args[++i];
+  } else if (arg === '--batch-effort') {
+    flags.batchEffort = String(args[++i] || '').toLowerCase();
+  } else if (arg === '--batch-max-tokens') {
+    flags.batchMaxTokens = parseNumericFlag('--batch-max-tokens', args[++i], { integer: true, min: 1, max: 128000, expected: 'an integer from 1 to 128000' });
+  } else if (arg === '--batch-margin') {
+    flags.batchMargin = parseNumericFlag('--batch-margin', args[++i], { min: 0, max: 500, expected: 'a percentage from 0 to 500' });
+  } else if (arg === '--batch-concurrency') {
+    flags.batchConcurrency = parseNumericFlag('--batch-concurrency', args[++i], { integer: true, min: 1, max: 16, expected: 'an integer from 1 to 16' });
+  } else if (arg === '--batch-poll-seconds') {
+    flags.batchPollSeconds = parseNumericFlag('--batch-poll-seconds', args[++i], { min: 0.01, max: 3600, expected: 'seconds between polls' });
+  } else if (arg === '--batch-retries') {
+    flags.batchRetries = parseNumericFlag('--batch-retries', args[++i], { integer: true, min: 0, max: 3, expected: 'an integer from 0 to 3' });
   } else if (arg === '--compose') {
     flags.compose = true;
   } else if (arg === '--single') {
     flags.single = true;
+  } else if (arg === '--music-to-visual') {
+    flags.musicToVisual = true;
+  } else if (arg === '--theory') {
+    flags.theory = true;
   } else if (arg === '--provider') {
     flags.provider = args[++i];
   } else if (arg === '--model') {
@@ -464,7 +590,8 @@ for (let i = 0; i < args.length; i++) {
   } else if (arg === '--use-swarm') {
     flags.useSwarm = true;
   } else if (arg === '--swarm-mode') {
-    flags.swarmMode = args[++i];
+    const mode = args[++i];
+    flags.swarmMode = mode === 'blended' ? 'hybrid' : mode;
   } else if (arg === '--swarm-rounds') {
     flags.swarmRounds = parseNumericFlag('--swarm-rounds', args[++i], {
       integer: true,
@@ -502,6 +629,8 @@ for (let i = 0; i < args.length; i++) {
     });
   } else if (arg === '--spec') {
     flags.spec = args[++i];
+  } else if (arg === '--candidates') {
+    flags.candidates = args[++i];
   } else if (arg === '--campaign-manifest') {
     flags.campaignManifest = args[++i];
   } else if (arg === '--campaign-execution') {
@@ -512,6 +641,32 @@ for (let i = 0; i < args.length; i++) {
     flags.authority = args[++i];
   } else if (arg === '--reevaluation-authority') {
     flags.reevaluationAuthority = args[++i];
+  } else if (arg === '--run-root') {
+    flags.runRoot = args[++i];
+  } else if (arg === '--grant') {
+    flags.grant = args[++i];
+  } else if (arg === '--prompt-file') {
+    flags.promptFile = args[++i];
+  } else if (arg === '--repo-root') {
+    flags.repoRoot = args[++i];
+  } else if (arg === '--render') {
+    flags.render = true;
+  } else if (arg === '--render-out') {
+    flags.renderOut = args[++i];
+  } else if (arg === '--seed') {
+    flags.seed = args[++i];
+  } else if (arg === '--memo') {
+    flags.memo = args[++i];
+  } else if (arg === '--verdict') {
+    flags.verdict = args[++i];
+  } else if (arg === '--score') {
+    flags.score = Number(args[++i]);
+  } else if (arg === '--by') {
+    flags.by = args[++i];
+  } else if (arg === '--section') {
+    (flags.sections ??= []).push(args[++i]);
+  } else if (arg === '--title') {
+    flags.title = args[++i];
   } else if (arg === '--bridge-url') {
     flags.bridgeUrl = args[++i];
   } else if (arg === '--owner-authorization') {
@@ -543,6 +698,11 @@ for (let i = 0; i < args.length; i++) {
     });
   } else if (arg === '--regenerate-layer') {
     flags.regenerateLayer = args[++i];
+  } else if (arg === '--hybrid') {
+    flags.hybrid = true;
+  } else if (arg === '--layers') {
+    flags.hybridLayers = args[++i] ?? '';
+    if (!flags.hybridLayers.trim()) { console.error('Error: --layers requires at least one layer'); process.exit(1); }
   } else if (arg === '--voice') {
     flags.voice = true;
   } else if (arg === '--voice-file') {
@@ -551,7 +711,7 @@ for (let i = 0; i < args.length; i++) {
     flags.aesthetic = args[++i];
   } else if (arg === '--aesthetic-config') {
     flags.aestheticConfig = args[++i];
-  } else if (arg === '--learn') {
+  } else if (arg === '--learn' || arg === '--record') {
     flags.learn = true;
   } else if (arg === '--intuition') {
     flags.intuition = true;
@@ -611,6 +771,8 @@ for (let i = 0; i < args.length; i++) {
       max: 1,
       expected: 'a number from 0 to 1',
     });
+  } else if (arg === '--allow-fallback') {
+    flags.allowFallback = true;
   } else if (arg === '--no-llm') {
     flags.noLlm = true;
   } else if (arg === '--sweep') {
@@ -621,13 +783,39 @@ for (let i = 0; i < args.length; i++) {
     flags.questions = args[++i];
   } else if (arg === '--image') {
     (flags.images ??= []).push(args[++i]);
+  } else if (arg.startsWith('-') && cmd !== null && LEAF_OWNED_ARGV.has(cmd)) {
+    // leaf-owned flag: validated by the leaf from leafArgv(); its value (if any) falls through as a positional here
   } else if (arg.startsWith('-')) {
     console.error(`Unknown option: ${arg}`);
     console.error('Run "sinter --help" for usage, or: sinter "your idea"');
     process.exit(1);
   } else if (!arg.startsWith('-')) {
-    if (cmd === null) { cmd = arg; } else { cmdArgs.push(arg); }
+    if (cmd === null) {
+      const normalized = normalizeCliCommand(arg, []);
+      cmd = normalized.cmd;
+      cmdIndex = i;
+      args.splice(i, 1, cmd, ...normalized.cmdArgs);
+    } else {
+      cmdArgs.push(arg);
+    }
   }
+}
+
+/** Raw tokens the leaf command parses for itself: everything after the command, plus safety booleans given before it. */
+function leafArgv() {
+  const raw = cmdIndex >= 0 ? args.slice(cmdIndex + 1) : [];
+  const before = cmdIndex >= 0 ? args.slice(0, cmdIndex) : [];
+  for (const f of LEAF_FORWARDED_BOOLEANS) if (before.includes(f) && !raw.includes(f)) raw.push(f);
+  return raw;
+}
+
+// One boundary for deprecated domain ids: `--domain meta` is now `--domain custom`.
+if (flags.domain) {
+  try {
+    const { canonicalDomainId } = await import('../dist/types/domains.js');
+    flags.domain = canonicalDomainId(flags.domain, (from, to) =>
+      console.error(`note: --domain ${from} is deprecated; it now means --domain ${to}.`));
+  } catch { /* dist not built yet: keep the raw value */ }
 }
 
 
@@ -824,11 +1012,20 @@ function summarizeSession(session) {
 
 function printHelp() {
   console.log('');
-  console.log('🎨 Sinter: Creative Coding Agent');
+  console.log('🎨 ' + TAGLINE);
   console.log('');
   console.log('USAGE:');
   console.log('  sinter [options] <command> [args]');
   console.log('  sinter "natural language prompt"');
+  console.log('');
+  console.log('COMMAND ALIASES:');
+  for (const [alias, target] of COMMAND_ALIASES) console.log(`  ${alias.padEnd(20)} ${target}`);
+  console.log('  learn study/reserve/pick-best/verify/stack = dream run/transfer/autoseal/guard/compound');
+  console.log('  motifs mine/list/evolve = compost digest/seeds list/soup');
+  console.log('  mediums check/list, autopilot balance/curate, promote --undo, titles make/budget');
+  console.log('  judge compare, judge --round <2|3>, self-improve scan/run, prompt next/from-graph');
+  console.log('  --reference = --ref, --energy = --arc, --hits = --cues, --record = --learn');
+  console.log('  --swarm-mode blended = --swarm-mode hybrid');
   console.log('');
   console.log('COMMANDS:');
   console.log('  <prompt>                    Natural-language creative request (no magic verb required)');
@@ -846,7 +1043,7 @@ function printHelp() {
   console.log('  campaign-owner-decision        Finalize a completed governed owner decision');
   console.log('  campaign-continue              Resume the server-owned governed campaign continuation');
   console.log('  live-music                  Generate a live AV set (Strudel music + Hydra visuals)');
-  console.log('  chat                        Conversational session (see: sinter studio)');
+  console.log('  chat reflect                Distill persisted Studio chats into lessons (interactive chat was retired: use sinter studio)');
   console.log('  git <subcommand>            Git integration: status, log, diff, branch, commit, init');
   console.log('  fix <file|description>      Auto-fix code issues with LLM assistance');
   console.log('  compact [--execute] [--root <path>]  Reclaim ~/.sinter state (dry-run default)');
@@ -863,16 +1060,22 @@ function printHelp() {
   console.log('  quality <subcommand>       Quality gate: run, gate');
   console.log('  budget status              Show per-endpoint spend caps (~/.sinter/provider-budgets.json)');
   console.log('  market status              Print the release-truth report; exit 0 only when release-ready');
+  console.log('  market smoke [--repo-root <dir>]  One provider call that must return p5 code; writes the smoke receipt market status reads');
   console.log('  readiness status            Alias of market status');
   console.log('  archive <subcommand>      Archive: inspect, lineage, branch, list');
   console.log('  preferences <subcommand>  Preferences: export, stats, train, model');
-  console.log('  taste <train|eval>          Train or evaluate the taste model from preferences');
+  console.log('  taste <train|eval|ingest>   Train or evaluate the taste model, or import observations and signed owner likes');
+  console.log('  rescore [--all|--floors] [--domain <list>] [--persist] [--max-provider-calls <n>]  Re-score archive entries');
+  console.log('  learn-from-existing-art      Inventory finished art and replay verified Create evidence; --dry-run, --with-model-calls');
   console.log('  judgment compare            Governed blind rendered comparison');
   console.log('  dream run <command.json>    Run canonical admitted-evidence research');
   console.log('  dream transfer <command.json>  Run host-composed holdout transfer');
   console.log('  dream activate <command.json>  Consolidate validated independent transfers');
+  console.log('  dream rollback <digest> <why>  Retract an activated lesson (next --teach uses the previous one)');
+  console.log('  dream autoseal --judge <id> --out <dir>  Seal top-scored accepted Creates as parent groups (owner rule: top score)');
+  console.log('  dream guard --scheduled f --incumbent f --candidate f [--min-gain 0.03]  Fail-closed promotion gate (exit 0 promote, 4 keep incumbent, 5 error)');
   console.log('  garden <subcommand>         Autonomous gardener: status, rebalance, start, stop, tend [budget]');
-  console.log('  ship <garden|rollback>      Promote a garden release candidate or roll back (--to <ref>)');
+  console.log('  ship <garden|rollback>      Garden promotion tier: stage/promote policy changes behind a regression gate, roll back by id');
   console.log('  emergence <score|probe>     Score or probe emergence for a text or file output');
   console.log('  sss-score <artifact>        SPU-2.0 scorecard: literal 0..10 axes, two distinct judges minimum + temporal probe (exit 2 on blank artifact)');
   console.log('  gbg [--index|--move]        Glass Bead Game: bead index, cross-domain threads, one move per wave')
@@ -890,9 +1093,25 @@ function printHelp() {
   console.log('');
   console.log('OPTIONS:');
   console.log('  --prompt, -p <text>         Prompt for generation');
-  console.log('  --max-iterations, -m <num>  Max iterations (generate accepts only 1)');
+  console.log('  --max-iterations, -m <num>  Max iterations (generate accepts only 1; use --loops N for improvement loops)');
+  console.log('  --loops <N>                 generate: N governed improvement loops in one run (1-12); loop k+1 edits loop k using its code, frames and judge critique');
+  console.log('  --lane batch --batch-file <prompts.json> --batch-model <claude-...> --budget-usd <N>');
+  console.log('                              generate: Anthropic Message Batches (half price), generation only; judges stay on their own model. Needs ANTHROPIC_API_KEY in env.');
+  console.log('                              Cumulative cap across runs; --dry-run prints the worst-case estimate and submits nothing; re-run the same command to resume.');
+  console.log('                              Also: --batch-effort low|medium|high|xhigh|max, --batch-max-tokens N (32000), --batch-margin PCT (10), --batch-concurrency N, --batch-retries N');
+  console.log('  --medium <name>             Same as --domain (new name)');
   console.log('  --max-provider-calls <num>  Shared cap across nested provider attempts');
-  console.log('  --retry-unknown             Start fresh after a timed-out run (may bill twice)');
+  console.log('  --teach <scope>             Teach governed generate with the latest active activated knowledge for scope (visual|motion)');
+  console.log('  notation encode|decode <file>  Compress a swarm prompt to ~tokens or expand it back');
+  console.log('  fragments categories|constraint|seed|search <q>  Browse the curated fragment archive (personas, constraints, prompt seeds)');
+  console.log('  capabilities <probes.json>     Classify held provider-surface probe results: attested, unattested or denied (--max-age-ms N)');
+  console.log('  garden experiment <file.json>  A/B two garden policies from recorded metrics (winner + confidence)');
+  console.log('  --w9-brief <list|temporal|narrative|information>  (compose) build one of the three frozen Wave 9 multi-node briefs');
+  console.log('  --concept-graph <file.json> Rewrite the request as a structured brief from a concept graph (ideas + how they relate)');
+  console.log('  --revise-from <run dir>     Edit the previous loop\'s piece: its source, judge critique and frames ride in the brief (with --revise-loop N --revise-of M)');
+  console.log('  --attempt <id>              Name this sampling attempt (best-of-N): distinct ids make distinct Creates, the same id replays');
+  console.log('  --parent <artifactId>       Record this generation as a branch of an artifact in the lineage store');
+  console.log('  --retry-unknown             Retry an unknown outcome (may bill twice). With loops, add =N to retry only loop N in place');
   console.log('  --reasoning <level>         Reasoning level for every model call: none|low|medium|high|xhigh|max');
   console.log('  --stages generate           Generation-only provider stage plan [not with generate]');
   console.log('  --domain <name>             Force a creative domain (else auto-detected from the prompt)');
@@ -928,8 +1147,10 @@ function printHelp() {
   console.log('  --confidence-threshold <n>  Cascade escalation threshold (0-1, default: 0.8)');
   console.log('  --gates-passed              For improve scan: report improve mode after external gates pass');
   console.log('  --verbose, -v               Verbose output');
-  console.log('  --voice                     Enable voice-driven visual mapping [not with generate]');
-  console.log('  --voice-file <path>         Audio file for voice-to-visual analysis [not with generate]');
+  console.log('  --voice                     Live microphone capture for visual mapping [not with generate]');
+  console.log('  --music-to-visual           With live-music: generate the visuals from the measured tempo and spectrum of the music');
+  console.log('  --theory                    With live-music: add the theory engines\' key, scale, rhythm and chords for the mood to the model brief');
+  console.log('  --voice-file <path>         Recording whose colour, motion, shape and energy shape the piece (sinter generate)');
   console.log('  --aesthetic <preset>        Creative preference preset (minimalist|vibrant|cinematic|playful|free) [not with generate]');
   console.log('  --aesthetic-config <path>  Path to aesthetic/perception config JSON [not with generate]');
   console.log('  --intuition                 Enable intuition scoring dimension [not with generate]');
@@ -945,7 +1166,7 @@ function printHelp() {
   console.log('EXAMPLES:');
   console.log('  sinter "icebergs dancing in the sky"');
   console.log('  sinter --prompt "blue particles"');
-  console.log('  sinter --prompt "red circles" --provider lmstudio');
+  console.log('  sinter --configure --provider lmstudio && sinter --prompt "red circles"   # --provider selects the seat for --configure only');
   console.log('  sinter --configure');
   console.log('  sinter serve 3456');
   console.log('  sinter list');
@@ -960,8 +1181,22 @@ function printFixUsage() {
 // Handle --help flag (global) and the bare `help` word (previously fell
 // through to the generate path as a prompt and died on key preflight).
 if (flags.help || cmd === 'help') {
+  if (flags.help && cmd && cmd !== 'help') {
+    const { printCommandHelp } = await import('../dist/cli/CommandHelp.js');
+    if (printCommandHelp(cmd)) process.exit(0);
+  }
   printHelp();
   process.exit(0);
+}
+
+if (cmd === 'judge') {
+  console.error('Usage: sinter judge compare or sinter judge --round <2|3> <artifact>');
+  process.exit(1);
+}
+
+if (cmd === 'taste' && ['train', 'eval'].includes(cmdArgs[0]) && cmdArgs.length > 1) {
+  console.error('Taste train and eval use project data. For a wall-vote report, run scripts/learning/beauty.py report.');
+  process.exit(2);
 }
 
 // Handle --version flag
@@ -970,8 +1205,109 @@ if (flags.version) {
   process.exit(0);
 }
 
+// `seed save|list|show`: the gallery archive of named seeds (prompt, domain, note) under ~/.sinter/seeds.
+// `generate --seed <name>` builds on a saved seed: its prompt and note go into the brief.
+if (cmd === 'seed') {
+  const { SeedArchive } = await import('../dist/gallery/SeedArchive.js');
+  const archive = new SeedArchive(path.join(os.homedir(), '.sinter', 'seeds'));
+  const [verb, name] = cmdArgs;
+  try {
+    if (verb === 'save') {
+      if (!name) throw new Error('usage: sinter seed save <name> --prompt "..." [--domain d] [--title note]');
+      await archive.saveSeed(name, { prompt: flags.prompt || '', domain: flags.domain || null, note: flags.title || '', savedAt: new Date().toISOString() });
+      console.log('Seed saved: ' + name);
+    } else if (verb === 'show') {
+      const data = name ? await archive.loadSeed(name) : null;
+      if (!data) throw new Error('no such seed: ' + name);
+      console.log(JSON.stringify(data, null, 2));
+    } else if (verb === 'list') {
+      const dir = path.join(os.homedir(), '.sinter', 'seeds');
+      const names = fs.existsSync(dir) ? fs.readdirSync(dir).filter(f => f.endsWith('.json')).map(f => f.slice(0, -5)).sort() : [];
+      console.log(names.length ? names.join('\n') : '(no saved seeds)');
+    } else {
+      throw new Error('usage: sinter seed <save|show|list> [name]');
+    }
+    process.exit(0);
+  } catch (error) {
+    console.error('Error: ' + error.message);
+    process.exit(1);
+  }
+}
+
+// `export <html|js|zip> <code-file> -o <out>`: package a piece's code for sharing (validated before it is wrapped).
+if (cmd === 'export') {
+  const [kind, codeFile] = cmdArgs;
+  try {
+    if (!['html', 'js', 'zip'].includes(kind) || !codeFile || !flags.output) throw new Error('usage: sinter export <html|js|zip> <code-file> -o <out-path>');
+    const { Exporter } = await import('../dist/export/Exporter.js');
+    const code = fs.readFileSync(path.resolve(codeFile), 'utf8');
+    const out = path.resolve(flags.output);
+    const exporter = new Exporter();
+    if (kind === 'html') await exporter.exportHTML(code, out);
+    else if (kind === 'js') await exporter.exportJS(code, out);
+    else await exporter.exportZIP({ name: path.basename(codeFile).replace(/\.[^.]+$/, '') || 'piece', iterations: [{ version: 1, code, timestamp: new Date().toISOString() }] }, out);
+    console.log('Exported ' + kind + ': ' + out);
+    process.exit(0);
+  } catch (error) {
+    console.error('Error: export failed: ' + error.message);
+    process.exit(1);
+  }
+}
+
+// `memo`: write a reviewer's critique as an EvaluationMemo file that `generate --memo` feeds into the next brief.
+// sinter memo -o memo.json --by <reviewer> --verdict approve|revise|reject --score 0..1 --title T "brief" --section "Title|text|high"
+if (cmd === 'memo') {
+  const { EvaluationMemoBuilder } = await import('../dist/collab/EvaluationMemo.js');
+  try {
+    const builder = new EvaluationMemoBuilder()
+      .setTitle(flags.title || 'Critique').setBrief(flags.prompt || cmdArgs.join(' '))
+      .setVerdict(flags.verdict, flags.score).setGeneratedBy(flags.by || '');
+    for (const sec of flags.sections || []) {
+      const [t, c, pr] = sec.split('|');
+      builder.addSection(t, c ?? '', pr || 'medium');
+    }
+    const memo = builder.build();
+    const out = path.resolve(flags.output || 'memo.json');
+    fs.mkdirSync(path.dirname(out), { recursive: true });
+    fs.writeFileSync(out, JSON.stringify(memo, null, 2) + '\n', 'utf8');
+    console.log('Memo written: ' + out + ' (' + memo.finalVerdict + ', ' + memo.score.toFixed(2) + ', by ' + memo.generatedBy + ')');
+    process.exit(0);
+  } catch (error) {
+    console.error('Error: ' + error.message);
+    process.exit(1);
+  }
+}
+
 // Operator swarm surface: run a swarm, list sessions, or record a human gold
 // label. Dispatched from dist so the command group stays a thin entrypoint.
+if (cmd === 'gallery') {
+  const { Gallery } = await import('../dist/gallery/Gallery.js');
+  const sub = cmdArgs[0] ?? 'list';
+  if (sub !== 'list') {
+    console.error(`Unknown gallery command "${sub}". Usage: sinter gallery list [--gallery <dir>]`);
+    process.exit(1);
+  }
+  const { resolveSinterProjectRoot } = await import('../dist/fs/projectRoot.js');
+  const galleryDir = flags.gallery ? path.resolve(flags.gallery) : path.join(resolveSinterProjectRoot(), 'gallery');
+  if (flags.gallery && !fs.existsSync(galleryDir)) {
+    console.error(`No gallery at ${galleryDir} (the --gallery directory does not exist).`);
+    process.exit(1);
+  }
+  const gallery = new Gallery(galleryDir);
+  const dirs = await gallery.listProjectDirs();
+  if (dirs.length === 0) {
+    console.log(`Gallery ${galleryDir} is empty. Accepted \`sinter generate\` runs and loop iterations save here.`);
+    process.exit(0);
+  }
+  console.log(`Gallery ${galleryDir}: ${dirs.length} project${dirs.length === 1 ? '' : 's'}`);
+  for (const dir of dirs) {
+    const history = await gallery.loadHistoryFromDir(dir);
+    const latest = history.length ? Math.max(...history.map(h => h.version)) : 0;
+    console.log(`  ${dir}  ${history.length} version${history.length === 1 ? '' : 's'}  latest v${latest}`);
+  }
+  process.exit(0);
+}
+
 if (cmd === 'swarm') {
   const { runSwarmCli } = await import('../dist/cli/SwarmCli.js');
   process.exit(await runSwarmCli(cmdArgs, flags));
@@ -993,9 +1329,10 @@ const SINTER_DOMAIN_RUBRIC = {
   hyperframes: 'HYPERFRAMES: judge layered parallax depth, frame narrative.',
   dataviz: 'DATAVIZ: judge whether hidden structure becomes FELT (synesthetic clarity), not chart legibility.',
   textgen: 'TEXTGEN: judge language craft — imagery, rhythm, surprise — AND its typographic rendering.',
-  meta: 'META: judge self-reference that earns its keep — the piece\'s visibility into its own process must create real composition, not a debug overlay wearing art clothes.',
+  custom: 'CUSTOM: judge self-reference that earns its keep — the piece\'s visibility into its own process must create real composition, not a debug overlay wearing art clothes.',
   html: 'HTML: judge the living page — typography/layout/state mutating as ONE organism, CSS as medium, DOM choreography; not a static page screenshot.',
 };
+SINTER_DOMAIN_RUBRIC.meta = SINTER_DOMAIN_RUBRIC.custom; // deprecated alias: provenance written before the meta -> custom rename
 // Robust judge-output parser: strips fences, tries whole-body JSON, then
 // brace-balanced scan (tolerates prose around the JSON and strings containing braces).
 function parseJudgeJsonLoose(text) {
@@ -1023,6 +1360,19 @@ if (cmd === 'authoritative-create') {
   }
 }
 
+if (cmd === 'rescore') {
+  const { spawnSync } = await import('node:child_process');
+  const script = fileURLToPath(new URL('../scripts/quality/rescore-tops.mjs', import.meta.url));
+  const forwarded = leafArgv();
+  if (flags.maxProviderCalls !== undefined && !forwarded.includes('--max-provider-calls')) {
+    forwarded.push('--max-provider-calls', String(flags.maxProviderCalls));
+  }
+  if (flags.domain && !forwarded.includes('--domain')) forwarded.push('--domain', flags.domain);
+  const child = spawnSync(process.execPath, [script, ...forwarded], { stdio: 'inherit' });
+  if (child.error) console.error(child.error.message);
+  process.exit(child.status ?? 1);
+}
+
 if (cmd === 'authoritative-reevaluate') {
   if (!flags.authority || !flags.reevaluationAuthority) {
     console.error('Usage: sinter authoritative-reevaluate --authority <original.json> --reevaluation-authority <repair.json>');
@@ -1037,6 +1387,27 @@ if (cmd === 'authoritative-reevaluate') {
     process.exit(completed.result.evaluation.admissionEligible ? 0 : 2);
   } catch (error) {
     console.error(`Authoritative re-evaluation failed: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
+}
+
+if (cmd === 'rerender-reevaluate') {
+  if (!flags.runRoot || !flags.grant) {
+    console.error('Usage: sinter rerender-reevaluate --run-root <absolute run root> --grant <absolute grant.json> [--prompt-file <prompt.txt>] [--repo-root <clone>]');
+    process.exit(1);
+  }
+  const { rerenderReevaluateProductRunCli } = await import('../dist/cli/LiminalRerenderReevaluate.js');
+  try {
+    const outcome = await rerenderReevaluateProductRunCli(path.resolve(flags.runRoot), path.resolve(flags.grant), {
+      promptFile: flags.promptFile ? path.resolve(flags.promptFile) : undefined,
+      repoRoot: flags.repoRoot ? path.resolve(flags.repoRoot) : undefined,
+    });
+    console.log(JSON.stringify({ grantDigest: outcome.grantDigest, parentKey: outcome.parentKey,
+      score: outcome.result.evaluation.score, admissionEligible: outcome.result.evaluation.admissionEligible,
+      operationId: outcome.result.operationId }, null, 2));
+    process.exit(outcome.result.evaluation.admissionEligible ? 0 : 2);
+  } catch (error) {
+    console.error(`Re-render re-evaluation failed: ${error instanceof Error ? error.message : String(error)}`);
     process.exit(1);
   }
 }
@@ -1058,7 +1429,16 @@ if (cmd === 'judgment' && cmdArgs[0] === 'compare') {
       early: { mimeType: 'image/png', dataBase64: fs.readFileSync(path.resolve(inputRoot, candidate.earlyPath)).toString('base64') },
       late: { mimeType: 'image/png', dataBase64: fs.readFileSync(path.resolve(inputRoot, candidate.latePath)).toString('base64') },
     }));
-    const result = await compareRenderedJudgment(candidates, new LLMClient({ role: 'evaluator' }));
+    // One product mechanism: the cycle grant installs a per-call evaluator scope; compareRenderedJudgment's
+    // provider call runs through evaluatorCall, so it gets its own receipted evaluator grant.
+    const { runProductionCliCycleEffect } = await import('../dist/cli/LiminalProductionProviderEffect.js');
+    const evaluator = new LLMClient({ role: 'evaluator' });
+    const result = await runProductionCliCycleEffect({
+      idempotencyKey: `judgment-compare-${Date.now()}-${process.pid}`,
+      binding: { surface: 'judgment-compare', purpose: 'compare' },
+      maxGeneratorAttempts: 0,
+      effect: () => compareRenderedJudgment(candidates, evaluator),
+    });
     console.log(JSON.stringify(result, null, 2));
     process.exit(0);
   } catch (error) {
@@ -1264,21 +1644,25 @@ if (cmd === 'list' || cmd === 'ls') {
 }
 
 if (cmd === 'fs' && cmdArgs[0] === 'artifacts') {
-  const refsDir = path.join(process.cwd(), '.sinter', 'refs');
-  if (!fs.existsSync(refsDir)) {
-    console.log('No artifacts found.');
+  const { resolveSinterProjectRoot } = await import('../dist/fs/projectRoot.js');
+  const refsDir = path.join(resolveSinterProjectRoot(), '.sinter', 'refs');
+  // Ref names contain `/` (generate/<id>, gallery/<project>/...), so they nest on disk: walk, do not just list.
+  const walk = (dir) => fs.existsSync(dir)
+    ? fs.readdirSync(dir, { withFileTypes: true }).flatMap(d => d.isDirectory() ? walk(path.join(dir, d.name))
+      : d.name.endsWith('.json') ? [path.join(dir, d.name)] : [])
+    : [];
+  const files = walk(refsDir);
+  if (files.length === 0) {
+    console.log('No artifacts found. Governed generates record here after an accepted piece; run `sinter generate` in this directory first.');
     process.exit(0);
   }
-  const entries = fs.readdirSync(refsDir).filter(f => f.endsWith('.json'));
-  if (entries.length === 0) {
-    console.log('No artifacts found.');
-    process.exit(0);
-  }
-  console.log(`\n📦 Artifacts (${entries.length}):\n`);
-  for (const entry of entries) {
-    const ref = JSON.parse(fs.readFileSync(path.join(refsDir, entry), 'utf-8'));
-    const shortHash = ref.hash ? ref.hash.slice(0, 12) : '????';
-    console.log(`  ${entry.replace('.json', '')}  ${ref.kind}  ${shortHash}…`);
+  console.log(`\n📦 Artifacts (${files.length}):\n`);
+  for (const file of files) {
+    const name = path.relative(refsDir, file).replace(/\.json$/, '');
+    try {
+      const ref = JSON.parse(fs.readFileSync(file, 'utf-8'));
+      console.log(`  ${name}  ${ref.kind}  ${ref.hash ? ref.hash.slice(0, 12) : '????'}…`);
+    } catch { console.log(`  ${name}  (unreadable ref)`); }
   }
   console.log('');
   process.exit(0);
@@ -1349,7 +1733,14 @@ if (cmd === 'domains') {
     console.log('');
     process.exit(report.ready ? 0 : 1);
   }
-  console.error('Usage: sinter domains gauntlet [--output report.json]');
+  if (subCmd === 'list') {
+    const { PUBLIC_MEDIUMS, EXCLUDED_MEDIUMS, MEDIUM_LABELS, mediumCountWord } = await import('../dist/types/mediumNames.js');
+    console.log(`${mediumCountWord()} mediums:`);
+    for (const id of PUBLIC_MEDIUMS) console.log(`  ${id}  ${MEDIUM_LABELS[id]}`);
+    if (flags.verbose) for (const [id, why] of Object.entries(EXCLUDED_MEDIUMS)) console.log(`  ${id}  ${why}`);
+    process.exit(0);
+  }
+  console.error('Usage: sinter mediums <list|check> [--output report.json]');
   process.exit(1);
 }
 
@@ -1467,17 +1858,55 @@ if (cmd === 'model') {
   process.exit(1);
 }
 
+// `market smoke`: one real provider call that must return usable p5 code, written as the receipt `market status`
+// and the release gate read (.omx/proof/live-provider-smoke.json under --repo-root, default the current directory).
+if (cmd === 'market' && cmdArgs[0] === 'smoke') {
+  const smokeRoot = path.resolve(flags.repoRoot || process.cwd());
+  const { LLMClient } = await import('../dist/llm/LLMClient.js');
+  const { buildLiveProviderSmokeReceipt, writeLiveProviderSmokeReceipt } = await import('../dist/market/LiveProviderSmokeReceipt.js');
+  const { runProductionCliProviderEffect } = await import('../dist/cli/LiminalProductionProviderEffect.js');
+  const started = Date.now();
+  const smokeClient = new LLMClient({ role: 'generator' });
+  const smokeConfig = smokeClient.getConfig();
+  try {
+    const answer = await runProductionCliProviderEffect({
+      idempotencyKey: 'production-market-smoke:' + randomUUID(),
+      binding: { surface: 'cli-market-smoke', target: smokeRoot },
+      maxGeneratorAttempts: 1,
+      effect: () => smokeClient.generate(
+        'You write p5.js sketches. Return raw p5.js code only, with setup() and createCanvas().',
+        'Create a concise p5.js sketch of a luminous Sinter signal: flowing blue-green particles on a dark background.'),
+    });
+    const code = answer && answer.success && typeof answer.code === 'string' ? answer.code : '';
+    const artifactAbs = path.join(smokeRoot, '.omx', 'proof', 'live-provider-smoke', 'p5.js');
+    fs.mkdirSync(path.dirname(artifactAbs), { recursive: true });
+    fs.writeFileSync(artifactAbs, code.trim() + '\n', 'utf8');
+    const receipt = buildLiveProviderSmokeReceipt({
+      repoRoot: smokeRoot, provider: smokeConfig.provider || 'unknown', model: smokeConfig.model || 'unknown',
+      durationMs: Date.now() - started, artifactPath: path.relative(smokeRoot, artifactAbs), code,
+    });
+    const receiptPath = writeLiveProviderSmokeReceipt(smokeRoot, receipt);
+    console.log('Live provider smoke ' + receipt.status + ': ' + receipt.provider + '/' + receipt.model);
+    for (const blocker of receipt.blockers) console.log('  blocker: ' + blocker);
+    console.log('Receipt: ' + receiptPath);
+    process.exit(receipt.status === 'pass' ? 0 : 1);
+  } catch (error) {
+    console.error('Live provider smoke blocked: ' + (error && error.message ? error.message : error));
+    process.exit(1);
+  }
+}
+
 if (cmd === 'release') {
   const subCmd = cmdArgs[0] || 'gate';
   if (subCmd === 'gate') {
     if (flags.dryRun === true) {
       const { runLevel6ReleaseGate } = await import('../dist/runtime-core/Level6ReleaseGate.js');
-      const report = runLevel6ReleaseGate({ repoRoot, candidate: true, includeMarketReadiness: false });
+      const report = runLevel6ReleaseGate({ repoRoot: flags.repoRoot ? path.resolve(flags.repoRoot) : repoRoot, candidate: true, includeMarketReadiness: false });
       console.log(JSON.stringify(report, null, 2));
       process.exit(report.ready ? 0 : 1);
     }
     const { collectWave7RepositoryReleaseTruth, formatWave7RepositoryReleaseTruth } = await import('../dist/runtime-core/Wave7RepositoryReleaseTruth.js');
-    const report = collectWave7RepositoryReleaseTruth(repoRoot);
+    const report = collectWave7RepositoryReleaseTruth(flags.repoRoot ? path.resolve(flags.repoRoot) : repoRoot);
     console.log(formatWave7RepositoryReleaseTruth(report));
     if (flags.output) fs.writeFileSync(flags.output, `${JSON.stringify(report, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
     process.exit(report.ownerReleaseReady ? 0 : 1);
@@ -1734,9 +2163,9 @@ const [
   { handleGitCommand },
   { LLMClient },
   { ModelRouter },
-  { commandPrompt, inferNaturalLanguagePrompt, isSelfImprovementPrompt, suggestCommandForTypo, normalizeCliCommand },
+  { commandPrompt, inferNaturalLanguagePrompt, isSelfImprovementPrompt, suggestCommandForTypo, retiredCliCommandMessage },
   { writeCliCognitiveReceipt },
-  { isEmptySkeleton, formatScoreLine, formatDegradedWhy, formatGovernedHeadline },
+  { isEmptySkeleton, formatScoreLine, formatDegradedWhy, formatGovernedHeadline, governedExitCode },
 ] = await Promise.all([
   import('../dist/index.js'),
   import('../dist/config/ConfigLoader.js'),
@@ -1806,9 +2235,14 @@ if (flags.configure) {
           model: flags.model || providerDefaults.model
         }
       }
-    });
+    }, sinterConfigPath());
     if (result.isErr()) throw result.error;
-    console.log('✅ Config saved to ~/.sinter/config.json');
+    console.log(`✅ Config saved to ${sinterConfigPath()}`);
+    // A default change does not move an explicitly pinned generator seat: say so instead of implying activation.
+    const pinned = result.value?.roles?.generator;
+    if (pinned && pinned.provider && pinned.provider !== providerKey) {
+      console.log(`⚠️  roles.generator is pinned to "${pinned.provider}" and still wins; run \`sinter provider set-key ${providerKey} --use\` to switch the generator seat.`);
+    }
     console.log('');
     console.log('You can now run:');
     console.log('  sinter --prompt "your idea"');
@@ -1880,6 +2314,15 @@ if (cmd === 'report' && cmdArgs[0] === 'fitness') {
     for (const [domain, group] of Object.entries(report.byDomain).sort()) showGroup(`  ${domain}`, group);
     console.log('  Provider/model lanes:');
     for (const [lane, group] of Object.entries(report.byModel).sort()) showGroup(`  ${lane}`, group);
+    console.log('  Your seats per medium (your own runs; evidence only, nothing switches models for you):');
+    for (const [medium, seats] of Object.entries(report.byMediumSeat).sort()) {
+      const best = report.bestSeatByMedium[medium];
+      console.log(`    ${medium}${best ? `  best so far: ${best}` : '  (no seat has 3 scored runs yet)'}`);
+      for (const [lane, seat] of Object.entries(seats).sort()) {
+        const mean = seat.meanScore === null ? 'n/a' : seat.meanScore.toFixed(3);
+        console.log(`      ${lane}: ${seat.totalCount} runs, mean score ${mean}, ${seat.failureCount} failed, ${seat.meanDurationMs === null ? 'time n/a' : (seat.meanDurationMs / 1000).toFixed(1) + 's avg'}`);
+      }
+    }
     console.log('  Cohorts:');
     showGroup('  control', report.byCohort.control);
     showGroup('  treatment', report.byCohort.treatment);
@@ -1935,6 +2378,12 @@ await initializeConfig();
 // env-over-file resolution) so the CLI never claims one provider while calling
 // another. Runtime fallbacks (if any) emit a separate stderr notice.
 const resolvedGeneratorRole = LLMClient.getResolvedRoleConfig('generator');
+if ((cmd === 'compost' && cmdArgs[0] === 'add') || cmd === 'dream') {
+  // Learning calls providers only here. With SINTER_LEARNING_FREE_SEATS_ONLY=1 it never falls through to a paid default.
+  const { assertFreeLearningSeat } = await import('../dist/learning/FreeSeatGuard.js');
+  try { assertFreeLearningSeat(process.env, resolvedGeneratorRole?.provider); }
+  catch (error) { console.error(error.message); process.exit(2); }
+}
 if (resolvedGeneratorRole) {
   const resolvedProvider = resolvedGeneratorRole.provider || 'auto';
   console.log(
@@ -1961,9 +2410,11 @@ if (cmd === 'hillclimb' && cmdArgs[0] === 'run') {
   process.exit(process.exitCode ?? 0);
 }
 
-// Normalize help-style colon commands (image:validate) before NL inference.
-// Missing this let `mece`/`image:validate` fall into paid generation (preflight burn).
-({ cmd, cmdArgs } = normalizeCliCommand(cmd, cmdArgs));
+const retirementMessage = retiredCliCommandMessage(cmd, cmdArgs);
+if (retirementMessage) {
+  console.error(retirementMessage);
+  process.exit(1);
+}
 
 const naturalLanguagePrompt = inferNaturalLanguagePrompt(cmd, cmdArgs);
 if (naturalLanguagePrompt && flags.prompt === undefined) {
@@ -2099,12 +2550,16 @@ if (isLiveMusic) {
   const liveOutDir = flags.output || path.join(process.env.HOME || '/tmp', '.sinter', 'output');
   fs.mkdirSync(liveOutDir, { recursive: true });
 
-  // Load project config for live settings (MIDI, OSC, syncMode) - pass through only
-  let liveConfig = null;
+  // Project `live` settings (syncMode, oscHost): validated, then threaded into BOTH generators as one sync contract.
+  const { liveSettingsFromProjectConfig, withLiveSync } = await import('../dist/music/liveSyncContract.js');
+  let liveOpts = {};
   try {
-    liveConfig = await loadProjectConfig(process.cwd());
-  } catch (_) {}
-  const liveOpts = liveConfig?.live || {};
+    liveOpts = liveSettingsFromProjectConfig(await loadProjectConfig(process.cwd()));
+  } catch (e) {
+    console.error('Error: ' + e.message);
+    process.exit(1);
+  }
+  const liveSyncPrompt = (base) => withLiveSync(base, liveOpts);
 
   console.log('');
   console.log('🎵 Sinter: Live AV');
@@ -2126,13 +2581,26 @@ if (isLiveMusic) {
     // replaying the journaled result.
     const { runProductionCliProviderEffect } =
       await import('../dist/cli/LiminalProductionProviderEffect.js');
-    const { musicResult, visualResult } = await runProductionCliProviderEffect({
+    const { musicResult, visualResult, linkedBpm } = await runProductionCliProviderEffect({
       idempotencyKey: 'production-live-music:' + randomUUID(),
       binding: { surface: 'cli-live-music', prompt: livePrompt },
-      effect: async () => ({
-        musicResult: await generateMusic({ prompt: livePrompt, platform: 'strudel' }),
-        visualResult: await generateVisuals({ prompt: livePrompt, platform: 'hydra' }),
-      }),
+      maxGeneratorAttempts: 2,
+      effect: async () => {
+        if (flags.musicToVisual) {
+          // Visuals follow the music: the picture is generated from the measured tempo and spectrum of the music.
+          const { generateMusicToVisual } = await import('../dist/musicToVisual/generateMusicToVisual.js');
+          const linked = await generateMusicToVisual(liveSyncPrompt(livePrompt), { musicPlatform: 'strudel', visualPlatform: 'hydra' });
+          return {
+            musicResult: { code: linked.musicCode, source: 'deterministic' },
+            visualResult: { code: linked.visualCode },
+            linkedBpm: linked.audioInput?.bpm,
+          };
+        }
+        return {
+          musicResult: await generateMusic({ prompt: liveSyncPrompt(livePrompt), sourcePrompt: livePrompt, platform: 'strudel', ...(flags.theory ? { theoryBrief: true } : {}) }),
+          visualResult: await generateVisuals({ prompt: liveSyncPrompt(livePrompt), platform: 'hydra' }),
+        };
+      },
     });
     const strudelPath = path.join(liveOutDir, 'strudel.js');
     fs.writeFileSync(strudelPath, musicResult.code, 'utf-8');
@@ -2144,6 +2612,7 @@ if (isLiveMusic) {
     const hydraPath = path.join(liveOutDir, 'hydra.js');
     fs.writeFileSync(hydraPath, visualResult.code, 'utf-8');
     console.log('✅ Visuals: ' + hydraPath);
+    if (linkedBpm) console.log('🔗 Visuals follow the music (measured tempo ' + linkedBpm + ' BPM)');
     console.log('');
   } catch (err) {
     console.error('❌ Error:', err.message);
@@ -2183,23 +2652,80 @@ if (cmd === 'site') {
 
 if (cmd === 'generate' || cmd === 'gen' || cmd === 'g' || (flags.prompt && (!cmd || naturalLanguagePrompt))) {
   prompt = commandPrompt(flags.prompt, cmdArgs);
-  if (!prompt) {
+  if (!prompt && !flags.batchFile) {
     console.error('Error: --prompt is required');
     process.exit(1);
   }
   if (flags.maxIterations) maxIterations = flags.maxIterations;
   if (flags.output) output = flags.output;
-  const { assertGovernedCliCompatibility, runProductionCliGenerate } =
+  const { assertGovernedCliCompatibility, runProductionCliGenerate, parseTeachScope, NO_ARTIFACT_EXIT_CODE, replayNoticeLines } =
     await import('../dist/cli/LiminalProductionGenerate.js');
+  if (flags.parent !== undefined) {
+    // Resolve the parent before any provider call: a typo must not bill a generation that cannot be linked.
+    const { LineageTracker } = await import('../dist/emergence/index.js');
+    if (!flags.parent || !(await new LineageTracker().get(flags.parent))) {
+      console.error(`Error: --parent ${flags.parent || '(empty)'} is not in the lineage store. List known ids with: sinter archive list`);
+      process.exit(1);
+    }
+  }
+  if (flags.teach !== undefined) {
+    try { flags.teach = parseTeachScope(flags.teach); } catch (error) {
+      console.error(`Error: ${error.message}`); process.exit(1);
+    }
+  }
+  let loopsN = 1;
+  if (flags.loops !== undefined) {
+    try { loopsN = (await import('../dist/cli/LiminalProductionLoops.js')).parseLoopsFlag(flags.loops); } catch (error) {
+      console.error(`Error: ${error.message}`); process.exit(1);
+    }
+  }
   try {
     assertGovernedCliCompatibility({ explicitMaxIterations: flags.maxIterations,
       stages: flags.stages, useSwarm: flags.useSwarm, learn: flags.learn,
       intuition: flags.intuition, aesthetic: !!(flags.aesthetic || flags.aestheticConfig),
-      voice: !!(flags.voice || flags.voiceFile),
+      voice: !!flags.voice,
       providerOverride: !!(flags.provider || flags.model || flags.baseUrl || flags.apiKey) });
   } catch (error) {
     console.error(`Error: ${error.message}`);
     process.exit(1);
+  }
+
+  const { MIN_STAGED_CREATE_PROVIDER_CALLS, twoStageJudgeEnabled } = await import('../dist/runtime-core/ProductionLiminalRuntime.js');
+  const staged = twoStageJudgeEnabled();
+  const defaultCreateCap = staged ? MIN_STAGED_CREATE_PROVIDER_CALLS : 2;
+  if (flags.lane === 'batch' || flags.batchFile) {
+    // Anthropic Message Batches lane: generation/revision only, half-price, resumable, capped by --budget-usd (cumulative ledger).
+    if (flags.lane !== 'batch' || !flags.batchFile) { console.error('Error: the batch lane needs both --lane batch and --batch-file <prompts.json>'); process.exit(1); }
+    if (flags.budgetUsd === undefined) { console.error('Error: --budget-usd <dollars> is required with --lane batch (the cap is cumulative across runs)'); process.exit(1); }
+    if (!flags.batchModel) { console.error('Error: --lane batch needs --batch-model <claude-opus-5-5|claude-sonnet-5-5|claude-haiku-5-5|claude-fable-5-2>'); process.exit(1); }
+    if (flags.reviseFrom || flags.ref || flags.arc || flags.teach) { console.error('Error: --lane batch cannot be combined with --revise-from, --ref/--arc or --teach'); process.exit(1); }
+    const effort = flags.batchEffort || 'high';
+    if (!['low', 'medium', 'high', 'xhigh', 'max'].includes(effort)) { console.error('Error: --batch-effort must be low, medium, high, xhigh or max'); process.exit(1); }
+    const lane = await import('../dist/cli/LiminalBatchLane.js');
+    try {
+      const pieces = lane.parseBatchFile(path.resolve(flags.batchFile));
+      const res = await lane.runBatchLane({ pieces, loops: loopsN, outputRoot: path.resolve(output || path.join(process.env.HOME || '/tmp', '.sinter', 'output')), model: flags.batchModel, effort,
+        maxTokens: flags.batchMaxTokens ?? 32000, budgetUsd: flags.budgetUsd, marginPct: flags.batchMargin ?? 10, dryRun: flags.dryRun === true,
+        concurrency: flags.batchConcurrency ?? 4, pollMs: Math.round((flags.batchPollSeconds ?? 60) * 1000), retryRounds: flags.batchRetries ?? 1,
+        providerCallsPerLoop: flags.maxProviderCalls ?? Math.max(3, defaultCreateCap), ...(flags.attempt ? { attempt: flags.attempt } : {}), retryUnknown: Boolean(flags.retryUnknown),
+        log: (l) => console.log('📦 ' + l) });
+      if (res.dryRun) {
+        for (const line of lane.formatEstimate(res.estimate)) console.log(line);
+        console.log('Dry run: nothing was submitted and no money was spent.');
+        process.exit(0);
+      }
+      let allComplete = true;
+      for (const [id, m] of res.manifests) {
+        console.log(`${id}: ${m.records.map((r) => `r${r.loop}=${r.status === 'failed' ? 'FAILED' : r.score === null ? 'unscored' : r.score.toFixed(2)}${r.best ? '*' : ''}`).join('  ')}`);
+        if (m.records.length !== m.loops || m.records.some(r => r.status === 'failed' || r.score === null)) allComplete = false;
+      }
+      console.log(`📦 Batches: ${res.batchIds.length}; spent $${res.spentUsd.toFixed(4)}; remaining of cap $${res.remainingUsd.toFixed(2)}; summary ${res.summaryPath}`);
+      if (res.stoppedForBudget) { console.error('Stopped for budget ' + res.stoppedForBudget + '. Re-run the same command later to resume.'); process.exit(5); }
+      process.exit(allComplete ? 0 : 1);
+    } catch (error) {
+      console.error(`Error: ${error.message}`);
+      process.exit(error.name === 'BatchLaneRefusal' || error.name === 'BatchBudgetStop' ? 2 : 1);
+    }
   }
 
   // Embeddable SVG output (#1162): validate before any provider call is made.
@@ -2222,9 +2748,9 @@ if (cmd === 'generate' || cmd === 'gen' || cmd === 'g' || (flags.prompt && (!cmd
   fs.mkdirSync(outDir, { recursive: true });
 
   console.log('');
-  console.log('🎨 Sinter: Creative Coding Agent');
+  console.log('🎨 ' + TAGLINE);
   console.log('📝 Prompt: "' + prompt + '"');
-  console.log('🔄 Governed candidates: 1');
+  console.log('🔄 Attempts: ' + (loopsN > 1 ? `${loopsN} improvement loops (one Create each)` : '1'));
   if (flags.maxProviderCalls !== undefined) {
     console.log(`🧾 Provider plan: generate,evaluate cap=${flags.maxProviderCalls}`);
   }
@@ -2238,11 +2764,12 @@ if (cmd === 'generate' || cmd === 'gen' || cmd === 'g' || (flags.prompt && (!cmd
 
   // Route generation + validation to the domain the prompt asks for (else the
   // loop defaults to p5 and a "GLSL shader" prompt fails p5 validation).
-  // An explicit --domain overrides auto-detection (previously --domain was
-  // parsed but silently ignored on the main generate path — only `sing` honored
-  // it — so e.g. `--domain three` would auto-detect to p5 and fail).
+  // An explicit --domain overrides auto-detection. Without that override,
+  // `--domain three` used to auto-detect to p5 and fail.
   const { detectPromptDomain } = await import('../dist/core/detectPromptDomain.js');
+  const { mediumLabel } = await import('../dist/types/mediumNames.js');
   let detectedDomain;
+  let useHybridPlanner = false;
   // Governed generate supports a subset of the known domains (revideo is known
   // but not governed); reject the rest here with a plain message instead of a
   // raw LIMINAL_PRODUCTION_DOMAIN_UNSUPPORTED from deep in the runtime.
@@ -2251,37 +2778,100 @@ if (cmd === 'generate' || cmd === 'gen' || cmd === 'g' || (flags.prompt && (!cmd
   const governedDomains = SUPPORTED_LIMINAL_PRODUCTION_DOMAINS.join(', ');
   if (flags.domain) {
     detectedDomain = String(flags.domain).toLowerCase();
+    detectedDomain = ({ webpage: 'html', 'concrete-poetry': 'textgen', fluid: 'nbe', invented: 'custom' })[detectedDomain] ?? detectedDomain;
     if (!isLiminalProductionDomain(detectedDomain)) {
       console.error(`--domain "${flags.domain}" is not available for generate. Valid: ${governedDomains}`);
       process.exit(1);
     }
-    console.log('🎯 Domain (forced via --domain): ' + detectedDomain + '\n');
+    console.log('🎯 Medium (forced via --domain): ' + mediumLabel(detectedDomain) + ' (' + detectedDomain + ')\n');
   } else {
+    if (flags.hybrid) process.env.SINTER_LAYERED = '1';
     detectedDomain = await detectPromptDomain(prompt);
-    if (detectedDomain) console.log('🎯 Detected domain: ' + detectedDomain + '\n');
+    if (detectedDomain) console.log('🎯 Detected medium: ' + mediumLabel(detectedDomain) + ' (' + detectedDomain + ')\n');
+    else if (process.env.SINTER_LAYERED === '1' || process.env.SINTER_HYBRID_LAYERS === '1') useHybridPlanner = true;
+    else console.log('🎯 No medium cue in the prompt: falling back to p5 (set SINTER_LAYERED=1 to let S1NTR choose the medium; --hybrid is an alias)\n');
     if (detectedDomain && !isLiminalProductionDomain(detectedDomain)) {
       console.error(`The prompt asks for ${detectedDomain}, which generate does not support yet. Rephrase or pass --domain with one of: ${governedDomains}`);
       process.exit(1);
     }
   }
 
-  let generationPrompt = prompt;
-  if (svgFragmentSpec) {
-    if (detectedDomain !== 'svg') {
-      console.error('Error: --output-mode fragment needs the svg domain. Add --domain svg.');
+  if (typeof flags.retryUnknown === 'number' && (loopsN < 2 || flags.retryUnknown > loopsN)) {
+    console.error('Error: --retry-unknown=N requires a loop in this multi-loop run.');
+    process.exit(1);
+  }
+  if (loopsN > 1 && (flags.reviseFrom || (!useHybridPlanner && (flags.ref || flags.arc)))) {
+    console.error('Error: generate --loops already revises each prior take and cannot use --revise-from or single-medium --ref/--arc. Use compose --loops for references.');
+    process.exit(1);
+  }
+  if (useHybridPlanner) {
+    if (flags.outputMode !== undefined) {
+      console.error('Error: --output-mode needs the svg domain. Add --domain svg.');
       process.exit(1);
     }
-    const { buildFragmentBrief } = await import('../dist/generators/svg/SVGFragment.js');
-    generationPrompt = buildFragmentBrief(prompt, svgFragmentSpec);
+    const unsupported = [flags.reviseFrom && '--revise-from', flags.reviseLoop && '--revise-loop',
+      flags.reviseOf && '--revise-of', flags.teach && '--teach', loopsN === 1 && flags.retryUnknown && '--retry-unknown'].filter(Boolean);
+    if (unsupported.length) {
+      console.error(`Error: automatic hybrid generation cannot apply ${unsupported.join(', ')}. Pass --domain to choose a single medium.`);
+      process.exit(1);
+    }
+  }
+
+  let generationPrompt = prompt;
+  if (flags.conceptGraph) {
+    // nodeprompt: a concept graph (ideas + how they relate) rewrites the request into a structured brief.
+    try {
+      const { enrichPromptFromGraphFile } = await import('../dist/nodeprompt/index.js');
+      generationPrompt = enrichPromptFromGraphFile(prompt, path.resolve(flags.conceptGraph));
+      console.log(`🕸️  Concept graph applied: ${path.basename(flags.conceptGraph)}`);
+    } catch (error) {
+      console.error(`Error: --concept-graph ${error.message}`);
+      process.exit(1);
+    }
+  }
+  if (flags.reviseFrom && svgFragmentSpec) { console.error('Error: --revise-from cannot be combined with --output-mode fragment'); process.exit(1); }
+  if (flags.reviseFrom) {
+    // Revision loop: the previous loop's accepted source + judge critique + frames become part of this Create's brief.
+    try {
+      const { loadPriorRun, buildRevisionPrompt } = await import('../dist/generators/revision/RevisionBrief.js');
+      const prior = loadPriorRun(path.resolve(flags.reviseFrom));
+      const loopNo = flags.reviseLoop ?? 2;
+      generationPrompt = buildRevisionPrompt({ request: prompt, loop: loopNo, of: flags.reviseOf ?? loopNo,
+        priorSource: prior.source, priorScore: prior.score, critique: prior.critique,
+        rejectionReasons: prior.rejectionReasons, frames: prior.frames });
+      console.log(`♻️  Revising loop ${loopNo - 1} (score ${prior.score === null ? 'unscored' : prior.score.toFixed(2)}, ${prior.source.length} chars of source, ${prior.frames.length} frame(s)) from ${prior.artifactDirectory}\n`);
+    } catch (error) {
+      console.error(`Error: ${error.message}`);
+      process.exit(1);
+    }
+  }
+  if (svgFragmentSpec) {
+    const { buildFragmentBrief, routeFragmentDomain } = await import('../dist/generators/svg/SVGFragment.js');
+    const routed = routeFragmentDomain(detectedDomain);
+    if (!routed.ok) {
+      console.error('Error: ' + routed.error);
+      process.exit(1);
+    }
+    if (routed.route.reroutedFrom) {
+      detectedDomain = routed.route.domain;
+      console.log('🔁 ' + routed.route.notice + '\n');
+    }
+    generationPrompt = buildFragmentBrief(generationPrompt, svgFragmentSpec);
   }
 
   // Reverse mode (#711): references become feature cards and an arc, appended to the prompt.
   let reverseBrief = null;
+  let visionCalls = 0;
+  let createCap = flags.maxProviderCalls ?? defaultCreateCap;
   try {
-    const { parseReverseFlags, prepareReverseGoverned } = await import('../dist/cli/ReverseCli.js');
+    const { parseReverseFlags, prepareReverseGoverned, isImagePath } = await import('../dist/cli/ReverseCli.js');
+    const { planReverseCalls } = await import('../dist/cli/ProviderCallPlan.js');
     const { applyReverseBrief } = await import('../dist/reverse/ReverseBrief.js');
-    const reverseFlags = parseReverseFlags(flags);
+    const reverseFlags = useHybridPlanner ? null : parseReverseFlags(flags);
     if (reverseFlags) {
+      visionCalls = reverseFlags.arcPath && isImagePath(reverseFlags.arcPath) ? 1 : 0;
+      if (flags.maxProviderCalls !== undefined) createCap = planReverseCalls(flags.maxProviderCalls, visionCalls).createCap;
+      if (staged && createCap < defaultCreateCap) throw new Error('LIMINAL_STAGED_TRANSPORT_CAP_TOO_LOW');
       const prepared = await prepareReverseGoverned(reverseFlags, path.resolve(outDir));
       for (const line of prepared.notices) console.log('🔁 ' + line);
       reverseBrief = prepared.brief;
@@ -2292,17 +2882,142 @@ if (cmd === 'generate' || cmd === 'gen' || cmd === 'g' || (flags.prompt && (!cmd
     process.exit(1);
   }
 
+  // Reference pictures go through src/media first: real image bytes only, size-capped, hashed. The receipt lands beside the piece.
+  if (!useHybridPlanner && flags.ref) {
+    try {
+      const { loadImageAttachment, attachmentReceipt } = await import('../dist/media/ImageAttachment.js');
+      const { isImagePath } = await import('../dist/cli/ReverseCli.js');
+      const receipts = [];
+      for (const refPath of flags.ref.filter(isImagePath)) {
+        const att = loadImageAttachment(path.resolve(refPath), { role: 'reference', source: 'cli', allowRoots: [path.dirname(path.resolve(refPath))], stageDir: path.join(path.resolve(outDir), '.image-stage') });
+        receipts.push(attachmentReceipt(att, { originalName: att.originalName }));
+      }
+      if (receipts.length) {
+        fs.mkdirSync(path.resolve(outDir), { recursive: true });
+        fs.writeFileSync(path.join(path.resolve(outDir), 'reference.receipt.json'), JSON.stringify(receipts, null, 2) + '\n', 'utf8');
+        console.log('Reference images checked: ' + receipts.length + ' (sha256 ' + receipts.map(r => r.imageSha256.slice(0, 12)).join(', ') + ')');
+      }
+    } catch (error) {
+      console.error('Error: reference image rejected: ' + error.message);
+      process.exit(1);
+    }
+  }
+
+  // Saved seed (gallery): its prompt and note join the brief so the new piece builds on it.
+  if (flags.seed) {
+    try {
+      const { SeedArchive } = await import('../dist/gallery/SeedArchive.js');
+      const saved = await new SeedArchive(path.join(os.homedir(), '.sinter', 'seeds')).loadSeed(flags.seed);
+      if (!saved) throw new Error('no saved seed named ' + flags.seed + ' (sinter seed list)');
+      generationPrompt = generationPrompt + '\n\nBuild on saved seed "' + flags.seed + '": ' + (saved.prompt || '') + (saved.note ? ' (' + saved.note + ')' : '');
+      console.log('Seed ' + flags.seed + ' added to the brief');
+    } catch (error) {
+      console.error('Error: --seed ' + error.message);
+      process.exit(1);
+    }
+  }
+
+  // Critique memo: a reviewer's verdict and high-priority notes are appended to the brief (src/collab EvaluationMemo).
+  if (flags.memo) {
+    try {
+      const { formatMemo } = await import('../dist/collab/EvaluationMemo.js');
+      const memo = JSON.parse(fs.readFileSync(path.resolve(flags.memo), 'utf8'));
+      generationPrompt = generationPrompt + '\n\nReviewer critique to address (from ' + memo.generatedBy + '):\n' + formatMemo(memo);
+      console.log('Critique memo from ' + memo.generatedBy + ' (' + memo.finalVerdict + ') added to the brief');
+    } catch (error) {
+      console.error('Error: --memo ' + error.message);
+      process.exit(1);
+    }
+  }
+
+  // Voice brief: a recording's measured colour, motion, shape and energy are appended to the brief.
+  if (flags.voiceFile) {
+    try {
+      const { analyzeVoiceFile, applyVoiceBrief } = await import('../dist/audio/VoiceBrief.js');
+      generationPrompt = applyVoiceBrief(generationPrompt, await analyzeVoiceFile(path.resolve(flags.voiceFile)));
+      console.log('🎤 Voice brief: ' + path.basename(flags.voiceFile) + ' analysed; its palette, motion and form go into the brief');
+    } catch (error) {
+      console.error(`Error: --voice-file ${error.message}`);
+      process.exit(1);
+    }
+  }
+
+  if (useHybridPlanner) {
+    console.log('🎯 No medium cue in the prompt: handing the choice of medium to S1NTR\'s planner\n');
+    const { spawnSync } = await import('node:child_process');
+    const composed = spawnSync(process.execPath, [process.argv[1], 'compose', '--hybrid', '--prompt', generationPrompt,
+      '-o', path.resolve(outDir),
+      ...(flags.gallery ? ['--gallery', flags.gallery] : []),
+      ...(flags.loops !== undefined ? ['--loops', String(flags.loops)] : []),
+      ...(flags.retryUnknown ? [flags.retryUnknown === true ? '--retry-unknown' : '--retry-unknown=' + flags.retryUnknown] : []),
+      ...(flags.maxProviderCalls !== undefined ? ['--max-provider-calls', String(flags.maxProviderCalls)] : []),
+      ...(flags.attempt ? ['--attempt', flags.attempt] : []),
+      ...(flags.hybridLayers ? ['--layers', flags.hybridLayers] : []),
+      ...(flags.exportLayer !== undefined ? ['--export-layer', String(flags.exportLayer)] : []),
+      ...(flags.ref ?? []).flatMap(ref => ['--ref', ref ?? '']),
+      ...(flags.arc !== undefined ? ['--arc', flags.arc] : []),
+      ...(flags.duration !== undefined ? ['--duration', flags.duration] : []),
+      ...(flags.cues !== undefined ? ['--cues', flags.cues] : [])], { stdio: 'inherit' });
+    if (composed.error) console.error('Error: ' + composed.error.message);
+    process.exit(composed.status ?? 1);
+  }
+
   try {
-    const governed = await runProductionCliGenerate({ prompt: generationPrompt,
+    const { decideGenerateMedium } = await import('../dist/core/MediumLine.js');
+    let governed;
+    if (loopsN > 1) {
+      // Improvement loops: N governed Creates in one invocation, each its own folder/artifact/score/critique.
+      const { runGovernedLoops } = await import('../dist/cli/LiminalProductionLoops.js');
+      const perLoop = createCap;
+      console.log(`🧾 Provider budget: ${perLoop} per loop x ${loopsN} loops = ${perLoop * loopsN}`);
+      const run = await runGovernedLoops({ request: generationPrompt, domain: detectedDomain || 'p5', loops: loopsN,
+        outputRoot: path.resolve(outDir), providerCallsPerLoop: perLoop, resumeKey: flags.attempt ?? undefined, attemptPrefix: flags.attempt, retryUnknown: flags.retryUnknown, retryArgs: args,
+        log: (l) => console.log('♻️  ' + l), verifyResumedCreates: true,
+        generateOne: async ({ prompt: loopPrompt, outputRoot: loopRoot, attemptId, providerCallsMaximum, replayOnly, onRetryUnknown }) => {
+          const g = await runProductionCliGenerate({ prompt: loopPrompt, domain: detectedDomain || 'p5', outputRoot: loopRoot,
+            mediumDecision: decideGenerateMedium({ domain: detectedDomain || 'p5', forced: Boolean(flags.domain), detected: flags.domain ? undefined : detectedDomain }),
+            fragmentSpec: svgFragmentSpec, maxTransportAttempts: providerCallsMaximum, adoptReplayedArtifacts: true, replayOnly, onRetryUnknown,
+            attemptId,
+            ...(flags.teach ? { teachScope: flags.teach } : {}) });
+          const ev = g.result.evaluation;
+          const real = ev.admissionEligible === true;
+          console.log(`   loop result: ${real ? 'score ' + ev.score.toFixed(2) : 'ineligible'}; provider calls ${g.result.attempts.consumed}/${g.result.attempts.maximum}; saved ${g.sourcePath}`);
+          if (!g.artifactsPresent) throw new Error('LOOP_REPLAY_NO_ARTIFACT: the shared runtime already held this loop Create; use --attempt <new id> or a fresh -o to run it again');
+          return { score: real ? ev.score : null, critique: ev.reasoning ?? '', providerCalls: g.result.attempts.consumed,
+            model: g.result.roles.generator, prior: g.prior, payload: g };
+        } });
+      const m = run.manifest;
+      console.log('');
+      console.log(`🏁 Loops: ${m.records.map((r) => `r${r.loop}=${r.status === 'failed' ? 'FAILED' : r.score === null ? 'unscored' : r.score.toFixed(2)}${r.best ? '*' : ''}`).join('  ')}  (* = best; manifest ${path.join(path.resolve(outDir), 'loops-manifest.json')})`);
+      console.log(`🧾 Provider calls: ${m.providerCallsConsumed}/${m.providerCallBudget}${m.providerCallsUnverified ? ` (+ ${m.providerCallsUnverified} unverified)` : ''}`);
+      if (typeof flags.retryUnknown === 'number') {
+        const target = m.records.find(record => record.loop === flags.retryUnknown);
+        console.log(`Loop ${flags.retryUnknown}: ${target.status} (${target.outputRoot})`);
+        process.exit(target.status === 'failed' ? 1 : 0);
+      }
+      if (!run.best) {
+        console.error('❌ No loop produced an eligible artifact. See loops-manifest.json for each loop\'s error.');
+        process.exit(1);
+      }
+      governed = run.best.payload;
+      console.log(`⭐ Best loop: r${run.bestLoop}`);
+    } else {
+    governed = await runProductionCliGenerate({ prompt: generationPrompt,
       domain: detectedDomain || 'p5', outputRoot: path.resolve(outDir),
+      mediumDecision: decideGenerateMedium({ domain: detectedDomain || 'p5',
+        forced: Boolean(flags.domain), detected: flags.domain ? undefined : detectedDomain }),
       fragmentSpec: svgFragmentSpec,
-      maxTransportAttempts: flags.maxProviderCalls ?? 2,
-      retryUnknownOutcome: flags.retryUnknown === true });
+      maxTransportAttempts: createCap,
+      retryUnknownOutcome: flags.retryUnknown === true,
+      ...(flags.attempt ? { attemptId: flags.attempt } : {}),
+      ...(flags.teach ? { teachScope: flags.teach } : {}) });
+    }
     const result = governed.result;
+    let finalTake = governed;
     console.log('');
     for (const line of formatGovernedHeadline(result.evaluation)) console.log(line);
     if (result.evaluation.degraded || !result.evaluation.identityValid) {
-      console.log(`⭐ Quality score: degraded (no real score) (failureClass=${result.evaluation.failureClass || 'unknown'}, confidence=${result.evaluation.confidence ?? 0})`);
+      console.log(`⭐ Quality score: unscored (judge could not score) (failureClass=${result.evaluation.failureClass || 'unknown'}, confidence=${result.evaluation.confidence ?? 0})`);
       const why = formatDegradedWhy({ rejectionReasons: result.evaluation.rejectionReasons,
         runtimeErrors: result.evidence?.runtimeErrors, reasoning: result.evaluation.reasoning });
       if (why) console.log(why);
@@ -2311,9 +3026,23 @@ if (cmd === 'generate' || cmd === 'gen' || cmd === 'g' || (flags.prompt && (!cmd
     }
     console.log('🤖 Model: ' + result.roles.generator);
     console.log(`🧾 Provider calls: ${result.attempts.consumed}/${result.attempts.maximum}`);
+    const replayNotice = replayNoticeLines(governed, path.resolve(outDir));
+    if (replayNotice) {
+      // A replay (the shared runtime already holds this Create) or lost bytes: nothing was saved at -o. Never claim it was.
+      for (const line of replayNotice) console.error(line);
+      process.exit(NO_ARTIFACT_EXIT_CODE);
+    }
     await history.add(prompt);
+    if (flags.parent) {
+      const { LineageTracker } = await import('../dist/emergence/index.js');
+      const child = await new LineageTracker().record({ artifactId: result.operationId, parentIds: [flags.parent], provenance: 'branch',
+        runId: result.operationId, runParams: { lineageId: result.lineageId, domain: result.domain, sourcePath: governed.sourcePath } });
+      console.log(`🌿 Branched from ${flags.parent} -> ${child.artifactId} (sinter archive lineage ${child.artifactId})`);
+    }
     console.log('✅ Saved: ' + governed.sourcePath);
     console.log('✅ HTML: ' + governed.playablePath);
+    if (governed.previewPath) console.log('✅ Preview: ' + governed.previewPath);
+    if (governed.mediumLine) console.log('🧭 ' + governed.mediumLine);
     if (reverseBrief) {
       const { writeReverseProvenance } = await import('../dist/cli/ReverseCli.js');
       const { shouldFit, runReverseFit, describeFit } = await import('../dist/cli/ReverseFit.js');
@@ -2322,19 +3051,33 @@ if (cmd === 'generate' || cmd === 'gen' || cmd === 'g' || (flags.prompt && (!cmd
       let fitFailed = false;
       if (shouldFit(detectedDomain, reverseBrief)) {
         console.log('🎚️  Fit check: rendering to measure length, final hit, and arc fit (needs a browser)...');
+        const { revisionCap } = await import('../dist/cli/ProviderCallPlan.js');
         const fitted = await runReverseFit({ domain: detectedDomain, brief: reverseBrief,
           sourcePath: governed.sourcePath,
           regenerate: async (critique) => {
+            const cap = flags.maxProviderCalls === undefined ? defaultCreateCap : revisionCap(flags.maxProviderCalls, visionCalls, result.attempts.consumed);
+            if (cap === null) {
+              throw new Error(`PROVIDER_CAP_EXHAUSTED: --max-provider-calls ${flags.maxProviderCalls} is spent (${visionCalls} vision + ${result.attempts.consumed} create); the fit revision was not run`);
+            }
             console.log('🔁 Fit check missed; revising once with the measured critique...');
             return runProductionCliGenerate({ prompt: generationPrompt + '\n\n' + critique,
               domain: detectedDomain, outputRoot: path.resolve(outDir), fragmentSpec: null,
-              maxTransportAttempts: flags.maxProviderCalls ?? 2, retryUnknownOutcome: false });
+              maxTransportAttempts: cap, retryUnknownOutcome: false,
+              ...(flags.teach ? { teachScope: flags.teach } : {}) });
           } });
         provenance = fitted.provenance;
         provenanceDir = path.dirname(fitted.sourcePath);
+        // Sol L3-17: the revised take is the one the operator is told to use, so its Create is the one reported and exited on.
+        if (fitted.revisedTake) {
+          finalTake = fitted.revisedTake;
+          console.log('');
+          console.log('🎯 Final take (revised): ' + finalTake.sourcePath);
+          console.log('✅ Revised HTML: ' + finalTake.playablePath);
+          console.log('🧾 Revision provider calls: ' + finalTake.result.attempts.consumed + '/' + finalTake.result.attempts.maximum);
+          for (const line of formatGovernedHeadline(finalTake.result.evaluation)) console.log(line);
+        }
         fitFailed = !fitted.fit.passed;
         console.log('🎚️  Fit: ' + describeFit(fitted.fit));
-        if (fitted.sourcePath !== governed.sourcePath) console.log('✅ Revised source: ' + fitted.sourcePath);
       } else if (reverseBrief.provenance.durationSec !== null) {
         console.log('🎚️  Fit check runs for tone and strudel only; ' + (detectedDomain || 'p5') + ' output is not measured.');
       }
@@ -2345,9 +3088,11 @@ if (cmd === 'generate' || cmd === 'gen' || cmd === 'g' || (flags.prompt && (!cmd
       }
     }
     if (governed.fragmentPath) console.log('Fragment: ' + governed.fragmentPath);
-    console.log('🧾 Authority receipt: ' + result.receipt.signature);
+    if (governed.hostProofPath) console.log('Host proof: ' + governed.hostProofPath);
+    console.log('🧾 Signed receipt: ' + finalTake.result.receipt.signature);
     console.log('');
-    process.exit(0);
+    // 0 accepted, 3 generated-but-not-accepted (files saved), 4 replay with no artifact at -o, 1 error.
+    process.exit(governedExitCode(finalTake.result.evaluation));
   } catch (err) {
     console.error('');
     console.error('❌ Error:', err.message);
@@ -2384,7 +3129,11 @@ else if (cmd === 'serve' || cmd === 's') {
     dreamActivationCommands: liminalRuntime.dreamActivation,
     compoundCreateCommands: liminalRuntime.compoundCreate });
   const server = new TuiBridgeServer(bridge, { port });
-  server.previewEndpoints.setGalleryDir(path.resolve(flags.gallery || 'gallery'));
+  const { resolveServeGalleryDirs } = await import('../dist/tui-bridge/TuiBridgeServer.js');
+  const serveDirs = resolveServeGalleryDirs(flags.gallery);
+  server.previewEndpoints.setGalleryDir(serveDirs.galleryDir);
+  // #1711: also list what `generate` saved under ~/.sinter/output/artifacts (unless --gallery names a dir).
+  server.previewEndpoints.setArtifactsDir(serveDirs.artifactsDir);
 
   function findLatestSketch(dirs) {
     let latestSketch = null;
@@ -2408,10 +3157,10 @@ else if (cmd === 'serve' || cmd === 's') {
     return latestSketch;
   }
 
-  const searchDirs = [
-    path.join(process.env.HOME || '/tmp', '.sinter', 'output'),
-    path.join(process.cwd(), 'gallery'),
-  ];
+  // Same roots the gallery lists: --gallery names the only root; otherwise the saved-output dir plus ./gallery (Sol F14).
+  const searchDirs = flags.gallery
+    ? [serveDirs.galleryDir]
+    : [path.join(process.env.HOME || '/tmp', '.sinter', 'output'), serveDirs.galleryDir];
 
   const latestSketch = findLatestSketch(searchDirs);
   let sketchCode = '';
@@ -2424,7 +3173,7 @@ else if (cmd === 'serve' || cmd === 's') {
     console.log('   sinter --prompt "your idea"');
   }
 
-  server.previewEndpoints.serveSketch(sketchCode);
+  server.previewEndpoints.serveSketch(sketchCode, latestSketch ? fs.statSync(latestSketch.path).mtimeMs : 0);
   const shutdown = async () => {
     await server.stop();
     await liminalRuntime.close();
@@ -2557,7 +3306,7 @@ else if (cmd === 'compost') {
     process.exit(0);
   }
 
-  const action = parseArgs(process.argv.slice(2));
+  const action = parseArgs(leafArgv());
 
   // Bootstrap metabolic entropy engine
   const { EventStore } = await import('../dist/compost/EventStore.js');
@@ -2578,7 +3327,16 @@ else if (cmd === 'compost') {
     telemetry,
   });
 
-  const mill = new CompostMill(llm, { soupEnabled: true, fastLLM, modelRouter, entropy: entropyEngine });
+  // Timeline commands (log/undo/branch/history) read and write the project's event store; without one they only
+  // printed "Project history is not enabled". Open it in the project directory for exactly those actions.
+  let projectStore;
+  if (['log', 'undo', 'branch', 'history'].includes(action.command)) {
+    const { ProjectStore } = await import('../dist/compost/ProjectStore.js');
+    projectStore = new ProjectStore({ projectRoot: process.cwd() });
+    projectStore.init();
+  }
+  const mill = new CompostMill(llm, { soupEnabled: true, fastLLM, modelRouter, entropy: entropyEngine,
+    ...(projectStore ? { projectStore } : {}) });
   // Product-owned fix (CEO 2026-09-19): bind executor transport authority around compost
   // LLM work — the mill ran bare (#717) and its fragment scorer degraded to neutral 5/10.
   const { bootstrapExecutorAuthority } = await import('../dist/identity/executorAuthorityBootstrap.js');
@@ -2599,7 +3357,7 @@ else if (cmd === 'compost') {
 else if (cmd === 'composite') {
   const specPath = flags.spec;
   if (!specPath) {
-    console.error('Usage: sinter composite --spec <spec.json> [--output <plan.json>]');
+    console.error('Usage: sinter composite --spec <spec.json> [--output <plan.json>] [--render [--render-out <dir>]]');
     process.exit(1);
   }
 
@@ -2635,6 +3393,47 @@ else if (cmd === 'composite') {
       fs.writeFileSync(outputPath, JSON.stringify(plan, null, 2));
       console.log(`  Plan written to: ${outputPath}`);
     }
+    if (flags.render) {
+      // The validated spec becomes a compose spec (the real source media of each layer, embedded), and the
+      // existing compose path renders it to composition.html.
+      const renderDir = path.resolve(flags.renderOut || 'composite-render');
+      fs.mkdirSync(renderDir, { recursive: true });
+      // Each spec layer renders its own media: the source file is embedded (data URI) in an html layer, so the page holds
+      // the real picture, clip or sound. Blend and opacity are applied by compose. Code is supplied, so no provider call.
+      const mimeOf = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
+        '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime', '.wav': 'audio/wav', '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg', '.m4a': 'audio/mp4', '.flac': 'audio/flac' };
+      const maxLayerBytes = 24 * 1024 * 1024;
+      const layerHtml = (layer) => {
+        const src = path.resolve(layer.source);
+        if (!fs.existsSync(src)) throw new Error('layer source not found: ' + layer.source);
+        const bytes = fs.readFileSync(src);
+        if (bytes.length > maxLayerBytes) throw new Error('layer source over ' + (maxLayerBytes >> 20) + ' MB cannot be embedded: ' + layer.source);
+        const mime = mimeOf[path.extname(src).toLowerCase()];
+        if (!mime) throw new Error('layer source type not supported: ' + layer.source);
+        const uri = 'data:' + mime + ';base64,' + bytes.toString('base64');
+        const css = '<style>html,body{margin:0;height:100%;background:transparent;overflow:hidden}.m{width:100%;height:100%;object-fit:cover;display:block}</style>';
+        const el = mime.startsWith('image/') ? '<img class="m" alt="" src="' + uri + '">'
+          : mime.startsWith('video/') ? '<video class="m" src="' + uri + '" autoplay muted loop playsinline></video>'
+          : '<audio src="' + uri + '" autoplay loop controls></audio>';
+        return '<!doctype html><html><head><meta charset="utf-8">' + css + '</head><body>' + el + '</body></html>';
+      };
+      const composeSpec = {
+        title: 'Composite ' + spec.width + 'x' + spec.height,
+        layers: (spec.layers ?? []).map(layer => ({
+          domain: 'html',
+          prompt: 'Layer from ' + path.basename(layer.source),
+          code: layerHtml(layer),
+          ...(layer.blend ? { blendMode: layer.blend } : {}),
+          ...(layer.opacity !== undefined ? { opacity: layer.opacity } : {}),
+        })),
+      };
+      const composeSpecPath = path.join(renderDir, 'composite.compose-spec.json');
+      fs.writeFileSync(composeSpecPath, JSON.stringify(composeSpec, null, 2));
+      const { spawnSync } = await import('node:child_process');
+      const composed = spawnSync(process.execPath, [fileURLToPath(import.meta.url), 'compose', '--spec', composeSpecPath, '--output', renderDir], { stdio: 'inherit', env: process.env });
+      if (composed.status !== 0) { console.error('Composite render failed: compose exited ' + composed.status); process.exit(composed.status || 1); }
+      console.log('Rendered: ' + path.join(renderDir, 'composition.html'));
+    }
     console.log('Done.');
     process.exit(0);
   } catch (err) {
@@ -2642,58 +3441,45 @@ else if (cmd === 'composite') {
     process.exit(1);
   }
 }
-else if (cmd === 'sing') {
-  // Studio -> Sing bridge: generate a voice-reactive visual (ANY single domain,
-  // or a layered composition) and print a Sing URL so you can sing over your own
-  // generated art. The visual is a full HTML artifact wrapped with the voice
-  // bridge, so it reacts to live singing via window.sing.
-  const nlPrompt = flags.prompt || (cmdArgs.length ? cmdArgs.join(' ') : undefined);
-  if (!nlPrompt) {
-    console.error('Usage: sinter sing "<prompt>" [--domain p5|three|hydra|shader|svg|ascii|kinetic] [--compose]');
-    console.error('  Default is a layered composition (a blend of domains); pass --domain for a single one.');
-    console.error('  Prints a Sing URL — start Sing with `pnpm --filter sing dev`, then open it and sing.');
-    process.exit(1);
-  }
-  const wantSingle = Boolean(flags.domain) || flags.single === true;
-  const wantCompose = flags.compose === true || !wantSingle;
-  // Sing lives in simon/loopcover; the public snapshot has no dist/sing.
-  let generateSingPreset;
-  try { ({ generateSingPreset } = await import('../dist/sing/SingPresetGenerator.js')); }
-  catch { console.error('Sing is not part of this build (it moved to its own project).'); process.exit(1); }
-  console.log('🎤 Generating Sing preset' + (flags.domain ? ' [' + flags.domain + ']' : wantCompose ? ' [composition]' : '') + '...');
-  console.log('');
-  try {
-    const { preset, mode, domain: usedDomain } = await generateSingPreset(nlPrompt, {
-      domain: wantSingle ? flags.domain : undefined,
-      compose: wantCompose,
-    });
-    const singPublic = path.join(repoRoot, 'packages', 'sing', 'public', 'presets');
-    fs.mkdirSync(singPublic, { recursive: true });
-    const file = path.join(singPublic, preset.id + '.json');
-    const json = JSON.stringify(preset, null, 2);
-    fs.writeFileSync(file, json, 'utf-8');
-    const homeDir = path.join(os.homedir(), '.sinter', 'sing-presets');
-    fs.mkdirSync(homeDir, { recursive: true });
-    fs.writeFileSync(path.join(homeDir, preset.id + '.json'), json, 'utf-8');
-    console.log('✅ ' + preset.name + '  (mode: ' + mode + (usedDomain ? ', domain: ' + usedDomain : '') + ')');
-    console.log('✅ Saved: ' + file);
-    console.log('');
-    console.log('🎶 Sing over it — start Sing (`pnpm --filter sing dev`), then open:');
-    console.log('   http://localhost:5176/?preset=/presets/' + preset.id + '.json');
-    console.log('');
-    process.exit(0);
-  } catch (err) {
-    console.error('❌ Sing preset generation failed: ' + (err && err.message ? err.message : err));
-    process.exit(1);
-  }
-}
 else if (cmd === 'compose') {
   // End-to-end layered work: generate every layer via the domain generators and
   // assemble one standalone composite HTML (stacked, blended visual layers +
   // audio). This is the "combine outputs" path — Sinter's core mixing capability.
-  const specPath = flags.spec;
+  let specPath = flags.spec;
   const campaignExecutionPath = flags.campaignExecution;
   const nlPrompt = flags.prompt || (cmdArgs.length ? cmdArgs.join(' ') : undefined);
+  let composeLoopsN = 1;
+  if (flags.loops !== undefined) {
+    try { composeLoopsN = (await import('../dist/cli/LiminalProductionLoops.js')).parseLoopsFlag(flags.loops); } catch (error) {
+      console.error('Error: ' + error.message); process.exit(1);
+    }
+    if (composeLoopsN > 1 && (specPath || flags.w9Brief || campaignExecutionPath || flags.regenerateLayer || !nlPrompt)) {
+      console.error('Error: compose --loops N revises a layered piece made from an idea: use --prompt "<idea>" (a frozen --spec, --campaign-execution, --w9-brief or --regenerate-layer has no idea to improve).');
+      process.exit(1);
+    }
+  }
+  if (flags.retryUnknown && composeLoopsN === 1) {
+    console.error('Error: compose --retry-unknown requires --loops N with N greater than 1.');
+    process.exit(1);
+  }
+  if (flags.w9Brief) {
+    // Wave 9 campaign briefs: three frozen multi-node CompositionGraphs. `list` shows them; an id composes that graph.
+    const { W9_BRIEFS } = await import('../dist/creative-run/w9Briefs.js');
+    if (flags.w9Brief === 'list') {
+      for (const b of W9_BRIEFS) console.log(`${b.id.padEnd(12)} ${String(b.graph.nodes.length).padStart(2)} nodes  ${b.medium.padEnd(5)} ${b.title}`);
+      process.exit(0);
+    }
+    const brief = W9_BRIEFS.find((b) => b.id === flags.w9Brief);
+    if (!brief || specPath || nlPrompt) {
+      console.error(brief ? 'Error: --w9-brief replaces --spec/--prompt' : `Error: unknown --w9-brief "${flags.w9Brief}" (try: list)`);
+      process.exit(1);
+    }
+    const w9Dir = path.resolve(flags.output || 'output');
+    fs.mkdirSync(w9Dir, { recursive: true });
+    specPath = path.join(w9Dir, `w9-${brief.id}.graph.json`);
+    fs.writeFileSync(specPath, JSON.stringify(brief.graph, null, 2));
+    console.log(`🧩 W9 brief "${brief.title}": ${brief.graph.nodes.length} nodes -> ${path.basename(specPath)}`);
+  }
   if (!specPath && !campaignExecutionPath && !nlPrompt && !flags.regenerateLayer) {
     console.error('Usage: sinter compose (--prompt "<idea>" | --spec <spec.json> | --campaign-execution <json>) [-o <dir>] [--export-layer <index>] [--campaign-manifest <json> --owner-review-package <json>]');
     console.error('       sinter compose --regenerate-layer <id> [-o <existing-dir>] [--spec <override.json>]');
@@ -2703,8 +3489,30 @@ else if (cmd === 'compose') {
     console.error('  --export-layer: additionally save the zero-based non-base layer as a transparent PNG');
     console.error('  --regenerate-layer: replace one persisted layer by stable ID; siblings stay unchanged');
     console.error('  domains: p5, three, shader, hydra, ascii, html, tone, strudel');
+    console.error('  layered (SINTER_LAYERED=1; --hybrid and SINTER_HYBRID_LAYERS=1 are aliases): S1NTR chooses single vs layered, domains, roles, palette, tempo and signals,');
+    console.error('    and records why in composition.hybrid.json + medium.json. --layers "glsl:background,kinetic:overlay,tone:sound" fixes the layers.');
     process.exit(1);
   }
+  if ((flags.maxProviderCalls !== undefined || flags.attempt) &&
+    (specPath || campaignExecutionPath || flags.regenerateLayer)) {
+    console.error('Error: compose --max-provider-calls and --attempt require --prompt for a generated composition.');
+    process.exit(1);
+  }
+  const composePerLoop = flags.maxProviderCalls ?? 8;
+  if (composeLoopsN > 1 && (!Number.isSafeInteger(composePerLoop) || composePerLoop < 1)) {
+    console.error('Error: compose --loops requires a positive safe integer for --max-provider-calls.');
+    process.exit(1);
+  }
+  let hybridLayers;
+  try {
+    if (flags.hybridLayers) {
+      hybridLayers = (await import('../dist/composition/hybrid/HybridPlan.js')).parseLayerList(flags.hybridLayers);
+    }
+  } catch (error) {
+    console.error('Error: --layers ' + error.message);
+    process.exit(1);
+  }
+  if (flags.hybrid || flags.hybridLayers) process.env.SINTER_LAYERED = '1';
   const outDir = flags.output || 'output';
   let composePrompt = nlPrompt;
   let composeReverse = null;
@@ -2713,9 +3521,17 @@ else if (cmd === 'compose') {
       if (specPath || campaignExecutionPath || flags.regenerateLayer || !nlPrompt) {
         throw new Error('--ref/--arc/--duration/--cues work with a compose prompt, not --spec, --campaign-execution or --regenerate-layer');
       }
-      const { parseReverseFlags, prepareReverseGoverned } = await import('../dist/cli/ReverseCli.js');
+      const { isImagePath, parseReverseFlags, prepareReverseGoverned } = await import('../dist/cli/ReverseCli.js');
       const { applyReverseBrief } = await import('../dist/reverse/ReverseBrief.js');
-      const prepared = await prepareReverseGoverned(parseReverseFlags(flags), path.resolve(outDir));
+      const reverseFlags = parseReverseFlags(flags);
+      if (reverseFlags.arcPath && isImagePath(reverseFlags.arcPath)) {
+        if (flags.maxProviderCalls !== undefined) {
+          throw new Error('compose cannot include an image --arc in --max-provider-calls. Pass a JSON or SVG arc to keep the provider cap.');
+        }
+        console.log('🧾 Image arc analysis has a separate one-request limit before composition.');
+      }
+      const replayImageArcOnly = composeLoopsN > 1 && (flags.retryUnknown || fs.existsSync(path.join(outDir, 'loops-manifest.json')));
+      const prepared = await prepareReverseGoverned(reverseFlags, path.resolve(outDir), { replayImageArcOnly });
       for (const line of prepared.notices) console.log('🔁 ' + line);
       composeReverse = prepared.brief;
       composePrompt = applyReverseBrief(nlPrompt, composeReverse);
@@ -2825,14 +3641,61 @@ else if (cmd === 'compose') {
       const spec = JSON.parse(fs.readFileSync(specPath, 'utf-8'));
       console.log('🎨 Composing ' + (spec.nodes?.length ?? spec.layers?.length ?? 0) + ' graph nodes...');
       console.log('');
-      result = await coordinator.compose(spec, { entryPoint: 'cli-compose' });
+      // A spec layer with a prompt calls the provider: open the same receipted grant the --prompt branch uses.
+      const { runProductionCliCycleEffect } = await import('../dist/cli/LiminalProductionProviderEffect.js');
+      const { randomUUID: specRunId } = await import('node:crypto');
+      result = await runProductionCliCycleEffect({
+        idempotencyKey: 'production-compose-spec:' + specRunId(),
+        binding: { surface: 'compose-spec', specPath: path.resolve(specPath) },
+        maxGeneratorAttempts: flags.maxProviderCalls ?? (Array.isArray(spec.nodes) ? spec.nodes.length
+          : Array.isArray(spec.layers) ? spec.layers.length : 0),
+        effect: () => coordinator.compose(spec, { entryPoint: 'cli-compose' }),
+      });
     } else {
       console.log('🧩 Decomposing idea into layers...');
       console.log('');
       const { runProductionCliCompose } = await import('../dist/cli/LiminalProductionCompose.js');
+      if (composeLoopsN > 1) {
+        // Improvement loops for layered pieces: loops/rK each a governed compose; loop k+1 carries loop k's plan, layer code, stills and critique.
+        const { runComposeLoops } = await import('../dist/cli/LiminalProductionComposeLoops.js');
+        const perLoop = composePerLoop;
+        console.log(`🧾 Provider budget: ${perLoop} per loop x ${composeLoopsN} loops = ${perLoop * composeLoopsN} (planner call + regenerated layers; kept layers cost none)`);
+        const looped = await runComposeLoops({ prompt: composePrompt, outputRoot: path.resolve(outDir), loops: composeLoopsN, delegate: coordinator,
+          providerCallsPerLoop: perLoop, attemptId: flags.attempt, retryUnknown: flags.retryUnknown, retryArgs: args, reverseProvenance: composeReverse?.provenance,
+          ...(hybridLayers ? { hybridLayers } : {}), log: (l) => console.log('♻️  ' + l) });
+        const m = looped.manifest;
+        console.log('');
+        console.log(`🏁 Loops: ${m.records.map((r) => `r${r.loop}=${r.status === 'failed' ? 'FAILED' : r.score === null ? 'unscored' : r.score.toFixed(2)}${r.best ? '*' : ''}`).join('  ')}  (* = best${m.bestBasis === 'last-unscored' ? ', last loop: no numeric score for this piece' : ''}; manifest ${path.join(path.resolve(outDir), 'loops-manifest.json')})`);
+        console.log(`🧾 Provider calls: ${m.providerCallsConsumed}/${m.providerCallBudget}${m.providerCallsUnverified ? ` (+ ${m.providerCallsUnverified} unverified)` : ''}`);
+        if (typeof flags.retryUnknown === 'number') {
+          const target = m.records.find(record => record.loop === flags.retryUnknown);
+          console.log(`Loop ${flags.retryUnknown}: ${target.status} (${target.outputRoot})`);
+          process.exit(target.status === 'failed' ? 1 : 0);
+        }
+        if (looped.bestFolder === null) {
+          console.error('❌ No loop produced a piece. See loops-manifest.json for each loop\'s error.');
+          process.exit(1);
+        }
+        const { publishComposeLoop } = await import('../dist/cli/LiminalProductionComposeLoops.js');
+        const published = await publishComposeLoop(looped, path.resolve(outDir), {
+          exportLayer: flags.exportLayer,
+          galleryDir: flags.gallery ? path.resolve(flags.gallery) : undefined,
+        });
+        if (published.layerPng) console.log('✅ Transparent layer PNG: ' + published.layerPng);
+        if (published.provenance) console.log('🧾 Reverse provenance: ' + published.provenance);
+        if (published.gallery) console.log('🖼️  Gallery: ' + published.gallery.slug + ' v' + published.gallery.version);
+        console.log(`⭐ Best loop: r${looped.bestLoop} (copied to ${path.resolve(outDir)}; every loop is saved in loops/rK)`);
+        console.log('✅ Saved: ' + path.join(outDir, 'composition.html'));
+        process.exit(0);
+      }
+      const { hashReverseProvenance } = await import('../dist/reverse/ReverseBrief.js');
       const governed = await runProductionCliCompose({
         prompt: composePrompt,
         outputRoot: path.resolve(outDir),
+        attemptId: flags.attempt,
+        maxProviderCalls: flags.maxProviderCalls,
+        referenceProvenanceSha256: composeReverse ? hashReverseProvenance(composeReverse.provenance) : undefined,
+        ...(hybridLayers ? { hybridLayers } : {}),
       }, coordinator);
       result = governed.result;
     }
@@ -2865,7 +3728,32 @@ else if (cmd === 'compose') {
           url: review.handle.url })), null, 2));
     }
     const htmlPath = path.join(outDir, 'composition.html');
-    fs.writeFileSync(htmlPath, result.html, 'utf-8');
+    if (!result.hybridPlan) fs.writeFileSync(htmlPath, result.html, 'utf-8');
+    // Say what S1NTR built. Hybrid pieces also get the plan, the render check and the stills.
+    try {
+      const mediumFile = path.join(outDir, 'medium.json');
+      if (result.hybridPlan) {
+        const { writeHybridArtifacts } = await import('../dist/composition/hybrid/HybridComposition.js');
+        const art = await writeHybridArtifacts(outDir, result, { plan: result.hybridPlan, html: result.html, build: result.hybridBuild });
+        console.log('🧭 ' + art.medium.made_with);
+        console.log('🔎 Hybrid render check: ' + art.judgement.verdict.toUpperCase()
+          + (art.judgement.frameChange !== undefined ? ' — early/late frame change ' + art.judgement.frameChange.toFixed(4) : '')
+          + (art.judgement.reason ? ' (' + art.judgement.reason + ')' : ''));
+        console.log('✅ Hybrid manifest: ' + art.manifestPath);
+      } else if (result.successCount > 0) {
+        const { describeMedium } = await import('../dist/core/MediumLine.js');
+        const ok = result.layers.filter(l => l.generated);
+        const record = describeMedium({ domain: ok[0].domain, source: '',
+          renderTarget: 'one self-contained page of stacked layers',
+          decision: { source: 'planner', reason: 'the decomposition planner split the idea into ' + ok.length + ' layer(s); it did not record per-layer reasons (set SINTER_LAYERED=1 for that)' },
+          layers: ok.map((l, i) => ({ id: 'layer-' + i, domain: l.domain, role: i === 0 ? 'background' : 'overlay' })) });
+        fs.writeFileSync(mediumFile, JSON.stringify(record, null, 2) + '\n');
+        console.log('🧭 ' + record.made_with);
+      }
+    } catch (mediumErr) {
+      console.error('❌ ' + mediumErr.message);
+      process.exit(1);
+    }
     const { writeLayerPlan, compositionOutcomeLines } = await import('../dist/composition/LayerPlan.js');
     let layerPlanPath;
     if (result.successCount > 0) {
@@ -2912,17 +3800,16 @@ else if (cmd === 'compose') {
     if (result.successCount > 0) {
       try {
         const { Gallery } = await import('../dist/gallery/Gallery.js');
-        const galleryDir = path.resolve(flags.gallery || 'gallery');
+        const { resolveSinterProjectRoot } = await import('../dist/fs/projectRoot.js');
+        const galleryDir = flags.gallery ? path.resolve(flags.gallery) : path.join(resolveSinterProjectRoot(), 'gallery');
         const gallery = new Gallery(galleryDir);
-        const slug = (result.title || 'composition')
-          .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'composition';
-        const version = (await gallery.getLatestVersion(slug)) + 1;
-        await gallery.saveComposition(slug, version, result.html, {
+        const { slug, version } = await gallery.recordComposition(result.html, {
           title: result.title,
           layers: result.layers.filter(l => l.generated).map(l => l.domain),
         });
         console.log('🖼️  Gallery: ' + slug + ' v' + version);
       } catch (galErr) {
+        if (flags.gallery) throw galErr;
         console.log('⚠️  Gallery save skipped: ' + galErr.message);
       }
     }
@@ -2949,69 +3836,15 @@ else if (cmd === 'compose') {
     process.exit(1);
   }
 }
-else if (cmd === 'chat' && cmdArgs[0] === 'reflect') {
-  // Studio reflection: the studio model distills persisted chat sessions into a
-  // taste signal and writes it to HarnessMemory, which GuidanceEngine reads forward
-  // into future generations. The chat's human signal feeding the self-improvement
-  // flywheel — runnable by any user (not only the background daemon).
-  const { SinterFS } = await import('../dist/fs/index.js');
-  const { LLMClient } = await import('../dist/llm/LLMClient.js');
-  const { reflectUnreflectedSessions } = await import('../dist/learning/StudioReflection.js');
-  const { bootstrapProductionLiminalRuntime } = await import('../dist/runtime-core/ProductionLiminalRuntime.js');
-  const { createHash, randomUUID } = await import('node:crypto');
-  const sinterFs = SinterFS.open(process.cwd());
-  let runtime = null;
-  let exitCode = 0;
-  try {
-    await LLMClient.loadRoles();
-    runtime = await bootstrapProductionLiminalRuntime();
-    const llm = new LLMClient({ role: 'studio' });
-    // Studio transports need a role-bound product grant, like every other product call.
-    const runNonce = randomUUID();
-    const governed = {
-      generate: (system, user, signal) => runtime.port.runResearchProviderEffect({
-        idempotencyKey: `studio-reflect:${runNonce}:${createHash('sha256').update(system + user).digest('hex')}`,
-        binding: { surface: 'cli-chat-reflect', run: runNonce },
-        identity: runtime.identities.studio, role: 'studio', maxTransportAttempts: 1,
-        effect: () => llm.generate(system, user, signal),
-      }),
-    };
-    const limit = Math.max(1, parseInt(cmdArgs[1] || '10', 10) || 10);
-    console.log('');
-    console.log('=== Chat Reflect (studio model distills persisted sessions → taste signal) ===');
-    const res = await reflectUnreflectedSessions(sinterFs, governed, { limit });
-    console.log(`  reflected ${res.reflected} session(s), skipped ${res.skipped}, failed ${res.failed}`);
-    for (const s of res.signals) {
-      console.log(`  [${s.sessionId.slice(0, 8)}] intent="${s.intentSummary.slice(0, 48)}" likes=${JSON.stringify(s.likes.slice(0, 3))} satisfaction=${s.satisfaction.toFixed(2)}`);
-    }
-    for (const e of res.errors) console.error(`  ✗ ${e.slice(0, 300)}`);
-    if (res.reflected > 0) {
-      console.log('  → recorded to HarnessMemory (GuidanceEngine reads these forward into future generations)');
-    }
-    if (res.failed > 0) {
-      console.log('  failed sessions stay un-reflected and are retried on the next run');
-      exitCode = 1;
-    }
-  } catch (err) {
-    console.error('Chat reflect failed:', err.message);
-    exitCode = 1;
-  } finally {
-    sinterFs.close();
-    if (runtime) await runtime.close();
-  }
-  process.exit(exitCode);
-}
 else if (cmd === 'chat') {
-  // liminal chat interactive panel retired 2026-07-24.
-  // The living conversational surface is liminal studio (pnpm gui).
-  // chat reflect still works — handled above.
-  console.log('');
-  console.log('⚠  liminal chat is retired (interactive panel removed 2026-07-24).');
-  console.log('   The living conversational surface is: liminal studio');
-  console.log('   Run `pnpm gui` from the repo root, or `node bin/sinter studio`.');
-  console.log('   The chat reflect subcommand still works: liminal chat reflect');
-  console.log('');
-  process.exit(0);
+  // studio reflection works on saved sessions. The interactive surface is Studio.
+  if (cmdArgs[0] === 'reflect') {
+    const { runChatReflect } = await import('../dist/chat/commands/chatReflect.js');
+    process.exit(await runChatReflect({ limit: parseInt(cmdArgs[1] || '10', 10) || 10 }));
+  }
+  console.error('The interactive chat panel is retired. Open sinter studio for a conversation.');
+  console.error('Use sinter chat reflect [N] to send saved sessions for reflection.');
+  process.exit(2);
 }
 else if (cmd === 'git') {
   handleGitCommand(cmdArgs[0], cmdArgs.slice(1)).then(() => {
@@ -3116,6 +3949,7 @@ else if (cmd === 'quality') {
     console.error('Usage: sinter quality <run|gate>');
     console.error('  run   --spec <path>   Run a golden suite');
     console.error('  gate  --spec <path>   Block promotion on regression');
+    console.error('  both need --candidates <dir>: one saved file per case id (<id>.html, <id>.glsl, ...)');
     process.exit(1);
   }
 
@@ -3131,6 +3965,14 @@ else if (cmd === 'quality') {
 
   const suiteJson = fs.readFileSync(suitePath, 'utf-8');
   const suite = JSON.parse(suiteJson);
+  if (!flags.candidates) {
+    console.error('Error: --candidates <dir> is required: the gate judges saved output, one file per case id');
+    process.exit(1);
+  }
+  const { loadGoldenCandidates } = await import('../dist/release/GoldenCandidates.js');
+  let goldenCandidates;
+  try { goldenCandidates = loadGoldenCandidates(suite, flags.candidates); }
+  catch (e) { console.error(`Error: ${e.message}`); process.exit(1); }
 
   console.log('');
   console.log('◆ Sinter Quality Gate');
@@ -3145,7 +3987,7 @@ else if (cmd === 'quality') {
     },
   });
 
-  const result = await runner.run(suite);
+  const result = await runner.run(suite, goldenCandidates);
   console.log('');
   console.log(`  Result: ${result.aggregate.passed}/${result.aggregate.total} passed`);
   console.log(`  Average score: ${result.aggregate.averageScore.toFixed(3)}`);
@@ -3334,8 +4176,11 @@ else if (cmd === 'second-judge') {
   //        sinter second-judge --investigate           (failed generations)
   const sub = cmdArgs[0];
   const SJ_DIR = path.join(process.cwd(), '.omx', 'atelier', 'second-judge');
+  const { readRequiredSinterConfig } = await import('../dist/cli/readRequiredSinterConfig.js');
+  let sinterCfg;
+  try { sinterCfg = readRequiredSinterConfig(sinterConfigPath(), 'second-judge'); }
+  catch (error) { console.error('SECOND_JUDGE_CONFIG_INVALID: ' + error.message); process.exit(1); }
   fs.mkdirSync(SJ_DIR, { recursive: true });
-  const sinterCfg = JSON.parse(fs.readFileSync(sinterConfigPath(), 'utf8'));
   const KILO_KEY = sinterCfg.providers?.kilo?.apiKey || '';
   const SOL_KEY = sinterCfg.roles?.evaluator?.apiKey || '';
   const JUDGE_PROMPT_FULL = (domain) => 'Judge this generative artwork using ALL senses. You see: SCREENSHOT + SOURCE CODE + METADATA (motion, domain context, round-1 scores). Score D craft, A artistic, R reliability, N novelty. Each 1-10, be strict.' + (SINTER_DOMAIN_RUBRIC[domain] ? ' DOMAIN CRITERIA — weight these: ' + SINTER_DOMAIN_RUBRIC[domain] : '') + ' Output ONLY JSON: {"D":n,"A":n,"R":n,"N":n}';
@@ -3460,7 +4305,11 @@ else if (cmd === 'second-judge') {
       const id = path.basename(artDirOf(r));
       try {
         const results = await judgeArtifact(artDirOf(r), r.domain);
-        if (results) {
+        // Sol L3-16: seats that all errored are no verdict. Saving the error-only row made later sweeps skip the piece forever.
+        if (results && !Object.values(results).some(v => v && !v.error)) {
+          console.log(`[second-judge] ${id.slice(0, 16)}… NO VERDICT from any seat (${Object.entries(results).map(([k, v]) => k + ': ' + v.error).join('; ')}); not saved, will retry next sweep`);
+          process.exitCode = 1;
+        } else if (results) {
           const round1 = r.axes || '';
           const m = round1.match(/D=([\d.]+)\s+A=([\d.]+)\s+R=([\d.]+)\s+N=([\d.]+)/);
           const r1 = m ? { D: +m[1], A: +m[2], R: +m[3], N: +m[4] } : null;
@@ -3649,7 +4498,10 @@ else if (cmd === 'third-judge') {
       const id = path.basename(artDirOf(r));
       try {
         const out = await tjJudge(artDirOf(r), r.domain, r.domains);
-        if (out) {
+        if (out && !Object.values(out.team).some(v => v && !v.error)) {
+          console.log(`[third-judge] ${id.slice(0, 16)}… NO VERDICT from any seat (${Object.entries(out.team).map(([k, v]) => k + ': ' + v.error).join('; ')}); not saved, will retry next sweep`);
+          process.exitCode = 1;
+        } else if (out) {
           const m = String(r.axes).match(/D=([\d.]+)\s+A=([\d.]+)\s+R=([\d.]+)\s+N=([\d.]+)/);
           const rec = { id, domain: out.domain || r.domain, round1: m ? { D: +m[1], A: +m[2], R: +m[3], N: +m[4] } : null,
             round1_axes: r.axes, team: out.team, consensus: tjConsensus(out.team),
@@ -3679,7 +4531,7 @@ else if (cmd === 'rescue') {
 else if (cmd === 'gbg') {
   // Glass Bead Game organ: beads + cross-domain threads + one move per wave.
   const { runGbgCommand } = await import('../dist/cli/GbgCli.js');
-  await runGbgCommand(cmdArgs);
+  await runGbgCommand(leafArgv());
 }
 else if (cmd === 'name') {
   // Naming organ (SINTER x Elixis): plates for champions + moves, semantic threads.
@@ -3689,7 +4541,7 @@ else if (cmd === 'name') {
 else if (cmd === 'taxonomy') {
   // Elixis taxonomy growth (Forgejo #930): name log -> per-domain style axes.
   const { runTaxonomyCommand } = await import('../dist/cli/TaxonomyCli.js');
-  await runTaxonomyCommand(cmdArgs);
+  await runTaxonomyCommand(leafArgv());
 }
 else if (cmd === 'field') {
   // Latent Field organ: the morphogenetic field of the artifact store.
@@ -3699,12 +4551,12 @@ else if (cmd === 'field') {
 else if (cmd === 'phases') {
   // Phase transitions organ (#927): regime changes in the score time series.
   const { runPhasesCommand } = await import('../dist/cli/PopulationCli.js');
-  await runPhasesCommand(cmdArgs);
+  await runPhasesCommand(leafArgv());
 }
 else if (cmd === 'islands') {
   // Islands organ (#927): domain-partitioned subpopulations + ring migration.
   const { runIslandsCommand } = await import('../dist/cli/PopulationCli.js');
-  await runIslandsCommand(cmdArgs);
+  await runIslandsCommand(leafArgv());
 }
 else if (cmd === 'persona') {
   // Persona Fleet organ: cognitive-style personas per machine.
@@ -3726,6 +4578,39 @@ else if (cmd === 'rotate') {
   const { runRotateCommand } = await import('../dist/cli/RotateCli.js');
   await runRotateCommand(cmdArgs);
 }
+else if (cmd === 'entropy') {
+  // Entropy organ: the seed and phrase harvested from this project's own state (trend rows, compost heap).
+  const { harvestProjectEntropy } = await import('../dist/entropy/index.js');
+  const { resolveSinterProjectRoot } = await import('../dist/fs/projectRoot.js');
+  const r = await harvestProjectEntropy(resolveSinterProjectRoot());
+  const src = r.sources;
+  console.log(`Entropy: ${r.quality} (${r.source})`);
+  console.log(`  seed:   ${r.seed}`);
+  console.log(`  phrase: ${r.phrase}`);
+  if (src) console.log(`  from:   ${src.events} trend rows, ${src.heapFiles} compost heap files, ${src.seeds} seeds, telemetry ${src.telemetry ? 'yes' : 'no'}`);
+  if (r.quality !== 'harvested') console.log('  Nothing in this project to harvest yet: run `sinter generate` here, then try again.');
+  console.log('  best-of steers its tries apart with this phrase.');
+  process.exit(0);
+}
+else if (cmd === 'plugins') {
+  // Plugins organ: what is in the plugins folder, and whether the governed gate would admit it. Nothing is executed.
+  const { inspectPlugins, pinPlugin } = await import('../dist/plugins/PluginStatus.js');
+  const dir = path.resolve(flags.pluginsDir || path.join(repoRoot, 'plugins'));
+  const sub = cmdArgs[0] ?? 'status';
+  if (sub === 'pin') {
+    const id = cmdArgs[1];
+    if (!id) { console.error('Usage: sinter plugins pin <id> [--plugins-dir <dir>]'); process.exit(1); }
+    try { console.log(`Pinned ${id}: ${pinPlugin(dir, id)}`); process.exit(0); }
+    catch (e) { console.error(`Cannot pin "${id}" in ${dir}: ${e instanceof Error ? e.message : e}`); process.exit(1); }
+  }
+  if (sub !== 'status') { console.error('Usage: sinter plugins <status|pin <id>> [--plugins-dir <dir>]'); process.exit(1); }
+  const rows = inspectPlugins(dir);
+  console.log(`Plugins in ${dir}: ${rows.length}`);
+  console.log('  Execution: refused. Status checks admission only.');
+  for (const r of rows) console.log(`  ${r.id.padEnd(12)} ${r.admission.padEnd(10)} domains: ${r.domains.join(', ') || '-'}`);
+  if (rows.some(r => r.admission === 'unpinned')) console.log('  Pin one with: sinter plugins pin <id>');
+  process.exit(0);
+}
 else if (cmd === 'best-of') {
   // TOURNAMENT ORGAN (wayfinder #933): best-of-N over novelty islands.
   // Generates N salted, island-varied candidates sequentially (rotation env
@@ -3737,55 +4622,63 @@ else if (cmd === 'best-of') {
   const rest = Number.isFinite(nRaw) && cmdArgs.length > 1 ? cmdArgs.slice(1) : (Number.isFinite(nRaw) ? [] : cmdArgs);
   const prompt = rest.join(' ').trim();
   if (!prompt) { console.error('usage: sinter best-of [N=2..3] <prompt>'); process.exit(1); }
-  const ISLANDS = [
-    'restrained, precise, quietly elegant composition',
-    'bold, experimental, unusual structure and palette',
-    'playful, kinetic, surprising transitions',
-  ];
-  const { execFileSync } = await import('node:child_process');
+  const { execFileSync, spawnSync } = await import('node:child_process');
+  const { runTournament } = await import('../dist/cli/BestOfTournament.js');
+  const scoreFailures = new Set();
   const self = process.argv[1];
   const boLog = (line) => { try { fs.appendFileSync(path.join(process.cwd(), '.omx', 'atelier', 'lessons', 'loop.log'), line + '\n'); } catch {} };
-  const cands = [];
   boLog(`[best-of] tournament START n=${N} (failures now logged — stdout is discarded by the loop)`);
-  for (let i = 0; i < N; i++) {
-    const flavored = `${prompt} — tournament variant ${i + 1}/${N}, island direction: ${ISLANDS[i % ISLANDS.length]} — variation ${Date.now()}-${i}`;
-    const __t0 = Date.now();
-    boLog(`[best-of] variant ${i + 1}/${N} child START (lane ${process.env.SINTER_GENERATOR_MODEL || 'config-default'})`);
-    try {
-      // Forward the explicit domain to children (meta postmortem 2026-08-31):
-      // the child re-invokes with the prompt only, so a tournament turn on a
-      // rare domain lost the loop's --domain and died in the wrong validator.
-      const childArgs = flags.domain ? [self, '--domain', String(flags.domain), flavored] : [self, flavored];
-      const out = execFileSync('node', childArgs, { timeout: 900000, encoding: 'utf8', env: process.env, cwd: process.cwd(), maxBuffer: 16 * 1024 * 1024 });
-      boLog(`[best-of] variant ${i + 1}/${N} child done in ${Math.round((Date.now() - __t0) / 1000)}s`);
-      // FIXED 2026-08-30: the CLI prints "✅ Saved: <path>/source.txt" — the old
-      // /^Saved:/ line-start anchor NEVER matched it, so every completed child
-      // was dropped as unsaved: 29 tournaments fleet-wide, 0 winners, every
-      // child artifact orphaned unscored. Match anywhere in the line instead.
-      const saved = /Saved: (\S+)/m.exec(out)?.[1]?.trim()?.replace(/\/source\.txt$/, '');
-      if (saved) { cands.push(saved); console.log(`[best-of] variant ${i + 1}: saved ${saved}`); boLog(`[best-of] variant ${i + 1}/${N} saved ${path.basename(saved)}`); }
-      else { const tail = out.slice(-160).replace(/\n/g, ' ⏎ '); const msg = `[best-of] variant ${i + 1}/${N} completed WITHOUT Saved line — output tail: ${tail}`; console.log(msg); boLog(msg); }
-    } catch (e) { const se = e && e.stderr ? ` | stderr: ${String(e.stderr).slice(-600).replace(/\n/g, ' ⏎ ')}` : ''; const msg = `[best-of] variant ${i + 1}/${N} FAILED after ${Math.round((Date.now() - __t0) / 1000)}s: ${String((e && e.message) || e).slice(0, 300)}${se}`; console.log(msg); boLog(msg); }
+  const { harvestProjectEntropy } = await import('../dist/entropy/index.js');
+  const { resolveSinterProjectRoot } = await import('../dist/fs/projectRoot.js');
+  const entropy = await harvestProjectEntropy(resolveSinterProjectRoot());
+  boLog(`[best-of] entropy ${entropy.quality}/${entropy.source} seed=${entropy.seed} phrase="${entropy.phrase}"`);
+  const outcome = runTournament(prompt, N, {
+    log: boLog,
+    entropyPhrase: entropy.quality === 'harvested' ? entropy.phrase : undefined,
+    rejectDir: path.join(process.cwd(), '.omx', 'atelier', 'tournament-rejects'),
+    // Forward the explicit domain to children (meta postmortem 2026-08-31): the child re-invokes with the prompt only.
+    // spawnSync, not execFileSync: exit 3 ("generated, not accepted") must reach the eligibility rule, not throw.
+    runChild: (flavored, i) => {
+      // Children also inherit the generation flags: they used to drop --teach (best-of
+      // pieces were untaught), --max-provider-calls and -o. Each variant gets its own
+      // output subdirectory so the N children cannot collide in one -o.
+      const childArgs = [self];
+      if (flags.domain) childArgs.push('--domain', String(flags.domain));
+      if (flags.teach !== undefined) childArgs.push('--teach', String(flags.teach));
+      if (flags.maxProviderCalls !== undefined) childArgs.push('--max-provider-calls', String(flags.maxProviderCalls));
+      if (flags.retryUnknown) childArgs.push('--retry-unknown');
+      if (flags.output) childArgs.push('--output', path.join(String(flags.output), `variant-${i + 1}`));
+      if (flags.loops) childArgs.push('--loops', String(flags.loops));
+      childArgs.push(flavored);
+      const r = spawnSync('node', childArgs, { timeout: 900000, encoding: 'utf8', env: process.env, cwd: process.cwd(), maxBuffer: 16 * 1024 * 1024 });
+      return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+    },
+    score: (dir) => {
+      try {
+        const scoreArgs = flags.domain ? [self, 'sss-score', '--domain', String(flags.domain), dir] : [self, 'sss-score', dir];
+        const out = execFileSync('node', scoreArgs, { timeout: 300000, encoding: 'utf8', cwd: process.cwd(),
+          env: { ...process.env, SINTER_NO_TREND_APPEND: '1' }, maxBuffer: 16 * 1024 * 1024 });
+        const m = /\[sss\] ensemble D=([\d.]+) A=([\d.]+) R=([\d.]+) N=([\d.]+)/.exec(out);
+        if (!m) scoreFailures.add('sss-score returned no ensemble');
+        return m ? (+m[1] + +m[2] + +m[3] + +m[4]) / 4 : null;
+      } catch (error) {
+        const detail = /^SSS_SCORE_[A-Z_]+[^\r\n]*/m.exec(String(error.stderr ?? ''));
+        scoreFailures.add(detail ? detail[0].slice(0, 400) : `sss-score failed (exit ${error.status ?? error.code ?? 'unknown'})`);
+        return null;
+      }
+    },
+  });
+  if (!outcome.winner) {
+    const detail = scoreFailures.size ? '; scoring failed: ' + [...scoreFailures].join(' | ') : '';
+    const summary = 'BEST_OF_NO_CANDIDATES: nothing completed' + detail;
+    boLog('[best-of] ' + summary);
+    console.error(summary);
+    process.exit(4);
   }
-  const scored = [];
-  for (const dir of cands) {
-    try {
-      const scoreArgs = flags.domain ? [self, 'sss-score', '--domain', String(flags.domain), dir] : [self, 'sss-score', dir];
-      const out = execFileSync('node', scoreArgs, { timeout: 300000, encoding: 'utf8', cwd: process.cwd(),
-        env: { ...process.env, SINTER_NO_TREND_APPEND: '1' }, maxBuffer: 16 * 1024 * 1024 });
-      const m = /\[sss\] ensemble D=([\d.]+) A=([\d.]+) R=([\d.]+) N=([\d.]+)/.exec(out);
-      if (m) { const mean = (+m[1] + +m[2] + +m[3] + +m[4]) / 4; scored.push({ dir, mean }); console.log(`[best-of] ${path.basename(dir)} mean=${mean.toFixed(2)}`); }
-    } catch (e) { console.log(`[best-of] score failed for ${path.basename(dir)}: ${String(e.message || e).slice(0, 80)}`); }
-  }
-  if (!scored.length) { boLog('[best-of] NO CANDIDATES completed — degrading to turn failure (plain retry rescues)'); console.error('BEST_OF_NO_CANDIDATES: nothing completed'); process.exit(4); }
-  scored.sort((a, b) => b.mean - a.mean);
-  const best = scored[0];
-  const rejectDir = path.join(process.cwd(), '.omx', 'atelier', 'tournament-rejects');
-  for (const loser of scored.slice(1)) {
-    try { fs.mkdirSync(rejectDir, { recursive: true }); fs.renameSync(loser.dir, path.join(rejectDir, path.basename(loser.dir))); } catch {}
-  }
-  console.log(`[best-of] tournament of ${scored.length}: winner mean=${best.mean.toFixed(2)}${scored[1] ? `, runner-up ${scored[1].mean.toFixed(2)}` : ''}`);
-  boLog(`[best-of] tournament of ${scored.length}: winner ${path.basename(best.dir)} mean=${best.mean.toFixed(2)}${scored[1] ? ` (runner-up ${scored[1].mean.toFixed(2)})` : ''}`);
+  const best = outcome.winner;
+  const scoredCount = outcome.scoredCount;
+  console.log(`[best-of] tournament of ${scoredCount}: winner mean=${best.mean.toFixed(2)}${outcome.runnerUp ? `, runner-up ${outcome.runnerUp.mean.toFixed(2)}` : ''}`);
+  boLog(`[best-of] tournament of ${scoredCount}: winner ${path.basename(best.dir)} mean=${best.mean.toFixed(2)}${outcome.runnerUp ? ` (runner-up ${outcome.runnerUp.mean.toFixed(2)})` : ''}`);
   console.log(`Saved: ${best.dir}`);
 }
 else if (cmd === 'data') {
@@ -3819,7 +4712,9 @@ else if (cmd === 'sss-score') {
   if (requestedDomain && fs.existsSync(provenancePath)) {
     let recordedDomain;
     try { recordedDomain = JSON.parse(fs.readFileSync(provenancePath, 'utf8')).domain; } catch { recordedDomain = null; }
-    if (recordedDomain !== requestedDomain) {
+    // Provenance written before the meta -> custom rename still says "meta".
+    const { canonicalDomainId } = await import('../dist/types/domains.js');
+    if (canonicalDomainId(recordedDomain || '') !== canonicalDomainId(requestedDomain)) {
       console.error(`SSS_SCORE_DOMAIN_MISMATCH: requested ${requestedDomain}, provenance ${recordedDomain || 'unreadable'}`);
       process.exit(6);
     }
@@ -3832,8 +4727,13 @@ else if (cmd === 'sss-score') {
     await capturePlayableScreenshot(fsx, shot);
   } catch (error) {
     browserBootEvidence = false;
-    renderTimedOut = /timeout|timed out/i.test(String(error));
-    console.error(`SCORE_CAPTURE_FAILED: ${renderTimedOut ? 'timeout' : 'browser'}`);
+    renderTimedOut = error?.timedOut === true;
+    console.error(`SCORE_CAPTURE_FAILED: ${error?.stage ?? 'browser'}${renderTimedOut ? ' (timeout)' : ''}`);
+    // Sol L3-16: no screenshot because the capture itself failed is infrastructure, never a "blank artifact" verdict.
+    if (!fs.existsSync(shot)) {
+      console.error('SSS_SCORE_CAPTURE_INFRA: the artifact could not be captured; no judgment was made');
+      process.exit(8);
+    }
   }
   const imgB64 = fs.existsSync(shot) ? fs.readFileSync(shot).toString('base64') : '';
   const { scoreScreenshotGate } = await import('../dist/cli/ScoreScreenshotGate.js');
@@ -3846,8 +4746,12 @@ else if (cmd === 'sss-score') {
     console.error('SSS_SCORE_DARK_ARTIFACT: decoded pixels are visually empty');
     process.exit(5);
   }
-  const sinterCfg = JSON.parse(fs.readFileSync(sinterConfigPath(), 'utf8'));
-  const ev = sinterCfg.roles.evaluator;
+  const { readRequiredSinterConfig } = await import('../dist/cli/readRequiredSinterConfig.js');
+  let sinterCfg;
+  try { sinterCfg = readRequiredSinterConfig(sinterConfigPath(), 'sss-score'); }
+  catch (e) { console.error('SSS_SCORE_CONFIG_INVALID: ' + e.message); process.exit(1); }
+  const ev = sinterCfg?.roles?.evaluator;
+  if (!ev) { console.error('SSS_SCORE_EVALUATOR_NOT_CONFIGURED: configure roles.evaluator'); process.exit(2); }
   const judgePrompt = 'Judge this generative-art screenshot under the SPU-2.0 universal scale. Score axes 0.00-10.00 (10.00=masterpiece, 8.00=excellent, 6.00=competent, 4.00=weak, 2.00=broken): D craft, A artistic values, R reliability, N novelty. Be HONEST — 7.00 means good but not exceptional. List top 3 defects (element, defect, mechanical fix). Output STRICT JSON only: {"D":n,"A":n,"R":n,"N":n,"level":"your guess","defects":[{"element":"","defect":"","fix":""}]}. Note: your level guess is IGNORED — levels are computed from gate arithmetic.';
   const { buildScorecard, parseAxes, configuredJudgeIdentity, requireIndependentJudges, judgeEyePlan } = await import('../dist/atelier/SpuScorer.js');
   // DOMAIN-IDENTITY FIX (CEO-approved 2026-09-02, comorbidity H1+H2): the old
@@ -4116,8 +5020,9 @@ else if (cmd === 'sss-score') {
   } else if (!runningEyes.some(eye => eye.vendor === evaluatorVendor)) {
     recordJudgeFailure(evaluatorVendor, 'duplicate_lane');
   }
-  try { requireIndependentJudges(judges); } catch {
-    console.error(`SSS_SCORE_INSUFFICIENT_JUDGES: ${judgeFailures.join(',') || 'unknown'}`);
+  try { requireIndependentJudges(judges); } catch (error) {
+    const vendors = [...new Set(judges.map(judge => judge.vendor).filter(Boolean))];
+    console.error(`${error.message.split(':')[0]}: need 2+ independent judge vendors, found ${vendors.length} [${vendors.join(',') || 'none'}]; failures: ${judgeFailures.join(',') || 'none'}`);
     process.exit(4);
   }
   // Temporal keystone: motion/flicker/jank evidence no still can show (CEO priority 1).
@@ -4292,7 +5197,10 @@ else if (cmd === 'sss-score') {
 }
 else if (cmd === 'gui-evolve') {
   // Atelier Loop (PRD v5.1): recursive compounding GUI self-improvement.
-  const sub = cmdArgs[0];
+  const { parseGuiEvolveArgs, isTransientTransportError } = await import('../dist/cli/guiEvolveArgs.js');
+  let guiArgs;
+  try { guiArgs = parseGuiEvolveArgs(cmdArgs[0], flags.n); } catch (e) { console.error(e.message); process.exit(1); }
+  const sub = guiArgs.sub;
   const { GuiEvolution } = await import('../dist/atelier/GuiEvolution.js');
   const { HeadlessRendererAdaptor } = await import('../dist/atelier/HeadlessRendererAdaptor.js');
   const { LlmAtelierTransports } = await import('../dist/atelier/LlmAtelierTransports.js');
@@ -4311,10 +5219,9 @@ else if (cmd === 'gui-evolve') {
       coverage: r.metrics?.coverage, findability: r.metrics?.findability })), }, null, 2));
     process.exit(0);
   }
-  const n = Number(flags.n ?? 1);
-  // Owner-approved metered evidence for the minimax second-opinion eye (CEO 2026-08-26).
-  process.env.SINTER_METERED_APPROVED_USD_CEILING ||= '5';
-  process.env.SINTER_METERED_PRICE_RECEIPT_DIGEST ||= 'ee309d73a5e4d63827a978bf4883be0018f4647b8305243ad6b6dba0f8cee838';
+  const n = guiArgs.cycles;
+  // Metered funding evidence is the operator's: SINTER_METERED_APPROVED_USD_CEILING + SINTER_METERED_PRICE_RECEIPT_DIGEST
+  // must come from the environment. A metered route without them is refused by the executor authority before any request.
   const { LLMClient } = await import('../dist/llm/LLMClient.js');
   const { bootstrapProductionLiminalRuntime } = await import('../dist/runtime-core/ProductionLiminalRuntime.js');
   const runtime = await bootstrapProductionLiminalRuntime();
@@ -4351,7 +5258,7 @@ else if (cmd === 'gui-evolve') {
     requiredControls: ['generate', 'status', 'gallery'],
     specBrief: 'Operator instrument for a multi-model generative-art agent. Task axes: every operator verb reachable, real state visible fast, honest error states, controls findable. Not a chat app.',
   });
-  const withRetry = async (op) => { try { return await op(); } catch (e) { console.log(`[atelier] transport hiccup (${String(e.message).slice(0, 90)}), retrying…`); await new Promise(r => setTimeout(r, 15000)); return await op(); } };
+  const withRetry = async (op) => { try { return await op(); } catch (e) { if (!isTransientTransportError(e)) throw e; console.log(`[atelier] transport hiccup (${String(e.message).slice(0, 90)}), retrying…`); await new Promise(r => setTimeout(r, 15000)); return await op(); } };
   for (let i = 0; i < n; i += 1) {
     const cyclesDirSeen = fs.existsSync(path.join(process.cwd(), '.omx', 'atelier', 'cycles'))
       ? fs.readdirSync(path.join(process.cwd(), '.omx', 'atelier', 'cycles')).length : 0;
@@ -4373,7 +5280,7 @@ else if (cmd === 'ledger') {
   const taskLedger = new TaskLedger(sinterFs);
 
   try {
-    const action = parseArgs(cmdArgs);
+    const action = parseArgs(leafArgv());
     await execute(action, taskLedger);
     process.exit(0);
   } finally {
@@ -4437,9 +5344,11 @@ else if (cmd === 'archive') {
       }
       console.log('');
     } else if (subCmd === 'branch' && artifactRef) {
+      const branchTracker = new LineageTracker();
+      const branchRecord = await branchTracker.record({ parentIds: [artifactRef], provenance: 'branch', seed: flags.seed ? String(flags.seed) : undefined });
       console.log('');
-      console.log(`Branching from ${artifactRef}...`);
-      console.log('  (Branch action recorded. Use sinter gen with --parent to continue.)');
+      console.log(`Branched ${artifactRef} -> ${branchRecord.artifactId} (recorded in the lineage store).`);
+      console.log(`  Inspect: sinter archive lineage ${branchRecord.artifactId}`);
       console.log('');
     } else if (subCmd === 'list') {
       const hooks = new EmergenceHooks(sinterFs);
@@ -4457,6 +5366,9 @@ else if (cmd === 'archive') {
       }
       console.log('');
     } else {
+      if (subCmd && ['inspect', 'lineage', 'branch'].includes(subCmd)) {
+        console.error(`archive ${subCmd} needs an artifact id. List the ids with: sinter archive list`);
+      }
       console.error('Usage: sinter archive <inspect|lineage|branch|list> [artifactRef]');
       process.exit(1);
     }
@@ -4477,7 +5389,7 @@ else if (cmd === 'compact') {
   process.stdout.write(formatCompactReport(result));
   process.exit(0);
 }
-else if (cmd === 'preferences') {
+else if (cmd === 'preferences' || (cmd === 'taste' && cmdArgs[0] === 'train')) {
   const { PreferenceEventLogger, TasteLearningService } = await import('../dist/learning/index.js');
   const { SinterFS } = await import('../dist/fs/index.js');
   const { resolveSinterProjectRoot } = await import('../dist/fs/projectRoot.js');
@@ -4553,12 +5465,20 @@ else if (cmd === 'preferences') {
         console.log(`  Model ref: ${summary.ref?.kind}:${summary.ref?.path}`);
         console.log(`  Pair count: ${summary.weights.pairCount}`);
         console.log(`  Training agreement: ${(summary.weights.trainingAgreement * 100).toFixed(1)}%`);
+        console.log(`  Held-out evaluation: ${summary.heldOutStatus ?? 'unavailable'} (${summary.weights.heldOutPairCount ?? 0} pairs)`);
         console.log(`  Quality weight: ${summary.weights.qualityWeight.toFixed(3)}`);
         console.log(`  Axis weights: ${summary.weights.axisWeights.map((w, i) => `[${i}]${w.toFixed(3)}`).join(' ')}`);
         console.log('');
       }
     } else if (subCmd === 'model') {
       const model = service.loadLatestModel();
+      if (flags.json) {
+        // Machine-readable export for the brief guidance (scripts/learning/guidance.py): weights are aligned with `axes`.
+        const { DESCRIPTOR_AXES } = await import('../dist/emergence/BehaviorDescriptorExtractor.js');
+        console.log(JSON.stringify(model ? { schema: 's1ntr.taste-model.v1', axes: DESCRIPTOR_AXES, ...model } : { schema: 's1ntr.taste-model.v1', absent: true }));
+        sinterFs.close();
+        process.exit(model ? 0 : 1);
+      }
       console.log('');
       console.log('=== Taste Model ===');
       if (!model) {
@@ -4655,15 +5575,16 @@ else if (cmd === 'emergence') {
 }
 else if (cmd === 'report' && cmdArgs[0] === 'provenance') {
   const { ProvenanceNarrativeBuilder } = await import('../dist/reporting/index.js');
-  const { PolicyChangeManifest } = await import('../dist/release/PolicyChangeManifest.js');
+  const { loadPolicyManifest } = await import('../dist/release/PolicyManifestStore.js');
   const { CreativeWeaknessEmitter } = await import('../dist/autonomy/CreativeWeaknessEmitter.js');
   const { SinterFS } = await import('../dist/fs/index.js');
   const { EmergenceHooks } = await import('../dist/emergence/index.js');
 
   const sinterFs = SinterFS.open(process.cwd());
   try {
-    const manifest = new PolicyChangeManifest();
-    const changes = manifest.getByStatus('promoted');
+    // The same on-disk manifest `sinter ship garden|rollback` writes, so the narrative follows real changes.
+    const manifest = await loadPolicyManifest();
+    const changes = manifest.getAll();
     const emitter = new CreativeWeaknessEmitter();
     const builder = new ProvenanceNarrativeBuilder();
 
@@ -4735,45 +5656,166 @@ else if (cmd === 'report' && cmdArgs[0] === 'archive') {
   }
   process.exit(0);
 }
-else if (cmd === 'taste' && cmdArgs[0] === 'train') {
-  const { PreferenceDatasetBuilder, TasteModelTrainer } = await import('../dist/learning/index.js');
+else if (cmd === 'runtime' && cmdArgs[0] === 'import-projections') {
+  // Batches run with -o per run keep their Create projection in the run dir only. Bring each missing
+  // Create into the shared runtime root (SINTER_LIMINAL_RUNTIME_ROOT) so dream can see it. Never overwrites.
+  const root = process.env.SINTER_LIMINAL_RUNTIME_ROOT;
+  const dirs = cmdArgs.slice(1);
+  if (!root || !path.isAbsolute(root) || !dirs.length) { console.error('Usage: SINTER_LIMINAL_RUNTIME_ROOT=<abs shared root> sinter runtime import-projections <run-dir>...'); process.exit(1); }
+  const { FileLiminalProductCommandStore } = await import('../dist/runtime-core/LiminalProductCommandPort.js');
+  const store = new FileLiminalProductCommandStore(path.join(root, 'product-projections.json'));
+  let imported = 0, present = 0, skipped = 0;
+  for (const dir of dirs) {
+    let doc; try { doc = JSON.parse(fs.readFileSync(path.join(path.resolve(dir), 'product-projections.json'), 'utf8')); } catch { skipped += 1; continue; }
+    for (const [key, value] of Object.entries(doc)) {
+      if (value?.kind !== 'create') continue;
+      if (await store.read(key)) { present += 1; continue; }
+      await store.write(key, value); imported += 1;
+    }
+  }
+  console.log(`Runtime import-projections: imported=${imported} present=${present} unreadable-run-dirs=${skipped}`);
+  process.exit(0);
+}
+else if (cmd === 'judge-evidence') {
+  // Read-only: judge/scoring evidence for finished governed Creates (no owner key involved).
+  const argv = cmdArgs.slice(0);
+  const dirs = []; let negatives; let acceptedSourcesPath; let stateRoot; let trainingFilter;
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--write-negatives') negatives = path.resolve(argv[++i] ?? '');
+    else if (argv[i] === '--accepted-sources-out') acceptedSourcesPath = path.resolve(argv[++i] ?? '');
+    else if (argv[i] === '--state-root') stateRoot = path.resolve(argv[++i] ?? '');
+    else if (argv[i] === '--training-filter') trainingFilter = JSON.parse(fs.readFileSync(argv[++i], 'utf8'));
+    else dirs.push(path.resolve(argv[i]));
+  }
+  if (!dirs.length) { console.error('Usage: sinter judge-evidence <run-dir>... [--write-negatives <judge-negatives.jsonl>] [--accepted-sources-out <file>] [--state-root <dir>] [--training-filter <file>]'); process.exit(1); }
+  const { createProductionLiminalRuntime } = await import('../dist/runtime-core/ProductionLiminalRuntime.js');
+  const { judgeNegativeRow } = await import('../dist/learning/JudgeNegativeRow.js');
+  const { createHash } = await import('node:crypto');
+  const acceptedSources = [];
+  const allowedCreates = new Map(trainingFilter?.creates.map(({ run_dir, create_key, source_sha256 }) =>
+    [JSON.stringify([run_dir, create_key]), source_sha256]));
+  const holdoutDigests = new Set(trainingFilter?.holdout_digests);
+  const needsBoundSource = Boolean(acceptedSourcesPath || negatives);
+  let accepted = 0, rejected = 0, gray = 0, invalid = 0; const rows = [];
+  for (const dir of dirs) {
+    let keys = [];
+    try { keys = Object.entries(JSON.parse(fs.readFileSync(path.join(dir, 'product-projections.json'), 'utf8'))).filter(([, v]) => v?.kind === 'create').map(([k]) => k); } catch { invalid += 1; continue; }
+    if (!keys.length) continue;
+    const root = fs.existsSync(path.join(dir, 'operation-journal.json')) ? dir : (stateRoot ?? dir);
+    if (needsBoundSource && !fs.existsSync(path.join(root, 'operation-journal.json'))) continue;
+    const runtime = await createProductionLiminalRuntime({ root, artifactRoot: dir });
+    try {
+      for (const key of keys) {
+        try {
+          const allowedSource = allowedCreates.get(JSON.stringify([dir, key]));
+          if (trainingFilter && !allowedSource) continue;
+          if (!needsBoundSource) {
+            const evidence = await runtime.port.judgeScoringEvidence(key);
+            if (evidence.decision === 'accepted') accepted += 1; else rejected += 1;
+            continue;
+          }
+          const { evidence, source, rendererEnvironmentDigest } = await runtime.port.readBoundJudgeSource(key);
+          const sourceSha = createHash('sha256').update(source).digest('hex');
+          if ((trainingFilter && allowedSource !== sourceSha) || holdoutDigests.has(sourceSha)
+            || holdoutDigests.has(evidence.artifactDigest)) continue;
+          if (evidence.decision === 'accepted') {
+            accepted += 1;
+            if (acceptedSourcesPath) acceptedSources.push({
+              run_dir: dir, create_key: key, artifact_digest: evidence.artifactDigest,
+              source_sha256: sourceSha, create_receipt_digest: evidence.createReceiptDigest,
+              renderer_environment_digest: rendererEnvironmentDigest,
+              domain: evidence.domain, score: evidence.score, state_root: root,
+            });
+          } else {
+            rejected += 1;
+            if (negatives) {
+              const row = judgeNegativeRow(evidence);
+              if (row) rows.push(row);
+            }
+          }
+        } catch (error) { if (error?.message === 'LIMINAL_JUDGE_EVIDENCE_GRAY_ZONE') gray += 1; else invalid += 1; }
+      }
+    } finally { await runtime.close(); }
+  }
+  if (negatives && rows.length) {
+    // A replay must not append the same evidence twice (F08): skip ids already on file.
+    const have = new Set();
+    try { for (const line of fs.readFileSync(negatives, 'utf8').split('\n')) { try { have.add(JSON.parse(line).id); } catch { /* corrupt line: reported by the growth queue */ } } } catch { /* first write */ }
+    const fresh = rows.filter(row => !have.has(row.id));
+    if (fresh.length) fs.appendFileSync(negatives, fresh.map(row => JSON.stringify(row)).join('\n') + '\n');
+  }
+  if (acceptedSourcesPath) fs.writeFileSync(acceptedSourcesPath, JSON.stringify(acceptedSources), { mode: 0o600 });
+  console.log(`Judge evidence: accepted=${accepted} rejected=${rejected} gray=${gray} not-admissible=${invalid} (judge-score-floor-v2-simon40: positive >=0.3, hard negative <0.2)`);
+  process.exit(0);
+}
+else if (cmd === 'legacy-backfill') {
+  // Legacy pieces with no Create receipt: sealed reduced-weight labels bound to the file digest.
+  const argv = cmdArgs.slice(0); let input; let out; let negatives; let holdout; let live = 0;
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--out') out = path.resolve(argv[++i] ?? '');
+    else if (argv[i] === '--write-negatives') negatives = path.resolve(argv[++i] ?? '');
+    else if (argv[i] === '--holdout') holdout = path.resolve(argv[++i] ?? '');
+    else if (argv[i] === '--live-count') live = Number(argv[++i]);
+    else input = path.resolve(argv[i]);
+  }
+  if (!input || !out || !Number.isInteger(live) || live < 0) { console.error('Usage: sinter legacy-backfill <scored.jsonl> --out <rows.jsonl> --live-count <n> [--holdout <file-digests.txt>] [--write-negatives <judge-negatives.jsonl>]\n  scored.jsonl rows: {path, render_digest, judge, judge_version, score}'); process.exit(1); }
+  const { createProductionLiminalRuntime } = await import('../dist/runtime-core/ProductionLiminalRuntime.js');
+  const { selectLegacyBackfill, legacyNegativeRow } = await import('../dist/learning/LegacyBackfill.js');
+  const runtime = await createProductionLiminalRuntime({ root: path.dirname(out), artifactRoot: path.dirname(out) });
+  let built = []; let unscored = 0;
+  try {
+    for (const line of fs.readFileSync(input, 'utf8').split('\n').filter(Boolean)) {
+      try {
+        const r = JSON.parse(line);
+        built.push(runtime.port.legacyBackfillRow({ sourceBytes: fs.readFileSync(r.path), renderDigest: r.render_digest,
+          judge: r.judge, judgeVersion: r.judge_version, score: r.score }));
+      } catch { unscored += 1; }
+    }
+  } finally { await runtime.close(); }
+  const holdoutSet = new Set(holdout ? fs.readFileSync(holdout, 'utf8').split('\n').map(s => s.trim()).filter(Boolean) : []);
+  const sel = selectLegacyBackfill(built, { liveCount: live, holdoutFileDigests: holdoutSet });
+  fs.writeFileSync(out, sel.admitted.map(r => JSON.stringify(r)).join('\n') + (sel.admitted.length ? '\n' : ''));
+  const neg = sel.admitted.map(legacyNegativeRow).filter(Boolean);
+  if (negatives && neg.length) fs.appendFileSync(negatives, neg.map(r => JSON.stringify(r)).join('\n') + '\n');
+  console.log(`Legacy backfill: admitted=${sel.admitted.length} holdout-excluded=${sel.excludedHoldout} duplicates=${sel.duplicates} over-cap=${sel.droppedForCap} unscored=${unscored} negatives=${neg.length}`);
+  process.exit(0);
+}
+else if (cmd === 'taste' && cmdArgs[0] === 'ingest') {
+  // Import batch output observations. Training uses the signed-label gate.
+  const corpus = cmdArgs[1];
+  if (!corpus) { console.error('Usage: sinter taste ingest <corpus.jsonl>'); process.exit(1); }
+  const { ingestGovernedOutputs } = await import('../dist/emergence/GovernedOutputIngest.js');
+  const likesIdx = cmdArgs.indexOf('--likes');
+  const likesFile = likesIdx > 0 ? cmdArgs[likesIdx + 1] : undefined; const scanDirs = [];
+  for (let i = 0; i < cmdArgs.length; i++) if (cmdArgs[i] === '--scan') scanDirs.push(cmdArgs[i + 1]);
   const { SinterFS } = await import('../dist/fs/index.js');
   const { EmergenceHooks } = await import('../dist/emergence/index.js');
-
-  const sinterFs = SinterFS.open(process.cwd());
+  const rows = fs.readFileSync(path.resolve(corpus), 'utf8').split('\n').filter(Boolean)
+    .map(line => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean);
+  const { resolveSinterProjectRoot } = await import('../dist/fs/projectRoot.js');
+  const projectRoot = resolveSinterProjectRoot();
+  const ledgerPath = path.join(projectRoot, '.sinter', 'governed-ingest.json');
+  let seen = [];
+  try { seen = JSON.parse(fs.readFileSync(ledgerPath, 'utf8')); } catch { /* first run */ }
+  const sinterFs = SinterFS.open(projectRoot);
   try {
-    const hooks = new EmergenceHooks(sinterFs);
-    const archive = hooks.getArchive();
-    const elites = archive.getAllElites();
-
-    if (elites.length < 2) {
-      console.error('Not enough archived entries for taste training (need ≥2).');
-      process.exit(1);
+    const hooks = new EmergenceHooks(sinterFs, { minQuality: 0 });
+    const result = await ingestGovernedOutputs(hooks, rows, new Set(seen),
+      file => fs.readFileSync(file, 'utf8'));
+    fs.mkdirSync(path.dirname(ledgerPath), { recursive: true });
+    fs.writeFileSync(ledgerPath, JSON.stringify([...seen, ...result.ingested]));
+    console.log(`Taste ingest: +${result.ingested.length} archived, ${result.skipped} not eligible, ${result.failed} unreadable (${rows.length} rows)`);
+    if (likesFile) {
+      const { ingestOwnerLikes } = await import('../dist/learning/OwnerLikeIngest.js');
+      const { TasteLearningService } = await import('../dist/learning/TasteLearningService.js');
+      const seenNow = new Set([...seen, ...result.ingested]);
+      const liked = await ingestOwnerLikes({
+        hooks, service: new TasteLearningService(sinterFs), likesFile, scanDirs, seen: seenNow,
+      });
+      fs.writeFileSync(ledgerPath, JSON.stringify([...seenNow, ...liked.ingested]));
+      console.log(`Taste ingest likes: +${liked.ingested.length} labelled, ${liked.unbound} not bindable`);
     }
-
-    const builder = new PreferenceDatasetBuilder();
-    const dataset = builder.build(elites);
-
-    if (dataset.pairs.length === 0) {
-      console.error('No preference data available. Pin, favorite, or compare artifacts first.');
-      process.exit(1);
-    }
-
-    console.log(`Building taste model from ${dataset.pairs.length} preference pairs (${dataset.stats.uniqueArtifacts} artifacts)...`);
-
-    const trainer = new TasteModelTrainer();
-    const model = trainer.train(dataset.pairs);
-
-    console.log('');
-    console.log('=== Taste Model Training ===');
-    console.log(`  Pairs: ${model.pairCount}`);
-    console.log(`  Training agreement: ${(model.trainingAgreement * 100).toFixed(1)}%`);
-    console.log(`  Quality weight: ${model.qualityWeight.toFixed(3)}`);
-    console.log(`  Axis weights: ${model.axisWeights.map((w, i) => `[${i}]${w.toFixed(3)}`).join(' ')}`);
-    console.log('');
-  } finally {
-    sinterFs.close();
-  }
+  } finally { sinterFs.close(); }
   process.exit(0);
 }
 else if (cmd === 'taste' && cmdArgs[0] === 'eval') {
@@ -4813,6 +5855,105 @@ else if (cmd === 'taste' && cmdArgs[0] === 'eval') {
     sinterFs.close();
   }
 }
+else if (cmd === 'dream' && cmdArgs[0] === 'autoseal') {
+  // Score-based owner seal: top judge-scored accepted Creates (plus owner likes) become Dream parent groups.
+  const opts = (name) => cmdArgs.flatMap((a, i) => a === name ? [cmdArgs[i + 1]] : []);
+  const opt = (name, fallback) => opts(name)[0] ?? fallback;
+  const outDir = opt('--out'); const judgeId = opt('--judge');
+  const scanDirs = opts('--scan'); const storeFiles = opts('--store');
+  const mergeInto = opt('--merge-into'); const likesFile = opt('--likes');
+  if (!outDir || !judgeId || (!scanDirs.length && !storeFiles.length)) {
+    console.error('Usage: sinter dream autoseal --judge <evaluator identity> --out <dir> (--scan <dir of seat/piece/product-projections.json> | --store <file>)... [--merge-into <runtime root>] [--exclude <exclusion manifest>] [--likes likes.jsonl] [--min-score 0.5] [--top-per-domain 4] [--groups 2]');
+    process.exit(2);
+  }
+  const { selectScoreSealedParents, candidatesFromProductStore, mergeProductStores, applyLikes,
+    DEFAULT_SCORE_SEAL_POLICY, skipUnverifiable } = await import('../dist/learning/ScoreSeal.js');
+  const runs = [];
+  for (const dir of scanDirs) for (const seat of fs.readdirSync(dir)) {
+    const seatDir = path.join(dir, seat);
+    if (!fs.statSync(seatDir).isDirectory()) continue;
+    for (const id of fs.readdirSync(seatDir)) {
+      const file = path.join(seatDir, id, 'product-projections.json');
+      if (!fs.existsSync(file)) continue;
+      try { runs.push({ seat, id, store: JSON.parse(fs.readFileSync(file, 'utf8')) }); } catch { /* unreadable run */ }
+    }
+  }
+  for (const file of storeFiles) runs.push({ seat: 'store', id: path.basename(path.dirname(path.resolve(file))), store: JSON.parse(fs.readFileSync(file, 'utf8')) });
+  const likes = likesFile && fs.existsSync(likesFile)
+    ? fs.readFileSync(likesFile, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l))
+        .reduce((m, l) => (l.liked === false ? m.delete(`${l.seat}/${l.id}`) : m.set(`${l.seat}/${l.id}`, l)), new Map()).values()
+    : [];
+  const likeList = [...likes];
+  const authFilter = opt('--authority-key');
+  // Frozen exclusion manifest (scripts/learning/exclusion-manifest.py): held-out pieces/digests never become parents. Unreadable or
+  // digest-mismatched manifests abort; the filter runs BEFORE the merge so a held-out run cannot win a shared create key either.
+  let exclusion;
+  const excludeFile = opt('--exclude');
+  if (excludeFile) {
+    try {
+      const m = JSON.parse(fs.readFileSync(excludeFile, 'utf8'));
+      const { createHash: h } = await import('node:crypto');
+      const want = h('sha256').update(JSON.stringify({ digests: m.digests, pieces: m.pieces, schema: m.schema })).digest('hex');
+      if (m.schema !== 'sinter.learning-exclusion' || !Array.isArray(m.pieces) || !Array.isArray(m.digests) || want !== m.digest) throw new Error('digest mismatch or malformed manifest');
+      exclusion = { digest: m.digest, pieces: new Set(m.pieces), digests: new Set(m.digests) };
+    } catch (error) { console.error(`dream autoseal: EXCLUSION_MANIFEST_INVALID ${error?.message || error}`); process.exit(2); }
+    for (let i = runs.length - 1; i >= 0; i--) if (exclusion.pieces.has(runs[i].id)) runs.splice(i, 1);
+    for (const r of runs) r.store = Object.fromEntries(Object.entries(r.store).filter(([, v]) => !exclusion.digests.has(String(v?.result?.receipt?.artifactDigest ?? ''))));
+  }
+  const { merged, sources } = mergeProductStores(authFilter ? runs.map(r => ({ ...r, store: Object.fromEntries(Object.entries(r.store).filter(([, v]) => String(v?.result?.receipt?.authorityKeyDigest ?? '').startsWith(authFilter))) })) : runs, new Set(likeList.map(l => `${l.seat}/${l.id}`)), new Map(likeList.filter(l => l.artifactDigest).map(l => [`${l.seat}/${l.id}`, l.artifactDigest])));
+  const authKey = opt('--authority-key');
+  const { kept: verifiable, skipped: skippedUnverifiable } = skipUnverifiable(candidatesFromProductStore(merged, sources));
+  const legacyUnbound = verifiable.filter(c => c.evaluationBinding === 'legacy-unbound').length;
+  console.error(`autoseal: ${verifiable.length} creates eligible for dream (${legacyUnbound} legacy-unbound), ${skippedUnverifiable} skipped (receipt fails its own scheme)`);
+  const result = selectScoreSealedParents(applyLikes(verifiable, likeList)
+    .filter(item => !authKey || item.authorityKeyDigest?.startsWith(authKey)),
+    { ...DEFAULT_SCORE_SEAL_POLICY, judge: judgeId,
+      minScore: Number(opt('--min-score', DEFAULT_SCORE_SEAL_POLICY.minScore)),
+      topPerDomain: Number(opt('--top-per-domain', DEFAULT_SCORE_SEAL_POLICY.topPerDomain)),
+      groups: Number(opt('--groups', DEFAULT_SCORE_SEAL_POLICY.groups)) });
+  fs.mkdirSync(outDir, { recursive: true });
+  if (mergeInto) {
+    // Never overwrite an existing runtime's projections: union, existing keys win; atomic replace.
+    fs.mkdirSync(mergeInto, { recursive: true });
+    const target = path.join(mergeInto, 'product-projections.json');
+    let existing = {};
+    if (fs.existsSync(target)) { try { existing = JSON.parse(fs.readFileSync(target, 'utf8')); } catch { console.error(`dream autoseal: MERGE_TARGET_UNREADABLE ${target}`); process.exit(2); } }
+    fs.writeFileSync(`${target}.tmp-${process.pid}`, JSON.stringify({ ...merged, ...existing }));
+    fs.renameSync(`${target}.tmp-${process.pid}`, target);
+  }
+  fs.writeFileSync(path.join(outDir, 'seal-provenance.json'), JSON.stringify({ ...result.provenance, runsScanned: runs.length, likes: likeList.length,
+    ...(exclusion ? { exclusion: { digest: exclusion.digest, pieces: exclusion.pieces.size, digests: exclusion.digests.size } } : {}) }, null, 2) + '\n');
+  result.groups.forEach((g, i) => fs.writeFileSync(path.join(outDir, `dream-run-${i}.json`), JSON.stringify(g.command, null, 2) + '\n'));
+  console.log(JSON.stringify({ sealed: result.sealed, reason: result.reason, groups: result.groups.length, runs: runs.length, creates: Object.keys(merged).length, eligible: verifiable.length, legacyUnbound, skippedUnverifiable, likes: likeList.length }));
+  process.exit(result.sealed ? 0 : 3);
+}
+else if (cmd === 'dream' && cmdArgs[0] === 'guard') {
+  // Fail-closed promotion gate. Exit 0 = promote, 4 = keep incumbent, 5 = error (incumbent stays live).
+  // --scheduled <json array of prompt ids> --incumbent <scores.json> --candidate <scores.json> [--min-gain 0.03]
+  const opt = (name) => { const i = cmdArgs.indexOf(name); return i > 0 ? cmdArgs[i + 1] : undefined; };
+  const { promotionGate, DEFAULT_MIN_GAIN } = await import('../dist/learning/HoldoutGuard.js');
+  let verdict;
+  try {
+    const read = (name) => JSON.parse(fs.readFileSync(opt(name), 'utf8'));
+    verdict = promotionGate(read('--scheduled'), read('--incumbent'), read('--candidate'),
+      { minGain: Number(opt('--min-gain') ?? DEFAULT_MIN_GAIN) });
+  } catch (error) {
+    verdict = { decision: 'error', reason: `GATE_INPUT_UNREADABLE:${error?.message || error}` };
+  }
+  console.log(JSON.stringify(verdict));
+  process.exit(verdict.decision === 'promote' ? 0 : verdict.decision === 'error' ? 5 : 4);
+}
+else if (cmd === 'dream' && cmdArgs[0] === 'renderer-digest') {
+  // The identity the observer will demand, from the real browser (F07). Exit 6 when none can launch.
+  try {
+    const { HeadlessRenderer } = await import('../dist/render/HeadlessRenderer.js');
+    console.log(await HeadlessRenderer.probeRendererEnvironmentDigest());
+    process.exit(0);
+  } catch (error) {
+    console.error(`DREAM_RENDERER_DIGEST_UNAVAILABLE: ${error?.message || String(error)}`);
+    process.exit(6);
+  }
+}
 else if (cmd === 'dream' && cmdArgs[0] === 'run') {
   const commandPath = cmdArgs[1];
   if (!commandPath) {
@@ -4840,6 +5981,28 @@ else if (cmd === 'dream' && cmdArgs[0] === 'run') {
   }
   if (!process.exitCode) process.exit(0);
 }
+else if (cmd === 'dream' && cmdArgs[0] === 'rollback') {
+  // Governed retraction of an activated lesson: `sinter dream rollback <snapshotDigest> <reason...>` (F14).
+  // The snapshot stays on record but is never taught again; `generate --teach` falls back to the previous active snapshot.
+  const digest = cmdArgs[1];
+  const reason = cmdArgs.slice(2).join(' ');
+  if (!digest || !reason.trim()) {
+    console.error('Usage: sinter dream rollback <snapshotDigest> <reason...>');
+    process.exit(1);
+  }
+  try {
+    const { FileActivatedKnowledgeStore } = await import('../dist/dreaming/research/DreamKnowledgeActivation.js');
+    const { defaultSharedRuntimeRoot } = await import('../dist/runtime-core/ProductionLiminalRuntime.js');
+    const root = process.env.SINTER_LIMINAL_KNOWLEDGE_ROOT || defaultSharedRuntimeRoot();
+    const store = new FileActivatedKnowledgeStore(path.join(root, 'activated-knowledge.json'));
+    store.rollback(digest, reason);
+    console.log(JSON.stringify({ rolledBack: digest, reason, store: store.path }));
+    process.exit(0);
+  } catch (error) {
+    console.error(`Dream rollback failed: ${error?.message || String(error)}`);
+    process.exit(1);
+  }
+}
 else if (cmd === 'dream' && ['transfer', 'activate', 'compound'].includes(cmdArgs[0])) {
   const action = cmdArgs[0];
   const commandPath = cmdArgs[1];
@@ -4866,6 +6029,75 @@ else if (cmd === 'dream' && ['transfer', 'activate', 'compound'].includes(cmdArg
     await liminalRuntime.close();
   }
   if (!process.exitCode) process.exit(0);
+}
+else if (cmd === 'notation') {
+  // Swarm prompt notation: compress a persona/system prompt to ~tokens, or expand tokens back to English.
+  const sub = cmdArgs[0];
+  const src = cmdArgs[1];
+  if (!['encode', 'decode'].includes(sub) || !src) {
+    console.error('Usage: sinter notation encode|decode <file>');
+    process.exit(1);
+  }
+  try {
+    const { NotationTranslator } = await import('../dist/swarm/NotationTranslator.js');
+    const t = new NotationTranslator();
+    const text = fs.readFileSync(path.resolve(src), 'utf8');
+    const out = sub === 'encode' ? t.encodePrompt(text) : t.decodePrompt(text);
+    console.log(out);
+    if (sub === 'encode') console.error(`${text.length} -> ${out.length} chars (${Math.round((1 - out.length / Math.max(1, text.length)) * 100)}% saved)`);
+  } catch (error) {
+    console.error(`Notation failed: ${error.message}`);
+    process.exit(1);
+  }
+  process.exit(0);
+}
+else if (cmd === 'fragments') {
+  // The curated fragment archive: personas, constraints, prompt seeds and techniques mined from the Token Mill era.
+  const sub = cmdArgs[0];
+  if (!['categories', 'constraint', 'seed', 'search'].includes(sub)) {
+    console.error('Usage: sinter fragments categories | constraint | seed | search <query>');
+    process.exit(1);
+  }
+  try {
+    const { FragmentArchive } = await import('../dist/scavenger/fragments/FragmentArchive.js');
+    const archive = await FragmentArchive.load();
+    if (sub === 'categories') {
+      for (const c of archive.getCategories()) console.log(`${c.padEnd(24)} ${archive.getByCategory(c).length} fragments`);
+    } else if (sub === 'constraint') {
+      console.log(archive.randomConstraint() ?? '(no constraints in the archive)');
+    } else if (sub === 'seed') {
+      const seed = archive.randomPromptSeed();
+      console.log(seed ? seed.content : '(no prompt seeds in the archive)');
+    } else {
+      const query = cmdArgs.slice(1).join(' ');
+      if (!query) throw new Error('search needs a query');
+      const hits = archive.search(query);
+      for (const f of hits.slice(0, 10)) console.log(`${f.id.padEnd(32)} ${f.title ?? ''}`);
+      console.log(`${hits.length} match${hits.length === 1 ? '' : 'es'}`);
+    }
+  } catch (error) {
+    console.error(`Fragments failed: ${error.message}`);
+    process.exit(1);
+  }
+  process.exit(0);
+}
+else if (cmd === 'capabilities') {
+  // Classify provider-surface probe results you already hold: reported state, whether fresh probe evidence attests it, and denials.
+  const file = cmdArgs[0];
+  if (!file) { console.error('Usage: sinter capabilities <probes.json> [--max-age-ms N]   (probes.json: [{ surface, state, evidence?: { probeClass, probedAt } }])'); process.exit(1); }
+  try {
+    const { buildCapabilitySnapshot, isSurfaceAttestedAvailable, isSurfaceDenied } = await import('../dist/identity/capabilityProbe.js');
+    const snapshot = buildCapabilitySnapshot(JSON.parse(fs.readFileSync(path.resolve(file), 'utf8')));
+    const maxAgeMs = flags.maxAgeMs === undefined ? 3600000 : Number(flags.maxAgeMs);
+    for (const r of snapshot.results) {
+      const attested = isSurfaceAttestedAvailable(snapshot, r.surface, { now: new Date(), maxAgeMs });
+      console.log(`${r.surface.padEnd(26)} ${r.state.padEnd(18)} ${attested ? 'attested' : r.state === 'available' ? 'UNATTESTED (no fresh probe evidence)' : isSurfaceDenied(snapshot, r.surface) ? 'denied' : 'unknown'}`);
+    }
+  } catch (error) {
+    console.error(`Capabilities check failed: ${error.message}`);
+    process.exit(1);
+  }
+  process.exit(0);
 }
 else if (cmd === 'garden' && cmdArgs[0] === 'status') {
   const { GardenPolicy } = await import('../dist/autonomy/GardenPolicy.js');
@@ -4987,25 +6219,29 @@ else if (cmd === 'report' && cmdArgs[0] === 'garden') {
 else if (cmd === 'report' && cmdArgs[0] === 'readiness') {
   const { LaunchSummaryBuilder } = await import('../dist/reporting/index.js');
   const { GardenHealthMonitor } = await import('../dist/autonomy/GardenHealthMonitor.js');
-  const { PolicyChangeManifest } = await import('../dist/release/PolicyChangeManifest.js');
+  const { loadPolicyManifest } = await import('../dist/release/PolicyManifestStore.js');
   const { CreativeWeaknessEmitter } = await import('../dist/autonomy/CreativeWeaknessEmitter.js');
   const { SinterFS } = await import('../dist/fs/index.js');
   const { EmergenceHooks } = await import('../dist/emergence/index.js');
+  const { resolveSinterProjectRoot } = await import('../dist/fs/projectRoot.js');
 
-  const sinterFs = SinterFS.open(process.cwd());
+  const projectRoot = resolveSinterProjectRoot();
+  const sinterFs = SinterFS.open(projectRoot);
   try {
     const hooks = new EmergenceHooks(sinterFs);
     const archive = hooks.getArchive();
     const cells = archive.getAllCells();
     const healthMonitor = new GardenHealthMonitor();
-    const health = healthMonitor.measure(cells);
-    const manifest = new PolicyChangeManifest();
-    const changes = manifest.getByStatus('promoted');
+    const { readTasteEvidence, tasteAlignedIdsFromModel } = await import('../dist/reporting/TasteEvidence.js');
+    const aligned = await tasteAlignedIdsFromModel(sinterFs, archive.getAllElites());
+    const health = healthMonitor.measure(cells, aligned);
+    const manifest = await loadPolicyManifest();
+    const changes = manifest.getAll();
     const emitter = new CreativeWeaknessEmitter();
     const weaknesses = emitter.getEmitted();
 
     const builder = new LaunchSummaryBuilder();
-    const readiness = builder.assess(health, changes, weaknesses);
+    const readiness = builder.assess(health, changes, weaknesses, readTasteEvidence(projectRoot));
 
     console.log('');
     console.log('=== Launch Readiness Report ===');
@@ -5047,8 +6283,15 @@ else if (cmd === 'garden' && cmdArgs[0] === 'start') {
   // the dream→gen loop. Unlike `garden tend` (which runs its own separate
   // enqueue pass), `garden start` had no queue at all — its dreams were computed
   // and discarded as a count. Same persist path so the self-improve cycle consumes them.
-  const queuePath = path.join(process.env.HOME || '/tmp', '.sinter', 'dreams', 'queue.json');
+  const { resolveDreamQueuePath, resolveGardenPidPath } = await import('../dist/dreaming/dreamQueuePath.js');
+  const queuePath = resolveDreamQueuePath();
   const dreamQueue = new DreamQueue({ persistPath: queuePath });
+  // Let `garden stop` (another shell) find and signal this process.
+  const gardenPidPath = resolveGardenPidPath();
+  fs.mkdirSync(path.dirname(gardenPidPath), { recursive: true });
+  fs.writeFileSync(gardenPidPath, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+  process.on('exit', () => { try { fs.rmSync(gardenPidPath, { force: true }); } catch { /* best effort */ } });
+  process.on('SIGTERM', () => { process.exit(0); });
   const gardener = new AutonomousGardener({ mode, totalBudget: 100, dreamQueue });
   // Hydrate the latest taste model so interactive replay bias actually steers
   // the loop — same block `garden tend` uses. Without it isModelLoaded() is false
@@ -5092,8 +6335,48 @@ else if (cmd === 'garden' && cmdArgs[0] === 'start') {
     process.exit(0);
   });
 }
+else if (cmd === 'garden' && cmdArgs[0] === 'experiment') {
+  // A/B two garden policies from recorded metrics: { control, treatment, results:[{variantId,metric,value}], minSamples? }.
+  const file = cmdArgs[1];
+  if (!file) { console.error('Usage: sinter garden experiment <experiment.json>   ({ control, treatment, results: [{ variantId, metric, value }], minSamples? })'); process.exit(1); }
+  try {
+    const { PolicyExperimentRunner } = await import('../dist/autonomy/PolicyExperimentRunner.js');
+    const spec = JSON.parse(fs.readFileSync(path.resolve(file), 'utf8'));
+    if (!spec.control?.id || !spec.treatment?.id || !Array.isArray(spec.results)) throw new Error('needs control, treatment (each with an id) and a results array');
+    const runner = new PolicyExperimentRunner(spec.minSamples ? { minSamples: Number(spec.minSamples) } : {});
+    const id = runner.createExperiment(spec.control, spec.treatment);
+    for (const r of spec.results) runner.recordResult(id, r.variantId, r.metric, Number(r.value));
+    const outcome = runner.evaluate(id);
+    console.log(`Policy experiment ${spec.control.label ?? spec.control.id} vs ${spec.treatment.label ?? spec.treatment.id}: ${outcome.winner} (confidence ${outcome.confidence.toFixed(2)})`);
+    console.log(outcome.recommendation);
+  } catch (error) {
+    console.error(`Garden experiment failed: ${error.message}`);
+    process.exit(1);
+  }
+  process.exit(0);
+}
 else if (cmd === 'garden' && cmdArgs[0] === 'stop') {
-  console.log('No garden running in this process. Use Ctrl+C on the running garden start process.');
+  // Real control operation: read the pid file the running gardener wrote, verify it is still a sinter garden, signal it.
+  const { resolveGardenPidPath } = await import('../dist/dreaming/dreamQueuePath.js');
+  const { spawnSync } = await import('node:child_process');
+  const pidPath = resolveGardenPidPath();
+  let record = null;
+  try { record = JSON.parse(fs.readFileSync(pidPath, 'utf8')); } catch { /* none */ }
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  if (!record || !Number.isInteger(record.pid) || !alive(record.pid)) {
+    try { fs.rmSync(pidPath, { force: true }); } catch { /* stale */ }
+    console.log('No garden is running (no live pid file).');
+    process.exit(0);
+  }
+  const cmdline = spawnSync('ps', ['-p', String(record.pid), '-o', 'command='], { encoding: 'utf8' }).stdout || '';
+  if (!/garden/.test(cmdline) || !/sinter/.test(cmdline)) {
+    console.error(`Refusing to signal pid ${record.pid}: it is not a sinter garden process.`);
+    process.exit(1);
+  }
+  process.kill(record.pid, 'SIGINT');
+  for (let i = 0; i < 50 && alive(record.pid); i += 1) await new Promise((r) => setTimeout(r, 100));
+  if (alive(record.pid)) { console.error(`Garden pid ${record.pid} did not stop within 5s.`); process.exit(1); }
+  console.log(`Garden pid ${record.pid} stopped.`);
   process.exit(0);
 }
 else if (cmd === 'garden' && cmdArgs[0] === 'tend') {
@@ -5142,8 +6425,8 @@ else if (cmd === 'garden' && cmdArgs[0] === 'tend') {
     // is told which pairings are already in the queue (queued/completed/failed) so
     // it proposes FRESH recombinations from the unexplored pair space instead of
     // re-proposing completed pairs — which dedup to +0 and starve dreaming.
-    const queuePath = process.env.SINTER_DREAM_QUEUE_PATH
-      || path.join(process.env.HOME || '/tmp', '.sinter', 'dreams', 'queue.json');
+    const { resolveDreamQueuePath } = await import('../dist/dreaming/dreamQueuePath.js');
+    const queuePath = resolveDreamQueuePath();
     const dreams = new DreamQueue({ persistPath: queuePath });
     const seen = new Set(dreams.getTasks().map((t) => `${t.strategy}:${t.sources.map((s) => s.id).sort().join('+')}`));
     // Reclaim queue slots held by FINISHED dreams (completed/failed). Without this
@@ -5166,17 +6449,96 @@ else if (cmd === 'garden' && cmdArgs[0] === 'tend') {
   }
   process.exit(0);
 }
-else if (cmd === 'ship' && cmdArgs[0] === 'garden') {
-  // Garden promotion/rollback tier is unimplemented (audit C5): report honestly
-  // instead of silently exiting 0 against an always-empty manifest.
-  console.error('Garden promotion is not yet implemented. No changes have been staged.');
-  process.exit(1);
-}
-else if (cmd === 'ship' && cmdArgs[0] === 'rollback') {
-  // See C5: rollback operates on a fresh in-memory manifest that is never
-  // populated, so it could only ever report 'Change not found'. Report honestly.
-  console.error('Garden rollback is not yet implemented. No promoted changes are tracked.');
-  process.exit(1);
+else if (cmd === 'ship' && (cmdArgs[0] === 'garden' || cmdArgs[0] === 'rollback')) {
+  // Garden promotion tier, backed by an on-disk PolicyChangeManifest
+  // (.sinter/garden/policy-manifest.json, or SINTER_GARDEN_MANIFEST_PATH).
+  const { mutatePolicyManifest, loadPolicyManifest, policyManifestPath } = await import('../dist/release/PolicyManifestStore.js');
+  const { GardenPromotionGate } = await import('../dist/release/GardenPromotionGate.js');
+  const { GardenRollbackController } = await import('../dist/release/GardenRollbackController.js');
+  const { CreativeRuntimeCandidateBuilder } = await import('../dist/release/CreativeRuntimeCandidateBuilder.js');
+  const manifestFile = policyManifestPath();
+  const parseMetrics = (text) => {
+    const out = {};
+    for (const pair of String(text || '').split(',').filter(Boolean)) {
+      const [k, v] = pair.split('=');
+      const n = Number(v);
+      if (!k || v === undefined || v === '' || !Number.isFinite(n)) throw new Error(`Bad metric "${pair}" (expected name=number)`);
+      out[k] = n;
+    }
+    return out;
+  };
+  const shipArgs = leafArgv();
+  const flag = (name) => { const i = shipArgs.indexOf(name); return i >= 0 ? shipArgs[i + 1] : undefined; };
+  const positional = shipArgs.slice(1).filter((a, i, arr) => !a.startsWith('--') && !(i > 0 && arr[i - 1].startsWith('--')));
+  const usage = () => {
+    console.error('Usage:');
+    console.error('  sinter ship garden                                   list tracked policy changes');
+    console.error('  sinter ship garden stage <policyKind> <description> --before name=n[,name=n]');
+    console.error('  sinter ship garden promote <changeId> --after name=n[,name=n]   (gated: blocks on regressions)');
+    console.error('  sinter ship rollback <changeId> [--reason text]');
+    console.error('  sinter ship rollback --since <ISO timestamp> [--reason text]');
+    process.exit(2);
+  };
+  try {
+    if (cmdArgs[0] === 'garden') {
+      const sub = positional[0];
+      if (!sub) {
+        const manifest = await loadPolicyManifest(manifestFile);
+        const all = manifest.getAll();
+        if (all.length === 0) console.log(`No policy changes tracked (${manifestFile}).`);
+        for (const r of all) console.log(`${r.id}  ${r.status.padEnd(11)} ${r.policyKind}  ${r.changeDescription}`);
+      } else if (sub === 'stage') {
+        const [, kind, ...desc] = positional;
+        if (!kind || desc.length === 0) usage();
+        const rec = await mutatePolicyManifest((m) => m.stage(kind, desc.join(' '), parseMetrics(flag('--before'))), manifestFile);
+        console.log(`Staged ${rec.id} (${kind}). Promote with: sinter ship garden promote ${rec.id} --after name=n`);
+      } else if (sub === 'promote') {
+        const id = positional[1];
+        if (!id) usage();
+        const after = parseMetrics(flag('--after'));
+        const outcome = await mutatePolicyManifest((m) => {
+          const rec = m.getRecord(id);
+          if (!rec) return { ok: false, summary: `Change ${id} not found` };
+          if (rec.status !== 'staged') return { ok: false, summary: `Change ${id} is ${rec.status}, not staged` };
+          // Judge the change as it would look once promoted, before touching the manifest.
+          const provisional = { ...rec, metricsAfter: after, status: 'promoted' };
+          const candidate = new CreativeRuntimeCandidateBuilder().build([provisional], rec.changeDescription);
+          const verdict = new GardenPromotionGate().check(candidate);
+          if (!verdict.passed) return { ok: false, summary: verdict.summary, regressions: verdict.regressions };
+          m.promote(id, after);
+          return { ok: true, summary: verdict.summary, improvements: verdict.improvements };
+        }, manifestFile);
+        if (!outcome.ok) {
+          console.error(`Not promoted: ${outcome.summary}`);
+          for (const r of outcome.regressions || []) console.error(`  regression ${r}`);
+          process.exit(1);
+        }
+        console.log(`Promoted ${id}: ${outcome.summary}`);
+        for (const i of outcome.improvements || []) console.log(`  improved ${i}`);
+      } else {
+        usage();
+      }
+    } else {
+      const reason = flag('--reason') || 'manual rollback via sinter ship rollback';
+      const since = flag('--since');
+      const id = positional[0];
+      if (!id && !since) usage();
+      const results = await mutatePolicyManifest((m) => {
+        const controller = new GardenRollbackController(m);
+        return since ? controller.rollbackSince(since, reason) : [controller.rollback(id, reason)];
+      }, manifestFile);
+      let failed = 0;
+      for (const r of results) {
+        if (r.rolledBack) console.log(`Rolled back ${r.changeId}${r.rollbackTargetId ? ` (restore ${r.rollbackTargetId})` : ''}: ${r.reason}`);
+        else { failed++; console.error(`Not rolled back ${r.changeId}: ${r.reason}`); }
+      }
+      if (results.length === 0) { console.error('No promoted changes match.'); process.exit(1); }
+      if (failed > 0) process.exit(1);
+    }
+  } catch (err) {
+    console.error(`ship failed: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
 }
 else if (cmd === 'demo' && cmdArgs[0] === 'creative-codex') {
   const { DemoScenarioRunner } = await import('../dist/product/DemoScenarioRunner.js');
@@ -5236,7 +6598,7 @@ else if (cmd === 'prompt' && cmdArgs[0] === 'synthesize') {
 else if (cmd === 'taste') {
   // `taste` requires a subcommand; print usage instead of the generic
   // "Unknown command" error (which falsely implies `taste` is not a command).
-  console.error('Usage: sinter taste <train|eval>');
+  console.error('Usage: sinter taste <train|eval|ingest>');
   process.exit(1);
 }
 else if (cmd === 'dream') {
@@ -5256,7 +6618,7 @@ else if (cmd === 'image' && (cmdArgs[0] === 'validate' || cmdArgs[0] === 'attach
         console.error('usage: sinter image validate <path>');
         process.exit(2);
       }
-      const source = cmdArgs.includes('--studio') ? 'studio' : 'cli';
+      const source = leafArgv().includes('--studio') ? 'studio' : 'cli';
       let att;
       if (source === 'studio') {
         const studio = await import('../dist/media/studioImageUpload.js');
@@ -5285,7 +6647,7 @@ else if ((cmd === 'mece' || cmd === 'rotation') && !fs.existsSync(path.join(repo
 else if (cmd === 'mece') {
   try {
     const { spawnSync } = await import('node:child_process');
-    const r = spawnSync(process.execPath, [path.join(repoRoot, 'scripts/mece/cli.mjs'), ...cmdArgs], {
+    const r = spawnSync(process.execPath, [path.join(repoRoot, 'scripts/mece/cli.mjs'), ...leafArgv()], {
       stdio: 'inherit',
       cwd: repoRoot,
       env: process.env,
@@ -5301,7 +6663,7 @@ else if (cmd === 'rotation') {
   // scripts/rotation and reuses audition-379 helpers — not a clone.
   try {
     const { main: rotationMain } = await import('../scripts/rotation/cli.mjs');
-    const code = await rotationMain(cmdArgs, {
+    const code = await rotationMain(leafArgv(), {
       model: flags.model || null,
       dryRun: flags.dryRun === true,
       live: flags.live === true,

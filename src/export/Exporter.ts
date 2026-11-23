@@ -42,6 +42,8 @@ export interface VideoExportOptions {
   duration?: number; // default 10 (seconds)
   width?: number;    // default 1920
   height?: number;   // default 1080
+  /** Canvas recording, encoding, and media verification budget in milliseconds. */
+  timeoutMs?: number;
   /**
    * Opt-in to the upstream @revideo/renderer video-export path (revideo domain
    * only). The upstream headless renderer hangs silently, so it is disabled by
@@ -269,6 +271,7 @@ export class Exporter {
       width = 1920,
       height = 1080,
       allowUpstreamRenderer = false,
+      timeoutMs = 300_000,
     } = options;
 
     // Create output directory if it doesn't exist
@@ -291,7 +294,7 @@ export class Exporter {
       const renderer = new HyperFramesRenderer();
       await renderer.render(code, outputPath, { fps, width, height });
     } else {
-      const recorder = new CanvasRecorder({ fps, duration, width, height });
+      const recorder = new CanvasRecorder({ fps, duration, width, height, timeoutMs });
       await recorder.record(code, domain as import('../types/domains.js').Domain, outputPath);
     }
   }

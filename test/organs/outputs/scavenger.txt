@@ -1,0 +1,4 @@
+# organ: scavenger | FragmentArchive | data: real, in-process call
+categories=swarm_theory, personas, modes, curation, constraints, creative_outputs, experiment_results, project_dna, prompt_seeds
+swarm_theory: 5 fragments
+sample={"id":"theory-shattered-mirror","title":"The Shattered Mirror Principle","content":"A single large model is a polished mirror — it reflects what it thinks you want. The swarm is a shattered mirror. Each tiny model is a fragment. They give you a kaleidoscope of possibilities.","tags":["philosophy","c

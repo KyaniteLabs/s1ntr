@@ -24,6 +24,7 @@ export interface ProviderRuntimeSelection {
   configuredApiKey?: string;
   current?: {
     provider?: string;
+    baseUrl?: string;
     apiKey?: string;
   };
   env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
@@ -216,7 +217,7 @@ export function readRuntimeEnv(
   env: NodeJS.ProcessEnv | Record<string, string | undefined>,
   key: string,
 ): string | undefined {
-  return env[key] || env[`LIMINAL_${key}`];
+  return env[`SINTER_${key}`] ?? (env[key] || env[`LIMINAL_${key}`]);
 }
 
 export function resolveProviderAlias(value: string | undefined): RuntimeProviderKey | undefined {
@@ -240,10 +241,21 @@ export function normalizeProviderBaseUrl(
   const defaults = PROVIDER_DEFAULTS[provider];
   if (!configuredBaseUrl) return defaults.baseUrl;
 
-  const lower = configuredBaseUrl.toLowerCase().replace(/\/+$/, '');
-  if (provider === 'glm' && lower.includes('api.z.ai/api/coding/paas')) return defaults.baseUrl;
-  if (provider === 'minimax' && lower === 'https://api.minimax.io/v1') return defaults.baseUrl;
+  if (provider === 'glm' && (
+    sameProviderEndpoint(configuredBaseUrl, 'https://api.z.ai/api/coding/paas')
+    || sameProviderEndpoint(configuredBaseUrl, 'https://api.z.ai/api/coding/paas/v4')
+  )) return defaults.baseUrl;
+  if (provider === 'minimax' && sameProviderEndpoint(configuredBaseUrl, 'https://api.minimax.io/v1')) return defaults.baseUrl;
   return configuredBaseUrl;
+}
+
+export function sameProviderEndpoint(left?: string, right?: string): boolean {
+  if (!left || !right) return false;
+  try {
+    return new URL(left).href.replace(/\/+$/, '') === new URL(right).href.replace(/\/+$/, '');
+  } catch {
+    return false;
+  }
 }
 
 function endpointHost(baseUrl: string): string {
@@ -373,43 +385,50 @@ export function apiKeyEnvNamesForProvider(provider: RuntimeProviderKey | Provide
   }
 }
 
-export function apiKeyEnvNamesForEndpoint(baseUrl: string, model = ''): string[] {
-  const lowerUrl = baseUrl.toLowerCase();
-  // Doctrine seats: endpoint-specific keys outrank adapter/label defaults.
-  if (lowerUrl.includes('ollama.com')) return ['OLLAMA_API_KEY'];
-  // Grok/xAI direct (not Kilo) — official API or OIDC token from `grok login`.
-  if (lowerUrl.includes('api.x.ai') || lowerUrl.includes('x.ai/v1')) {
-    return ['XAI_API_KEY', 'GROK_API_KEY'];
+export function apiKeyEnvNamesForEndpoint(baseUrl: string, _model = ''): string[] {
+  try {
+    const endpoint = new URL(baseUrl);
+    if (endpoint.username || endpoint.password) return [];
+    const configuredProxy = process.env.CODEX_PROXY_BASE_URL
+      || process.env.SINTER_CODEX_PROXY_BASE_URL || process.env.LIMINAL_CODEX_PROXY_BASE_URL;
+    if (sameProviderEndpoint(baseUrl, configuredProxy)
+      || ((endpoint.hostname === 'localhost' || endpoint.hostname === '127.0.0.1')
+        && endpoint.port === '8317' && endpoint.protocol === 'http:')) return ['CODEX_PROXY_API_KEY'];
+    if (endpoint.protocol !== 'https:' || endpoint.port) return [];
+    switch (endpoint.hostname) {
+      case 'ollama.com': return ['OLLAMA_API_KEY'];
+      case 'api.x.ai': return ['XAI_API_KEY', 'GROK_API_KEY'];
+      case 'api.deepinfra.com': return ['DEEPINFRA_API_KEY'];
+      case 'api.xiaomimimo.com':
+      case 'token-plan-sgp.xiaomimimo.com': return ['XIAOMI_API_KEY'];
+      case 'generativelanguage.googleapis.com': return ['GOOGLE_API_KEY', 'GEMINI_API_KEY'];
+      case 'api.moonshot.cn': return apiKeyEnvNamesForProvider('moonshot');
+      case 'open.bigmodel.cn': return apiKeyEnvNamesForProvider('glm');
+      case 'api.minimaxi.com': return apiKeyEnvNamesForProvider('minimax');
+      default: {
+        const provider = PROVIDER_ORDER.find(key => endpointHost(PROVIDER_DEFAULTS[key].baseUrl) === endpoint.hostname);
+        return provider && provider !== 'custom' ? apiKeyEnvNamesForProvider(provider) : [];
+      }
+    }
+  } catch {
+    return [];
   }
-  // CEO 2026-08-30 dedicated accounts: DeepInfra ($40 earmark, DeepSeek-V4-
-  // Flash-0731 only) and the Xiaomi Token Plan (tp- key, token-plan-sgp).
-  if (lowerUrl.includes('deepinfra')) return ['DEEPINFRA_API_KEY'];
-  if (lowerUrl.includes('xiaomimimo.com')) return ['XIAOMI_API_KEY'];
-  if (
-    lowerUrl.includes('localhost:8317')
-    || lowerUrl.includes('127.0.0.1:8317')
-    || isConfiguredCodexProxyBaseUrl(baseUrl)
-  ) {
-    return ['CODEX_PROXY_API_KEY'];
-  }
-  const adapter = detectProviderAdapter({ baseUrl, model });
-  if (adapter === 'anthropic' && !lowerUrl.includes('z.ai') && !lowerUrl.includes('kimi') && !lowerUrl.includes('minimax')) {
-    return ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'];
-  }
-  if (adapter === 'google') return ['GOOGLE_API_KEY', 'GEMINI_API_KEY'];
-  return apiKeyEnvNamesForProvider(detectProviderLabel(baseUrl, model));
 }
 
-/** True when baseUrl matches the configured CODEX_PROXY_BASE_URL (custom host/port). */
-function isConfiguredCodexProxyBaseUrl(baseUrl: string): boolean {
-  const configured = (
-    process.env.CODEX_PROXY_BASE_URL
-    || process.env.SINTER_CODEX_PROXY_BASE_URL
-    || process.env.LIMINAL_CODEX_PROXY_BASE_URL
-    || ''
-  ).toLowerCase().replace(/\/+$/, '');
-  if (!configured) return false;
-  return baseUrl.toLowerCase().replace(/\/+$/, '') === configured;
+export function selectScopedEnvApiKey(
+  env: NodeJS.ProcessEnv | Record<string, string | undefined>,
+  keyName: string,
+  baseUrl: string,
+  allowUnbound = false,
+): string | undefined {
+  const prefixes = ['SINTER_', '', 'LIMINAL_'];
+  const endpointName = keyName.replace(/_API_KEY$/, '_BASE_URL');
+  const hasDeclaredEndpoint = prefixes.some(prefix => Boolean(env[prefix + endpointName]));
+  return firstUsableApiKey(...prefixes.map(prefix => {
+    const endpoint = env[prefix + endpointName];
+    return sameProviderEndpoint(endpoint, baseUrl) || (allowUnbound && !hasDeclaredEndpoint)
+      ? env[prefix + keyName] : undefined;
+  }));
 }
 
 export function selectRuntimeApiKey(args: {
@@ -420,6 +439,7 @@ export function selectRuntimeApiKey(args: {
   configuredApiKey?: string;
   currentApiKey?: string;
   genericFallbackKeys?: string[];
+  allowUnboundGenericKey?: boolean;
   /**
    * Prefer generic Sinter keys over provider-specific keys for user-facing
    * default config. Endpoint-specific callers should keep the default false.
@@ -427,23 +447,14 @@ export function selectRuntimeApiKey(args: {
   genericFirst?: boolean;
 }): string | undefined {
   const env = args.env ?? process.env;
-  // A 'custom' endpoint is just a URL: never admit an OpenAI key for a host
-  // that is a known different vendor (endpoint keys already cover those).
-  const foreignVendorEndpoint = /(anthropic|generativelanguage|minimax|moonshot|kimi|z\.ai|x\.ai|deepinfra|openrouter)/i
-    .test(args.baseUrl);
-  const providerKeys = (args.provider ? apiKeyEnvNamesForProvider(args.provider) : [])
-    .filter(key => !(foreignVendorEndpoint && key === 'OPENAI_API_KEY'));
   const endpointKeys = apiKeyEnvNamesForEndpoint(args.baseUrl, args.model);
   const genericKeys = args.genericFallbackKeys ?? ['LLM_API_KEY'];
-  // Endpoint-derived keys outrank provider-default keys: the endpoint is what
-  // the request hits, so a 'custom' provider pointed at api.anthropic.com or
-  // generativelanguage.googleapis.com must not fall back to OPENAI_API_KEY
-  // while an endpoint-matching key is available.
-  const providerValues = [
-    ...endpointKeys.map(key => readRuntimeEnv(env, key)),
-    ...providerKeys.map(key => readRuntimeEnv(env, key)),
-  ];
-  const genericValues = genericKeys.map(key => readRuntimeEnv(env, key));
+  const providerKeys = args.provider === 'custom'
+    && sameProviderEndpoint(args.baseUrl, PROVIDER_DEFAULTS.custom.baseUrl)
+    ? apiKeyEnvNamesForProvider('custom') : [];
+  const providerValues = [...endpointKeys, ...providerKeys].map(key => readRuntimeEnv(env, key));
+  const genericValues = genericKeys.map(key =>
+    selectScopedEnvApiKey(env, key, args.baseUrl, args.allowUnboundGenericKey ?? true));
   const values = [
     args.configuredApiKey,
     args.currentApiKey,
@@ -476,12 +487,15 @@ export function resolveProviderRuntime(selection: ProviderRuntimeSelection): Pro
   const model = selection.model || defaults.model;
   const statusProvider = statusProviderFor(selection.provider, baseUrl, model);
   const currentMatches = selection.current?.provider === statusProvider || selection.current?.provider === selection.provider;
-  const currentApiKey = currentMatches ? selection.current?.apiKey : undefined;
+  const currentApiKey = currentMatches && sameProviderEndpoint(selection.current?.baseUrl, baseUrl)
+    ? selection.current?.apiKey : undefined;
+  const env = selection.env ?? process.env;
   const apiKey = selectRuntimeApiKey({
     provider: selection.provider,
     baseUrl,
     model,
-    env: selection.env,
+    env,
+    allowUnboundGenericKey: false,
     configuredApiKey: selection.configuredApiKey,
     currentApiKey,
   });

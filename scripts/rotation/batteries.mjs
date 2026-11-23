@@ -9,6 +9,7 @@
  */
 import { promises as fs } from 'node:fs';
 import fsSync from 'node:fs';
+import { observeSeatRateLimit, isSeatRateLimit } from './rate-sub.mjs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
@@ -53,6 +54,7 @@ import {
   validateFailureSpaceMap,
   writeJson,
 } from './shared.mjs';
+import { prepareBrowserScratch } from '../lib/scratch-space.mjs';
 
 /** 1×1 transparent PNG — intentional blank visual evidence for blank-screenshot frictions. */
 const BLANK_PNG_BASE64 =
@@ -157,6 +159,7 @@ export async function renderFixtureScreenshot({
   try {
     // F23: resolve system/durable Chrome — do not rely on purged ~/.cache/puppeteer
     const { puppeteerLaunchOptions } = await import('./chrome.mjs');
+    prepareBrowserScratch();   // browser profile off the data volume + free-space check
     browser = await puppeteer.launch(puppeteerLaunchOptions({
       args: [
         '--no-sandbox',
@@ -354,6 +357,7 @@ export async function runBattery(seat, opts = {}) {
      * the pack-invalid guard for bad fixedJudge routes is unit-testable (T0-5).
      */
     evaluatorSeatResOverride = null,
+    rateLimitModel = null,
   } = opts;
 
   const pack = await loadTaskPack(seat);
@@ -459,6 +463,7 @@ export async function runBattery(seat, opts = {}) {
       raw = mockSeatResult(seat, task);
     } else {
       raw = await runLiveTask(seat, task, {
+        rateLimitModel,
         model,
         seatRes,
         evaluatorSeatRes,
@@ -624,6 +629,7 @@ export async function runBattery(seat, opts = {}) {
           });
         } else {
           raw = await runLiveTask(seat, task, {
+            rateLimitModel,
             model, seatRes, evaluatorSeatRes, reasoningLevel, pack, runDir, adapters, rejudge: true,
           });
         }
@@ -966,10 +972,9 @@ function sanitizeRaw(result) {
  * Exported for unit tests asserting honest-null gaps.
  */
 export async function runLiveTask(seat, task, ctx) {
-  if (seat === 'generator') return runLiveGenerator(task, ctx);
-  if (seat === 'evaluator') return runLiveEvaluator(task, ctx);
-  if (seat === 'harness') return runLiveHarness(task, ctx);
-  return runLiveChat(task, ctx);
+  const run = { generator: runLiveGenerator, evaluator: runLiveEvaluator, harness: runLiveHarness }[seat] ?? runLiveChat;
+  if (!ctx.rateLimitModel || !ctx.adapters?.createLlmClient) return run(task, ctx);
+  return observeSeatRateLimit(seat, ctx.rateLimitModel, ctx.adapters, adapters => run(task, { ...ctx, adapters }));
 }
 
 /**
@@ -1157,6 +1162,7 @@ async function runLiveGenerator(task, ctx) {
       },
     });
 
+    if (!cell.success && isSeatRateLimit(cell, ctx.rateLimitModel)) throw cell;
     const genUsage = cell.reasoning?.usage
       ? {
           prompt: cell.reasoning.usage.prompt ?? null,
@@ -1203,6 +1209,7 @@ async function runLiveGenerator(task, ctx) {
       livePath,
     };
   } catch (err) {
+    if (isSeatRateLimit(err, ctx.rateLimitModel)) throw err;
     findings.push(`Live generator cell failed: ${err instanceof Error ? err.message : String(err)}`);
     return honestLiveGap('generator', task, findings, { verdict: 'error' });
   }

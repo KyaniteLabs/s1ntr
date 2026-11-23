@@ -12,10 +12,10 @@ import {
 import { verifyCreativeAdmission, type CreativeAdmissionProof } from
   '../runtime-core/CreativeAdmissionAuthority.js';
 
-import { LLMError, LLMTimeoutError, LLMAuthError, LLMRateLimitError, isTransientNetworkError } from './errors.js';
+import { LLMError, LLMVisionRequiredError, LLMReasoningExhaustedError, LLMCircuitOpenError, LLMTimeoutError, LLMAuthError, LLMRateLimitError, isTransientNetworkError } from './errors.js';
 import { providerRequestDigest } from './ProviderRequestDigest.js';
 import { LLMGenerationError } from '../errors/LLMGenerationError.js';
-export { LLMError, LLMTimeoutError, LLMRateLimitError, LLMAuthError } from './errors.js';
+export { LLMError, LLMVisionRequiredError, LLMReasoningExhaustedError, LLMTimeoutError, LLMRateLimitError, LLMAuthError } from './errors.js';
 
 import { CircuitBreaker } from './CircuitBreaker.js';
 
@@ -51,7 +51,7 @@ const LEGACY_LM_STUDIO_MODEL_PLACEHOLDER = 'local-model';
 /** Default when callers pass empty/whitespace system content (Kilo/OpenAI 400). */
 const DEFAULT_SYSTEM_PROMPT = 'You are a helpful assistant.';
 
-export type ProviderAttemptGuard = () => void;
+export type ProviderAttemptGuard = () => void | Promise<void>;
 
 /**
  * Decision models (e.g. Liquid AI d1-2B) never generate tokens; a chat prompt
@@ -85,6 +85,7 @@ export interface LiminalProductTransportGrant {
     readonly role: ModelRole;
   };
   readonly proof: CreativeAdmissionProof;
+  readonly reserveAttempt?: (requestDigest: string) => Promise<void>;
 }
 const productTransportAuthority = new AsyncLocalStorage<LiminalProductTransportGrant>();
 
@@ -110,8 +111,28 @@ export function withLiminalProductTransportAuthority<T>(
   return productTransportAuthority.run(grant, operation);
 }
 
-export function assertProviderAttemptAllowed(): void {
-  providerAttemptGuards.getStore()?.();
+const providerAttemptLimits = new AsyncLocalStorage<{ remaining: number; additionalAttempts: () => number }>();
+
+export async function withProviderAttemptLimit<T>(
+  maximum: number,
+  operation: (callsUsed: () => number) => Promise<T>,
+  additionalAttempts: () => number = () => 0,
+): Promise<{ result: T; providerCallsUsed: number }> {
+  if (!Number.isSafeInteger(maximum) || maximum < 1) throw new Error('PROVIDER_CALL_LIMIT_INVALID');
+  if (providerAttemptLimits.getStore()) throw new Error('PROVIDER_CALL_LIMIT_ALREADY_ACTIVE');
+  const limit = { remaining: maximum, additionalAttempts };
+  const callsUsed = () => maximum - limit.remaining + additionalAttempts();
+  const result = await providerAttemptLimits.run(limit, () => operation(callsUsed));
+  return { result, providerCallsUsed: callsUsed() };
+}
+
+export function assertProviderAttemptAllowed(): void | Promise<void> {
+  const limit = providerAttemptLimits.getStore();
+  if (limit) {
+    if (limit.remaining <= limit.additionalAttempts()) throw new Error('PROVIDER_CALL_LIMIT_EXHAUSTED');
+    limit.remaining--;
+  }
+  return providerAttemptGuards.getStore()?.();
 }
 
 /** Production transports must be attributable to one governed product role. */
@@ -150,11 +171,11 @@ import { createProvider, transportEndpoint } from './ProviderFactory.js';
 import { BaseProvider } from './providers/BaseProvider.js';
 import type { ProviderImageInput, ProviderRequest, ProviderResponse, StreamEvent, ThinkingConfig, TokenUsage } from './ProviderTypes.js';
 import type { ModelRole, ResolvedRoleConfig, RoleConfigFile } from '../config/RoleConfig.js';
-import { loadRoleConfig, getFallbacks, isFatalRoleConfigError, resolveUserConfigPath, resolveThinkingConfig, envRoleTimeout } from '../config/RoleConfig.js';
-import { GLM_CODING_PLAN_MODEL as GLMCodingPlanModelRef } from '../identity/GLMCodingPlanSeat.js';
+import { loadRoleConfig, getFallbacks, isFatalRoleConfigError, resolveThinkingConfig, envRoleTimeout } from '../config/RoleConfig.js';
+import { isGLMCodingPlanModel, type GLMCodingPlanModel } from '../identity/GLMCodingPlanSeat.js';
 import { KILO_SEAT_FALLBACKS, isKiloGatewayUrl, isCodexProxyUrl, isOllamaCloudUrl } from '../config/KiloGateway.js';
 import { getActiveGeneratorOverride } from './generatorOverrideContext.js';
-import { selectApiKeyForEndpoint } from '../config/ProviderKeyResolver.js';
+import { selectApiKeyForEndpoint, selectRoleApiKeyForEndpoint } from '../config/ProviderKeyResolver.js';
 import {
   PROVIDER_ORDER,
   apiKeyEnvNamesForProvider,
@@ -162,6 +183,7 @@ import {
   firstUsableApiKey,
   readRuntimeEnv,
   apiStyleForEndpoint,
+  sameProviderEndpoint,
 } from '../config/ProviderRuntime.js';
 import { compactLLMErrorProvenance, extractLLMErrorProvenance, type LLMRequestProvenance } from './ErrorProvenance.js';
 import { buildExecutorIdentity, isKnownResponseModelAlias } from '../identity/canonicalAlias.js';
@@ -219,6 +241,8 @@ export interface LLMConfig {
    * role-based configuration if available.
    */
   role?: ModelRole;
+  /** Keep this client's explicit endpoint across router overrides and fallback attempts. */
+  explicitTransportOnly?: boolean;
   /** Host-owned authority required for every harness provider attempt. */
   harnessTransportAuthority?: HarnessTransportAuthority;
   /**
@@ -258,6 +282,21 @@ export interface LLMConfig {
 
 const TRANSPORT_FAILURE_PATTERN = /fetch failed|econnrefused|econnreset|enotfound|etimedout|socket hang up|network/i;
 
+const PRE_TRANSPORT_REFUSAL_PATTERN = /^(?:SSRF Protection:|Harness executor blocked|Roleless provider transport|Provider transport requires|CAMPAIGN_FUNDING_|PROVIDER_BUDGET_|Action provider-call budget)/;
+
+function isPreTransportRefusal(error: Error): boolean {
+  if (error instanceof SSRFError) return true;
+  if (error instanceof LLMError && error.provider === 'authority') return true;
+  return PRE_TRANSPORT_REFUSAL_PATTERN.test(error.message);
+}
+
+/** The rule that made an error count against the breaker. */
+export function breakerRule(error: unknown): '5xx' | 'timeout' | 'transport' {
+  if (error instanceof LLMTimeoutError) return 'timeout';
+  if (error instanceof LLMError && error.statusCode !== undefined) return '5xx';
+  return 'transport';
+}
+
 /**
  * Whether an error says the provider itself is unhealthy, so it should count
  * toward the circuit breaker: timeouts, transport failures and 5xx only.
@@ -267,6 +306,10 @@ const TRANSPORT_FAILURE_PATTERN = /fetch failed|econnrefused|econnreset|enotfoun
 export function isBreakerFailure(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   if (error.name === 'AbortError') return false;
+  // Pre-transport refusals never reached the provider, whatever their text
+  // says: authority, identity, funding binding, SSRF guard, budget (#1736).
+  if (isPreTransportRefusal(error)) return false;
+  if (error instanceof LLMReasoningExhaustedError) return false;
   if (error instanceof LLMTimeoutError) return true;
   if (error instanceof LLMAuthError || error instanceof LLMRateLimitError) return false;
   if (error instanceof LLMError && error.statusCode !== undefined) return error.statusCode >= 500;
@@ -305,6 +348,23 @@ export interface LLMResponse {
    * no host-signed transport authority was bound to this client (#717).
    */
   executorAttestations?: readonly ExecutorAttestationRef[];
+}
+
+/**
+ * Sum token usage across provider attempts (failed primary/retries + the
+ * attempt that finally answered), so a receipt bills everything that was spent
+ * (#1704). Returns undefined only when no attempt reported usage.
+ */
+export function sumTokenUsage(...parts: ReadonlyArray<TokenUsage | undefined>): TokenUsage | undefined {
+  const reported = parts.filter((u): u is TokenUsage => u !== undefined);
+  if (reported.length === 0) return undefined;
+  const total: TokenUsage = { inputTokens: 0, outputTokens: 0 };
+  for (const u of reported) {
+    total.inputTokens += u.inputTokens;
+    total.outputTokens += u.outputTokens;
+    if (u.thinkingTokens !== undefined) total.thinkingTokens = (total.thinkingTokens ?? 0) + u.thinkingTokens;
+  }
+  return total;
 }
 
 export interface LLMCompleteResult {
@@ -362,31 +422,36 @@ export class LLMClient {
   private readonly explicitEndpointConfig: boolean;
   private readonly explicitTemperatureConfig: boolean;
   private readonly explicitMaxTokensConfig: boolean;
+  private readonly explicitTimeout: number | undefined;
   private roleConfigResolutionPromise: Promise<void> | null = null;
   /** Cached role config — populated lazily when role is used */
   private static roleConfigs: Record<ModelRole, ResolvedRoleConfig> | null = null;
-  private static codingPlanVerified: boolean | undefined;
+  private static codingPlanVerified = new Map<GLMCodingPlanModel, boolean>();
   /** A005 (Sol): a declared glm coding-plan seat counts only when the pinned
-   *  owner-signed binding loads and verifies (signature, expiry, exact model).
-   *  Memoized per process; any failure drops the flag (honest glm-direct). */
+   *  host-signed binding for the requested model loads and verifies
+   *  (signature, expiry, owner provenance, exact model). Memoized per process
+   *  and model; any failure drops the flag (honest glm-direct). */
   private static codingPlanDeclarationVerified(requestedModel: string | undefined): boolean {
-    // The binding must verify AND the requesting client must ride the exact
-    // bound model — a seat flag declared for a different model on the same
-    // endpoint stays glm-direct (Sol follow-up round 2, 2026-08-26).
-    if (requestedModel !== GLMCodingPlanModelRef) {
+    // The requesting client must ride a plan model that has its own binding:
+    // a seat flag on any other model, or on a plan model with no binding,
+    // stays glm-direct (Sol follow-up round 2, 2026-08-26).
+    if (!isGLMCodingPlanModel(requestedModel)) {
       return false;
     }
-    if (LLMClient.codingPlanVerified === undefined) {
+    let verified = LLMClient.codingPlanVerified.get(requestedModel);
+    if (verified === undefined) {
       try {
         const { binding } = loadGLMCodingPlanSeat({
           registry: loadPinnedProductionHostAuthority().registry,
+          model: requestedModel,
         });
-        LLMClient.codingPlanVerified = binding.subject.model === GLMCodingPlanModelRef;
+        verified = binding.subject.model === requestedModel;
       } catch {
-        LLMClient.codingPlanVerified = false;
+        verified = false;
       }
+      LLMClient.codingPlanVerified.set(requestedModel, verified);
     }
-    return LLMClient.codingPlanVerified;
+    return verified;
   }
   /** Cached raw config file — needed for fallback resolution */
   private static roleConfigFile: RoleConfigFile | null = null;
@@ -394,6 +459,11 @@ export class LLMClient {
   private fallbackProviders: BaseProvider[] | null = null;
   /** Circuit breakers per provider for fault isolation */
   private breakers = new Map<string, CircuitBreaker>();
+  /** Per-provider open-window bookkeeping: first error and the one failure record (#1736) */
+  private breakerWindows = new Map<string, {
+    firstError?: { rule: string; message: string };
+    record?: { id: string; count: number };
+  }>();
 
   private formatFallbackFailure(model: string, error: unknown): string {
     const reason = error instanceof Error ? error.message : String(error);
@@ -470,11 +540,16 @@ export class LLMClient {
     // over an explicit baseUrl, because real generators build their client with an
     // explicit endpoint from getEffectiveConfig — gating on `!baseUrl` would let
     // them bypass routing entirely. No active override → behavior unchanged.
-    const override = rawConfig?.role === 'generator'
+    const override = rawConfig?.role === 'generator' && !rawConfig.explicitTransportOnly
       ? getActiveGeneratorOverride()
       : undefined;
     const config: Partial<LLMConfig> | undefined = override
-      ? { ...rawConfig, baseUrl: override.baseUrl, model: override.model, ...(override.apiKey ? { apiKey: override.apiKey } : {}) }
+      ? {
+        ...rawConfig,
+        baseUrl: override.baseUrl, model: override.model, apiKey: override.apiKey,
+        provider: undefined, headers: undefined, endpointPath: undefined,
+        glmCodingPlanSeat: false, minimaxTokenPlanSeat: false,
+      }
       : rawConfig;
     this.role = config?.role;
     this.hasExplicitHarnessTransportAuthority = config?.harnessTransportAuthority !== undefined;
@@ -489,9 +564,11 @@ export class LLMClient {
     this.explicitEndpointConfig = Boolean(config?.baseUrl || config?.model || config?.apiKey || env('LLM_BASE_URL') || env('LLM_MODEL'));
     this.explicitTemperatureConfig = config?.temperature !== undefined;
     this.explicitMaxTokensConfig = config?.maxTokens !== undefined;
+    this.explicitTimeout = config?.timeout;
 
     // If a role is specified, try to resolve from RoleConfig system
     let roleBaseUrl: string | undefined;
+    let roleProvider: ResolvedRoleConfig['provider'];
     let roleApiKey: string | undefined;
     let roleModel: string | undefined;
     let roleTemperature: number | undefined;
@@ -507,6 +584,7 @@ export class LLMClient {
         roleSeatFlag = roleCfg.glmCodingPlanSeat;
         roleMinimaxSeatFlag = roleCfg.minimaxTokenPlanSeat;
         roleBaseUrl = roleCfg.baseUrl;
+        roleProvider = roleCfg.provider;
         roleApiKey = roleCfg.apiKey;
         roleModel = roleCfg.model;
         roleTemperature = roleCfg.temperature;
@@ -528,15 +606,30 @@ export class LLMClient {
     // seats are file-pinned (per role-specific env only) — the same intent
     // the loop's own "file-pinned seats take precedence" banner states.
     const genericEnvAllowed = !this.role || this.role === 'generator';
-    const envBaseUrl = genericEnvAllowed ? env('LLM_BASE_URL') : undefined;
-    const envModel = genericEnvAllowed ? env('LLM_MODEL') : undefined;
+    const genericEnvBaseUrl = genericEnvAllowed ? env('LLM_BASE_URL') : undefined;
+    const generatorEnvBaseUrl = this.role === 'generator' ? env('GENERATOR_BASE_URL') : undefined;
+    const envBaseUrl = generatorEnvBaseUrl || genericEnvBaseUrl;
+    const envModel = (this.role === 'generator' ? env('GENERATOR_MODEL') : undefined)
+      || (genericEnvAllowed ? env('LLM_MODEL') : undefined);
     const baseUrl = config?.baseUrl || envBaseUrl || roleBaseUrl || SERVICE_DEFAULTS.LOCAL_LLM_URL;
-
     const model = config?.model || envModel || roleModel || SERVICE_DEFAULTS.DEFAULT_MODEL;
 
+    const sameRoleRoute = (baseUrl === roleBaseUrl || sameProviderEndpoint(baseUrl, roleBaseUrl))
+      && (!config?.provider || config.provider === roleProvider);
+    const allowUnboundGenericKey = !this.role && !config?.baseUrl && !genericEnvBaseUrl;
+    const resolveApiKey = () => {
+      if (sameRoleRoute && (config?.baseUrl || !envBaseUrl)) return roleApiKey;
+      if (this.role === 'generator' && !config?.baseUrl && envBaseUrl) {
+        return selectRoleApiKeyForEndpoint(this.role, baseUrl, model);
+      }
+      return selectApiKeyForEndpoint(
+        baseUrl, model, genericEnvAllowed ? ['LLM_API_KEY'] : [], allowUnboundGenericKey,
+      );
+    };
+    const apiKey = override ? override.apiKey : config?.apiKey ?? resolveApiKey();
     this.config = {
       baseUrl,
-      apiKey: config?.apiKey ?? (envBaseUrl ? undefined : roleApiKey) ?? selectApiKeyForEndpoint(baseUrl, model, genericEnvAllowed ? ['LLM_API_KEY'] : []),
+      apiKey,
       model,
       provider: config?.provider,
       name: config?.name,
@@ -545,7 +638,7 @@ export class LLMClient {
       maxTokens: config?.maxTokens ?? roleMaxTokens ?? 4096,
       // Role timeout (env SINTER_<ROLE>_TIMEOUT_MS > file > role default,
       // resolved in RoleConfig) outranks the legacy global env (#1423 bug 32).
-      timeout: config?.timeout
+      timeout: this.getTimeoutOverride()
         ?? roleTimeout
         ?? (() => {
           const n = Number.parseInt(
@@ -555,6 +648,7 @@ export class LLMClient {
           return Number.isFinite(n) && n > 0 ? n : undefined;
         })(),
       role: this.role,
+      explicitTransportOnly: config?.explicitTransportOnly,
       thinking: config?.thinking ?? resolveThinkingConfig(roleThinking),
       glmCodingPlanSeat: (config?.glmCodingPlanSeat ?? roleSeatFlag) === true
         ? LLMClient.codingPlanDeclarationVerified(model) : false,
@@ -589,38 +683,35 @@ export class LLMClient {
       return LLMClient.roleConfigs[role] || null;
     }
     // Synchronous env-var fallback for each role
-    const envMap: Record<ModelRole, { baseUrl: string[]; model: string[]; apiKey: string[] }> = {
+    const envMap: Record<ModelRole, { baseUrl: string[]; model: string[] }> = {
       generator: {
-        baseUrl: ['LLM_BASE_URL'],
-        model: ['LLM_MODEL'],
-        apiKey: ['LLM_API_KEY'],
+        baseUrl: ['GENERATOR_BASE_URL', 'LLM_BASE_URL'],
+        model: ['GENERATOR_MODEL', 'LLM_MODEL'],
       },
       evaluator: {
         baseUrl: ['EVALUATOR_BASE_URL'],
         model: ['EVALUATOR_MODEL'],
-        apiKey: ['EVALUATOR_API_KEY'],
       },
       harness: {
         baseUrl: ['HARNESS_BASE_URL'],
         model: ['HARNESS_MODEL'],
-        apiKey: ['HARNESS_API_KEY'],
       },
       studio: {
         baseUrl: ['STUDIO_BASE_URL', 'HARNESS_BASE_URL'],
         model: ['STUDIO_MODEL', 'HARNESS_MODEL'],
-        apiKey: ['STUDIO_API_KEY', 'HARNESS_API_KEY'],
       },
     };
     const sources = envMap[role];
     const baseUrl = sources.baseUrl.map(k => env(k)).find(Boolean);
     const model = sources.model.map(k => env(k)).find(Boolean);
-    const apiKey = selectApiKeyForEndpoint(baseUrl || '', model, sources.apiKey);
 
     if (baseUrl || model) {
+      const endpoint = baseUrl || SERVICE_DEFAULTS.LOCAL_LLM_URL;
+      const studioUsesHarnessEndpoint = role === 'studio' && !!env('HARNESS_BASE_URL') && !env('STUDIO_BASE_URL');
       return {
-        baseUrl: baseUrl || SERVICE_DEFAULTS.LOCAL_LLM_URL,
+        baseUrl: endpoint,
         model: model || SERVICE_DEFAULTS.DEFAULT_MODEL,
-        apiKey,
+        apiKey: selectRoleApiKeyForEndpoint(role, endpoint, model, !studioUsesHarnessEndpoint),
         temperature: role === 'generator' ? 0.7 : role === 'evaluator' ? 0.2 : 0.5,
         maxTokens: 4096,
         // Generator and harness calls reach reasoning models that think for
@@ -678,7 +769,7 @@ export class LLMClient {
   }
 
   /**
-   * The raw loaded role config file (cached by {@link loadRoles}), or null if not
+   * The merged role config (cached by {@link loadRoles}), or null if not
    * loaded. Lets the hybrid router read `roles.generatorLocal` without reaching
    * into RoleConfig's async loader on a hot path.
    */
@@ -703,11 +794,13 @@ export class LLMClient {
 
     const roleConfig = this.role ? LLMClient.roleConfigs?.[this.role] : undefined;
     if (!roleConfig || !this.hasUsableRoleEndpoint(roleConfig)) return;
+    const timeout = this.getTimeoutOverride() ?? roleConfig.timeout;
 
     if (
       this.config.baseUrl === roleConfig.baseUrl &&
       this.config.model === roleConfig.model &&
-      this.config.apiKey === roleConfig.apiKey
+      this.config.apiKey === roleConfig.apiKey &&
+      this.config.timeout === timeout
     ) {
       return;
     }
@@ -726,6 +819,7 @@ export class LLMClient {
       provider: roleConfig.provider,
       temperature: this.explicitTemperatureConfig ? this.config.temperature : roleConfig.temperature,
       maxTokens: this.explicitMaxTokensConfig ? this.config.maxTokens : roleConfig.maxTokens,
+      timeout,
       // Env reasoning pin wins over stale file/role thinking
       thinking: resolveThinkingConfig(roleConfig.thinking),
       grokSubscriptionSeat: this.config.grokSubscriptionSeat
@@ -777,25 +871,8 @@ export class LLMClient {
   private static async loadRoleConfigWithFile(
     projectDir?: string,
   ): Promise<{ configs: Record<ModelRole, ResolvedRoleConfig>; rawFile: RoleConfigFile | null }> {
-    // Re-use the existing loadRoleConfig for resolved configs.
-    // For the raw file, we load it separately here to avoid changing the
-    // public API of loadRoleConfig.
-    const configs = await loadRoleConfig(projectDir);
-
-    // Load raw file for fallbacks
     let rawFile: RoleConfigFile | null = null;
-    try {
-      const { readFile } = await import('fs/promises');
-      // Honor SINTER_CONFIG_PATH (matches loadRoleConfig) so the raw file —
-      // fallbacks and roles.generatorLocal — comes from the SAME config a daemon
-      // or test points at, not always ~/.sinter/config.json.
-      const content = await readFile(resolveUserConfigPath(), 'utf-8');
-      rawFile = JSON.parse(content) as RoleConfigFile;
-    } catch (err) {
-      Logger.debug('LLMClient', 'No config file found, fallbacks come from env or are empty:', err);
-      // No config file — fallbacks come from env or are empty
-    }
-
+    const configs = await loadRoleConfig(projectDir, (merged) => { rawFile = merged; });
     return { configs, rawFile };
   }
 
@@ -803,12 +880,12 @@ export class LLMClient {
    * Resolve fallback providers for this client's role.
    * Returns cached instances if already resolved.
    */
-  private getFallbackProviders(): BaseProvider[] {
-    if (this.fallbackProviders) {
+  private getFallbackProviders(providerTimeoutMs?: number): BaseProvider[] {
+    if (providerTimeoutMs === undefined && this.fallbackProviders) {
       return this.fallbackProviders;
     }
 
-    if (!this.role) {
+    if (!this.role || this.config.explicitTransportOnly) {
       this.fallbackProviders = [];
       return this.fallbackProviders;
     }
@@ -831,7 +908,7 @@ export class LLMClient {
       return this.fallbackProviders;
     }
 
-    this.fallbackProviders = fallbackConfigs.map((cfg) => {
+    const providers = fallbackConfigs.map((cfg) => {
       const providerCfg: import('../llm/ProviderTypes.js').ProviderConfig = {
         baseUrl: cfg.baseUrl,
         // The fallback entry carries its own logical family and seat
@@ -845,13 +922,33 @@ export class LLMClient {
         model: cfg.model,
         temperature: cfg.temperature,
         maxTokens: cfg.maxTokens,
-        timeout: cfg.timeout,
+        timeout: providerTimeoutMs ?? cfg.timeout,
       };
       Logger.info('LLMClient.fallback', `Registered fallback provider: ${cfg.model} @ ${cfg.baseUrl}`);
-      return createProvider(providerCfg);
+      const created = createProvider(providerCfg);
+      if (cfg.thinking) this.fallbackThinking.set(created, cfg.thinking);
+      return created;
     });
 
-    return this.fallbackProviders;
+    if (providerTimeoutMs === undefined) this.fallbackProviders = providers;
+    return providers;
+  }
+
+  /** G09: each fallback seat's own thinking setting (ProviderConfig has no thinking field). */
+  private readonly fallbackThinking = new WeakMap<object, NonNullable<ProviderRequest['thinking']>>();
+
+  /**
+   * G09: a fallback request carries the fallback seat's own temperature / maxTokens / thinking, not the primary's.
+   * A value the caller set explicitly for this call (different from the primary default) is kept.
+   */
+  private requestForFallback(fallback: { getConfig?(): { temperature?: number; maxTokens?: number } }, req: ProviderRequest): ProviderRequest {
+    const seat = typeof fallback.getConfig === 'function' ? fallback.getConfig() : {};
+    return {
+      ...req,
+      temperature: req.temperature === this.config.temperature && seat.temperature !== undefined ? seat.temperature : req.temperature,
+      maxTokens: req.maxTokens === this.config.maxTokens && seat.maxTokens !== undefined ? seat.maxTokens : req.maxTokens,
+      thinking: this.fallbackThinking.get(fallback) ?? req.thinking,
+    };
   }
 
   /**
@@ -979,6 +1076,19 @@ export class LLMClient {
     return providerRequestDigest(req);
   }
 
+  /** #1597: a provider answering { success: false } with no error must not
+   * surface the bare "Provider returned unsuccessful response" fallback.
+   * Name the provider and the elapsed time (when known) so the failure is
+   * actionable on both the direct response path and the mapProviderResponse
+   * path, which has no timing context. */
+  private describeUnsuccessfulResponse(elapsedMs?: number, providerName?: string): string {
+    const provider = providerName ?? this.config.provider ?? 'unknown';
+    const elapsedSuffix = elapsedMs === undefined ? '' : elapsedMs >= 1000
+      ? ` after ${(elapsedMs / 1000).toFixed(1)}s`
+      : ` after ${Math.round(elapsedMs)}ms`;
+    return `Provider returned unsuccessful response from ${provider}${elapsedSuffix}`;
+  }
+
   private startExecutorAttemptSequence(): void {
     // Durable history is retained. Request-digest filtering in
     // beginHarnessAttempt preserves ordinals and trace lineage across restart.
@@ -1005,8 +1115,8 @@ export class LLMClient {
     fallbackOrdinal = 0,
     retryOrdinal = 0,
   ): Promise<{ context: HarnessAttemptContext; reservation?: import('../identity/executorReservation.js').ExecutorReservationV1 } | null> {
-    assertProviderAttemptAllowed();
     assertRoleBoundProviderAttempt(this.role);
+    await assertProviderAttemptAllowed();
     this.assertRoleAttemptEligible(provider, phase, fallbackOrdinal, retryOrdinal);
     if (!this.role) return null;
 
@@ -1071,6 +1181,8 @@ export class LLMClient {
       return this.blockHarnessAttempt(context, `${genericDecision.reason}: ${genericDecision.detail}`);
     }
     this.lastRoleTraceDigest = genericDecision.trace.digest;
+    const productGrant = productTransportAuthority.getStore();
+    if (productGrant?.scope.role === this.role) await productGrant.reserveAttempt?.(requestDigest);
     if (this.role !== 'harness') return { context };
 
     let reservation: import('../identity/executorReservation.js').ExecutorReservationV1;
@@ -1406,23 +1518,49 @@ export class LLMClient {
     const breaker = this.getBreaker(provider);
 
     if (!breaker.canExecute()) {
-      throw new LLMError(
-        `Circuit breaker open for provider: ${provider}. Too many recent failures.`,
-        provider,
-        undefined,
-        false
-      );
+      // One record per open window; later fast-fails only bump its count (#1736).
+      const window = this.breakerWindows.get(provider);
+      if (window?.record) {
+        window.record.count++;
+        failureLogger.update(window.record.id, { count: window.record.count });
+      }
+      throw new LLMCircuitOpenError(provider);
     }
 
     try {
       const result = await fn();
       breaker.recordSuccess();
+      this.breakerWindows.delete(provider);
       return result;
     } catch (error) {
       // Only provider-health failures trip the breaker: timeouts, transport
       // errors and 5xx. Aborts, authority refusals, 4xx and model-declared
       // failures say nothing about whether the provider is up (#1423 bug 29).
-      if (isBreakerFailure(error)) breaker.recordFailure();
+      if (isBreakerFailure(error)) {
+        const window = this.breakerWindows.get(provider) ?? {};
+        this.breakerWindows.set(provider, window);
+        window.firstError ??= { rule: breakerRule(error), message: (error as Error).message };
+        const wasOpen = breaker.getState() === 'open';
+        breaker.recordFailure();
+        if (!wasOpen && breaker.getState() === 'open') {
+          const trigger = { rule: window.firstError.rule, firstError: window.firstError.message };
+          const written = failureLogger.log({
+            model: this.config.model,
+            provider,
+            domain: 'unknown',
+            prompt: '',
+            error: `Circuit breaker opened for provider ${provider}: rule=${trigger.rule}; first error: ${trigger.firstError}`,
+            errorType: 'generation',
+            duration: 0,
+            count: 0,
+            trigger,
+          });
+          window.record = { id: written.id, count: 0 };
+        }
+      }
+      // A non-provider error (e.g. a local authority-gate refusal) must not
+      // burn the half-open probe slot, or the breaker never closes (#1736).
+      else breaker.releaseProbe();
       throw error;
     }
   }
@@ -1430,8 +1568,14 @@ export class LLMClient {
   // ── Provider delegation ──
 
   /** Get or create the provider instance (async for DNS-based SSRF validation) */
-  private async getProvider(): Promise<BaseProvider> {
-    if (!this.provider) {
+  private async getProvider(providerTimeoutMs?: number, preferMiniMaxOpenAI = false): Promise<BaseProvider> {
+    const configuredUrl = this.config.baseUrl;
+    const baseUrl = preferMiniMaxOpenAI && /^https:\/\/api\.minimax\.io\/anthropic(?:\/|$)/i.test(configuredUrl)
+      ? 'https://api.minimax.io/v1'
+      : configuredUrl;
+    const timeoutMs = this.config.timeout ?? TIMEOUT_DEFAULT_MS;
+    const useCachedProvider = baseUrl === configuredUrl && (providerTimeoutMs === undefined || providerTimeoutMs === timeoutMs);
+    if (!this.provider || !useCachedProvider) {
       // SSRF validation on base URL before creating provider.
       // Local LLM providers are explicit first-class provider endpoints; keep
       // arbitrary private IPs gated, but do not make LM Studio/Ollama require
@@ -1443,11 +1587,11 @@ export class LLMClient {
       // These allowlisted endpoints invoke local subscription CLIs, not HTTP.
       // Rotation may append the OpenAI-compatible path to the CLI address.
       const localCli = /^cli:\/\/(?:codex|agy|command-code|claude|grok)$/.test(
-        canonicalCliSeatUrl(this.config.baseUrl).replace(/^(cli:\/\/grok)\/chat\/completions$/, '$1')
-      ) || parseHermesSeat(this.config.baseUrl) !== null;
-      if (!localCli && !this.config.baseUrl.startsWith('grok-cli:')) {
+        canonicalCliSeatUrl(baseUrl).replace(/^(cli:\/\/grok)\/chat\/completions$/, '$1')
+      ) || parseHermesSeat(baseUrl) !== null;
+      if (!localCli && !baseUrl.startsWith('grok-cli:')) {
         try {
-          await validateUrl(this.config.baseUrl, { allowedHosts, allowPrivateIPs, allowLocalhost });
+          await validateUrl(baseUrl, { allowedHosts, allowPrivateIPs, allowLocalhost });
         } catch (err) {
           if (err instanceof SSRFError) {
             throw new LLMError(`SSRF Protection: ${err.message}`, 'llm', undefined, false);
@@ -1456,18 +1600,19 @@ export class LLMClient {
         }
       }
 
-      const timeoutMs = this.config.timeout ?? TIMEOUT_DEFAULT_MS;
-      this.provider = createProvider({
-        baseUrl: this.config.baseUrl,
+      const provider = createProvider({
+        baseUrl,
         logicalProvider: this.config.provider,
         minimaxTokenPlanSeat: this.config.minimaxTokenPlanSeat === true,
         apiKey: this.config.apiKey,
         model: this.config.model,
         temperature: this.config.temperature,
         maxTokens: this.config.maxTokens,
-        timeout: timeoutMs,
+        timeout: providerTimeoutMs ?? timeoutMs,
         headers: this.config.headers,
       });
+      if (useCachedProvider) this.provider = provider;
+      return provider;
     }
     return this.provider;
   }
@@ -1606,6 +1751,13 @@ export class LLMClient {
   /** Get current config */
   getConfig(): LLMConfig {
     return { ...this.config };
+  }
+
+  /** The caller- or role-configured deadline, before applying transport defaults. */
+  getTimeoutOverride(): number | undefined {
+    return this.explicitTimeout ?? (this.role
+      ? envRoleTimeout(this.role) ?? LLMClient.roleConfigs?.[this.role]?.timeoutOverride
+      : undefined);
   }
 
   /**
@@ -1769,7 +1921,7 @@ export class LLMClient {
     signal?: AbortSignal,
     bypassCache?: boolean,
     imageInputs?: ProviderImageInput[],
-    opts?: { jsonMode?: boolean; maxTokens?: number },
+    opts?: { jsonMode?: boolean; maxTokens?: number; requireVision?: boolean; thinking?: ThinkingConfig },
   ): Promise<LLMResponse> {
     await this.resolveRoleConfigForRequest();
     this.startExecutorAttemptSequence();
@@ -1788,6 +1940,11 @@ export class LLMClient {
     // LOUD: a degradation record on the failure channel plus a warn log, so a
     // text-only evaluator can never silently masquerade as visual evaluation.
     if (imageInputs && imageInputs.length > 0 && !CapabilityRegistry.supportsVision(resolvedModel)) {
+      // A caller that cannot be answered without pixels (a blind pixel evaluator) opts out of the
+      // degrade: it gets a typed error instead of a text-only guess.
+      if (opts?.requireVision) {
+        throw new LLMVisionRequiredError(this.detectProvider(), this.role, resolvedModel, imageInputs.length);
+      }
       const dropReason = `Model ${resolvedModel} is not vision-capable; dropped ${imageInputs.length} image input(s) and proceeded text-only. Visual evidence was NOT seen by the model.`;
       Logger.warn('LLMClient', `[vision-degraded] ${dropReason}`);
       failureLogger.log({
@@ -1852,6 +2009,9 @@ export class LLMClient {
       const providerName = this.detectProvider();
       let primaryAttemptOrdinal = 0;
       const executorAttestations: ExecutorAttestationRef[] = [];
+      // Usage reported by attempts that then failed (primary, retries, earlier
+      // fallbacks) — folded into the winning result so the receipt is complete (#1704).
+      const failedAttemptUsage: TokenUsage[] = [];
 
       // The breaker wraps the retry loop, so one logical request counts as at
       // most one breaker failure however many retries it spent (#1423 bug 6).
@@ -1862,7 +2022,7 @@ export class LLMClient {
             userPrompt,
             temperature: this.config.temperature,
             maxTokens: opts?.maxTokens ?? this.config.maxTokens,
-            thinking: this.config.thinking,
+            thinking: opts?.thinking ?? this.config.thinking,
             signal,
             imageInputs,
             jsonMode: opts?.jsonMode,
@@ -1872,18 +2032,24 @@ export class LLMClient {
         const response = await this.executeProviderAttempt(provider, req,
           retryOrdinal === 0 ? 'pre-primary-transport' : 'pre-retry-transport', 0, retryOrdinal, executorAttestations);
         if (!response.success) {
+          if (response.usage) failedAttemptUsage.push(response.usage);
           // A provider-declared failure is deterministic unless its text names
           // a transient network fault; retrying it only burns backoff (#1423 bug 30).
+          const failureDetails = {
+            model: provider.getModel(),
+            endpoint: this.providerEndpoint(provider.getConfig().baseUrl, provider.getModel()),
+            responseBody: response.error,
+          };
+          if (response.failureClass === 'reasoning-exhausted') {
+            throw new LLMReasoningExhaustedError(provider.name,
+              response.error || this.describeUnsuccessfulResponse(Date.now() - llmStartTime, provider.name), failureDetails);
+          }
           throw new LLMError(
-            response.error || 'Provider returned unsuccessful response',
+            response.error || this.describeUnsuccessfulResponse(Date.now() - llmStartTime, provider.name),
             provider.name,
             undefined,
             isTransientNetworkError(response.error ?? ''),
-            {
-              model: provider.getModel(),
-              endpoint: this.providerEndpoint(provider.getConfig().baseUrl, provider.getModel()),
-              responseBody: response.error,
-            },
+            failureDetails,
           );
         }
         return {
@@ -1909,7 +2075,7 @@ export class LLMClient {
           userPrompt,
           temperature: this.config.temperature,
           maxTokens: opts?.maxTokens ?? this.config.maxTokens,
-          thinking: this.config.thinking,
+          thinking: opts?.thinking ?? this.config.thinking,
           signal,
           imageInputs,
           jsonMode: opts?.jsonMode,
@@ -1919,14 +2085,15 @@ export class LLMClient {
         for (const [fallbackIndex, fallback] of fallbacks.entries()) {
           try {
             Logger.info('LLMClient.fallback', `Trying fallback: ${fallback.getModel()}`);
-            const fbResponse = await this.executeProviderAttempt(fallback, req, 'pre-fallback-transport', fallbackIndex + 1, 0, executorAttestations);
+            const fbResponse = await this.executeProviderAttempt(fallback, this.requestForFallback(fallback, req), 'pre-fallback-transport', fallbackIndex + 1, 0, executorAttestations);
             // P0 (K3 audit): a provider Ok with success===false is a fake-success
             // response. Fail closed into the catch below, which records the reason
             // in fallbackFailures and tries the next provider — mirrors the primary
             // path (above) and complete()'s fallback guard.
             if (!fbResponse.success) {
+              if (fbResponse.usage) failedAttemptUsage.push(fbResponse.usage);
               throw new LLMError(
-                fbResponse.error || 'Provider returned unsuccessful response',
+                fbResponse.error || this.describeUnsuccessfulResponse(Date.now() - llmStartTime, fallback.name),
                 fallback.name,
                 undefined,
                 false,
@@ -1951,6 +2118,7 @@ export class LLMClient {
             );
             return {
               ...mapped,
+              usage: sumTokenUsage(...failedAttemptUsage, mapped.usage),
               provenance,
             };
           } catch (fallbackErr) {
@@ -2005,8 +2173,9 @@ export class LLMClient {
         error: errMsg
       });
 
-      // Log failure to Meta-Harness for pattern detection
-      failureLogger.log({
+      // Log failure to Meta-Harness for pattern detection. Breaker fast-fails
+      // are folded into the open window's single record instead (#1736).
+      if (!(error instanceof LLMCircuitOpenError)) failureLogger.log({
         model: this.config.model,
         domain: 'unknown', // Will be determined by caller context
         prompt: userPrompt.slice(0, TRUNCATE_LONG), // Truncate for privacy/size
@@ -2053,7 +2222,7 @@ export class LLMClient {
     imageInputs: ProviderImageInput[],
     signal?: AbortSignal,
     bypassCache = true,
-    opts?: { jsonMode?: boolean; maxTokens?: number },
+    opts?: { jsonMode?: boolean; maxTokens?: number; requireVision?: boolean; thinking?: ThinkingConfig },
   ): Promise<LLMResponse> {
     return this.generate(systemPrompt, userPrompt, signal, bypassCache, imageInputs, opts);
   }
@@ -2112,6 +2281,9 @@ export class LLMClient {
     maxTokens?: number;
     temperature?: number;
     signal?: AbortSignal;
+    providerTimeoutMs?: number;
+    /** Use the OpenAI-compatible API for compact MiniMax generation. */
+    preferMiniMaxOpenAI?: boolean;
     jsonMode?: boolean;
     imageInputs?: ProviderImageInput[];
   }): Promise<LLMCompleteResult> {
@@ -2171,9 +2343,11 @@ export class LLMClient {
         promptPreview: systemPrompt?.slice(0, 100),
       });
 
+      const failedAttemptUsage: TokenUsage[] = [];
       let primaryAttemptOrdinal = 0;
+      let providerPromise: Promise<BaseProvider> | undefined;
       const result = await RetryManager.executeWithRetry(async () => {
-        const provider = await this.getProvider();
+        const provider = await (providerPromise ??= this.getProvider(options.providerTimeoutMs, options.preferMiniMaxOpenAI));
         const req: ProviderRequest = {
           systemPrompt,
           userPrompt: prompt,
@@ -2190,17 +2364,17 @@ export class LLMClient {
           retryOrdinal === 0 ? 'pre-primary-transport' : 'pre-retry-transport', 0, retryOrdinal, executorAttestations);
 
         if (!response.success) {
-          throw new LLMError(
-            response.error || 'Provider returned unsuccessful response',
-            provider.name,
-            undefined,
-            false,
-            {
-              model: provider.getModel(),
-              endpoint: this.providerEndpoint(provider.getConfig().baseUrl, provider.getModel()),
-              responseBody: response.error,
-            },
-          );
+          if (response.usage) failedAttemptUsage.push(response.usage);
+          const failureDetails = {
+            model: provider.getModel(),
+            endpoint: this.providerEndpoint(provider.getConfig().baseUrl, provider.getModel()),
+            responseBody: response.error,
+          };
+          const failureMessage = response.error || this.describeUnsuccessfulResponse(Date.now() - startTime, provider.name);
+          if (response.failureClass === 'reasoning-exhausted') {
+            throw new LLMReasoningExhaustedError(provider.name, failureMessage, failureDetails);
+          }
+          throw new LLMError(failureMessage, provider.name, undefined, false, failureDetails);
         }
 
         return {
@@ -2219,7 +2393,7 @@ export class LLMClient {
           throw primaryError;
         }
 
-        const fallbacks = this.getFallbackProviders();
+        const fallbacks = this.getFallbackProviders(options.providerTimeoutMs);
         if (fallbacks.length === 0) {
           throw primaryError;
         }
@@ -2241,7 +2415,7 @@ export class LLMClient {
         for (const [fallbackIndex, fallback] of fallbacks.entries()) {
           try {
             Logger.info('LLMClient.fallback', `complete() trying fallback: ${fallback.getModel()}`);
-            const fbResponse = await this.executeProviderAttempt(fallback, req, 'pre-fallback-transport', fallbackIndex + 1, 0, executorAttestations);
+            const fbResponse = await this.executeProviderAttempt(fallback, this.requestForFallback(fallback, req), 'pre-fallback-transport', fallbackIndex + 1, 0, executorAttestations);
             if (fbResponse.success) {
               Logger.info('LLMClient.fallback', `complete() fallback succeeded: ${fallback.getModel()}`);
               const fallbackFrom = `${this.detectProvider()}:${this.config.model}`;
@@ -2265,9 +2439,10 @@ export class LLMClient {
                 fallbackFrom: provenance.fallbackFrom,
                 fallbackTo: provenance.fallbackTo,
                 provenance,
-                usage: fbResponse.usage,
+                usage: sumTokenUsage(...failedAttemptUsage, fbResponse.usage),
               };
             }
+            if (fbResponse.usage) failedAttemptUsage.push(fbResponse.usage);
           } catch (err) {
             fallbackFailures.push(this.formatFallbackFailure(fallback.getModel(), err));
             Logger.debug('LLMClient', 'Fallback provider failed in complete():', err);
@@ -2920,7 +3095,7 @@ export class LLMClient {
       return {
         code: '',
         success: false,
-        error: response.error || 'Provider returned unsuccessful response',
+        error: response.error || this.describeUnsuccessfulResponse(),
         usage: response.usage,
         finishReason: response.finishReason,
       };
@@ -3022,6 +3197,12 @@ export class LLMClient {
 
 // ── Shared sanitization utility ──
 
+/** Drop leading blank lines and trailing whitespace only: the first line's indentation is part of the piece
+ * (indented ASCII art / poems lost it to `.trim()`, Sol G03). */
+function trimBlankEdges(text: string): string {
+  return text.replace(/^(?:[ \t]*\r?\n)+/, '').trimEnd();
+}
+
 /**
  * sanitizeOutputWithReasoning — like sanitizeOutput but also extracts
  * the narrative/reasoning text that gets stripped before code.
@@ -3042,7 +3223,7 @@ export function sanitizeOutputWithReasoning(content: string): {
       .split('\n')
       .filter(line => line.trim().length > 0)
       .join('\n');
-    cleanCode = block.body.trim();
+    cleanCode = trimBlankEdges(block.body);
     const extractedReasoning = [tagReasoning, narrativeReasoning]
       .filter(Boolean)
       .join('\n\n');
@@ -3104,7 +3285,7 @@ export function sanitizeOutputWithReasoning(content: string): {
 
   const narrativeLines = lines.slice(0, codeStartIndex).filter(l => l.trim().length > 0);
   const narrativeReasoning = narrativeLines.join('\n');
-  cleanCode = lines.slice(codeStartIndex).join('\n').trim();
+  cleanCode = trimBlankEdges(lines.slice(codeStartIndex).join('\n'));
 
   const extractedReasoning = [tagReasoning, narrativeReasoning]
     .filter(Boolean)

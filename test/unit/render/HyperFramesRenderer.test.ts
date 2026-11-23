@@ -25,6 +25,7 @@ import { HyperFramesRenderer } from '../../../src/render/HyperFramesRenderer.js'
 
 describe('HyperFramesRenderer', () => {
   let renderer: HyperFramesRenderer;
+  let probed: { width: number; height: number; duration: number };
   let tempDir: string;
 
   beforeEach(async () => {
@@ -32,16 +33,18 @@ describe('HyperFramesRenderer', () => {
     mockCreateRenderJob.mockClear();
     mockExecuteRenderJob.mockClear();
     mockCreateRenderJob.mockImplementation((config) => ({ ...config, id: 'test-job-id' }));
-    mockExecuteRenderJob.mockResolvedValue(undefined);
+    // A real producer writes the file; the renderer now refuses success without one (Sol L3-11).
+    mockExecuteRenderJob.mockImplementation((async (_job: unknown, _dir: string, out: string) => { await fs.writeFile(out, 'mp4-bytes'); }) as never);
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'hfr-test-'));
-    renderer = new HyperFramesRenderer({ tempDir });
+    probed = { width: 1280, height: 720, duration: 7 };
+    renderer = new HyperFramesRenderer({ tempDir, probeMedia: async () => probed });
   });
 
   afterEach(async () => {
     await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
   });
 
-  it('returns VideoRenderResult with correct outputPath, duration from opts, and dimensions on success', async () => {
+  it('returns VideoRenderResult with correct outputPath, measured duration and dimensions on success', async () => {
     const outputPath = path.join(tempDir, 'out.mp4');
 
     const result = await renderer.render('<html><body>scene</body></html>', outputPath, {
@@ -52,19 +55,60 @@ describe('HyperFramesRenderer', () => {
     });
 
     expect(result.outputPath).toBe(outputPath);
-    // duration comes from opts.duration since executeRenderJob returns void
     expect(result.duration).toBe(7);
     expect(result.width).toBe(1280);
     expect(result.height).toBe(720);
     expect(result.format).toBe('mp4');
   });
 
-  it('duration defaults to 0 when opts.duration is not provided', async () => {
-    const outputPath = path.join(tempDir, 'out.mp4');
+  it('L3-11: a producer that resolves without writing a file is a failure, not a success', async () => {
+    mockExecuteRenderJob.mockImplementation((async () => undefined) as never);
+    const outputPath = path.join(tempDir, 'existing.mp4');
+    await fs.writeFile(outputPath, 'earlier export');
+    await expect(renderer.render('<html></html>', outputPath)).rejects.toThrow('wrote no output');
+    expect(await fs.readFile(outputPath, 'utf8')).toBe('earlier export');
+    expect(await fs.readdir(tempDir)).toEqual(['existing.mp4']);
+  });
 
-    const result = await renderer.render('<html></html>', outputPath);
+  it('L3-11: returned metadata is what the file is, not what the caller asked for', async () => {
+    probed = { width: 1080, height: 1920, duration: 4.5 };
+    const result = await renderer.render('<html></html>', path.join(tempDir, 'out.mp4'), { width: 1920, height: 1080, duration: 99 });
+    expect(result).toMatchObject({ width: 1080, height: 1920, duration: 4.5 });
+  });
 
-    expect(result.duration).toBe(0);
+  it('preserves the previous export when probing fails', async () => {
+    const bad = new HyperFramesRenderer({ tempDir, probeMedia: async () => { throw new Error('not readable video'); } });
+    const output = path.join(tempDir, 'out.mp4');
+    await fs.writeFile(output, 'earlier export');
+    await expect(bad.render('<html></html>', output)).rejects.toThrow('not readable video');
+    expect(await fs.readFile(output, 'utf8')).toBe('earlier export');
+  });
+
+  it('charges probing to the same render budget and preserves the previous export', async () => {
+    const output = path.join(tempDir, 'existing.mp4');
+    await fs.writeFile(output, 'earlier export');
+    let probeSignal: AbortSignal | undefined;
+    const hanging = new HyperFramesRenderer({ tempDir, probeMedia: async (_file, signal) => {
+      probeSignal = signal;
+      return new Promise<never>(() => {});
+    } });
+    await expect(hanging.render('<html></html>', output, { timeoutMs: 400 }))
+      .rejects.toThrow(/hyperframes render exceeded its 400 ms budget/);
+    expect(probeSignal?.aborted).toBe(true);
+    expect(await fs.readFile(output, 'utf8')).toBe('earlier export');
+    expect(await fs.readdir(tempDir)).toEqual(['existing.mp4']);
+  });
+
+  it('aborts only the current producer on timeout', async () => {
+    let signalSeen: AbortSignal | undefined;
+    mockExecuteRenderJob.mockImplementation((async (_job, _dir, _path, _progress, signal) => {
+      signalSeen = signal;
+      await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }));
+    }) as never);
+    await expect(renderer.render('<html></html>', path.join(tempDir, 'out.mp4'), { timeoutMs: 400 }))
+      .rejects.toThrow(/hyperframes render exceeded its 400 ms budget/);
+    expect(signalSeen?.aborted).toBe(true);
+    expect(await fs.readdir(tempDir)).toEqual([]);
   });
 
   it('throws with install instructions when @hyperframes/producer is missing', async () => {
@@ -121,9 +165,10 @@ describe('HyperFramesRenderer', () => {
 
     // executeRenderJob(job, projectDir, outputPath) — capture HTML from projectDir arg
     let capturedHtml = '';
-    mockExecuteRenderJob.mockImplementation(async (_job, projectDir: string) => {
+    mockExecuteRenderJob.mockImplementation(async (_job, projectDir: string, out: string) => {
       const indexPath = path.join(projectDir, 'index.html');
       capturedHtml = await fs.readFile(indexPath, 'utf-8');
+      await fs.writeFile(out, 'mp4-bytes');
       return undefined;
     });
 
@@ -173,7 +218,10 @@ describe('HyperFramesRenderer', () => {
     expect(mockExecuteRenderJob).toHaveBeenCalledOnce();
     const [_job, projectDir, calledOutputPath] = mockExecuteRenderJob.mock.calls[0] as [unknown, string, string];
     expect(typeof projectDir).toBe('string');
-    expect(calledOutputPath).toBe(outputPath);
+    expect(path.dirname(path.dirname(calledOutputPath))).toBe(tempDir);
+    expect(path.basename(calledOutputPath)).toBe(path.basename(outputPath));
+    expect(await fs.readFile(outputPath, 'utf8')).toBe('mp4-bytes');
+    await expect(fs.access(calledOutputPath)).rejects.toThrow();
   });
 
   it('passes format derived from output extension to createRenderJob', async () => {

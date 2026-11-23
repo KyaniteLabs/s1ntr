@@ -10,6 +10,7 @@ no live scoring.
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import tempfile
@@ -74,6 +75,24 @@ def _run_envelope(
 
 
 class ArtWaveEnvelope(unittest.TestCase):
+    def test_budget_launcher_prefers_configured_art_executable_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            env = dict(os.environ, SINTER_ART_MEMORY_MIB="32", SINTER_ART_CPU_PERCENT="1",
+                       SINTER_ART_WALL_SECONDS="2", SINTER_ART_PYTHON="fixture-launcher",
+                       SINTER_ART_BUDGETED="")
+            for name in ("fallback", "isolated bin"):
+                directory = base / name
+                directory.mkdir()
+                launcher = directory / "fixture-launcher"
+                launcher.write_text("#!/bin/sh\necho '" + name + "'\n")
+                launcher.chmod(0o700)
+            env["PATH"] = str(base / "fallback") + os.pathsep + env["PATH"]
+            for override, expected in (("", "fallback"), (str(base / "isolated bin"), "isolated bin")):
+                result = subprocess.run(["bash", SOURCE], env={**env, "SINTER_ART_BIN_DIR": override},
+                                        capture_output=True, text=True, timeout=3, check=True)
+                self.assertEqual(result.stdout.strip(), expected)
+
     def test_generation_retry_recomputes_deadline_and_refuses_exhaustion(self):
         proc = _run_envelope(720, 120, '''
 python3() { printf '%s|%s\n' "$SINTER_ART_GENERATION_WALL_SECONDS" "$*"; }

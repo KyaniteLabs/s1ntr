@@ -32,6 +32,7 @@ vi.mock('../../src/export/VideoExporter.js', () => {
   return {
     VideoExporter: class MockVideoExporter {
       framesToVideo = vi.fn().mockResolvedValue(undefined);
+      probe = vi.fn().mockResolvedValue({ width: 100, height: 100, durationSec: 0.1 });
     },
   };
 });
@@ -40,6 +41,7 @@ describe('CanvasRecorder error handling', () => {
   let recorder: CanvasRecorder;
 
   beforeEach(() => {
+    vi.spyOn(fs, 'rename').mockResolvedValue(undefined);
     recorder = new CanvasRecorder({
       fps: 30,
       duration: 0.1,

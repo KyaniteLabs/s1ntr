@@ -19,6 +19,19 @@ export interface PolicyChangeRecord {
   status: 'staged' | 'promoted' | 'rolled-back';
 }
 
+function isMetricSnapshot(value: unknown): value is Record<string, number> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    && Object.values(value).every(metric => Number.isFinite(metric));
+}
+
+/** Names measured in both snapshots, or undefined for an incomplete comparison. */
+export function comparablePolicyMetrics(before: unknown, after: unknown): string[] | undefined {
+  if (!isMetricSnapshot(before) || !isMetricSnapshot(after)) return undefined;
+  const names = Object.keys(before);
+  if (names.length === 0 || names.length !== Object.keys(after).length) return undefined;
+  return names.every(name => Object.hasOwn(after, name)) ? names : undefined;
+}
+
 export class PolicyChangeManifest {
   private readonly records = new Map<string, PolicyChangeRecord>();
   private recordCount = 0;
@@ -54,7 +67,9 @@ export class PolicyChangeManifest {
    */
   promote(id: string, metricsAfter: Record<string, number>): boolean {
     const record = this.records.get(id);
-    if (!record || record.status !== 'staged') return false;
+    if (!record || record.status !== 'staged' || !comparablePolicyMetrics(record.metricsBefore, metricsAfter)) {
+      return false;
+    }
 
     record.metricsAfter = metricsAfter;
     record.status = 'promoted';
@@ -99,5 +114,39 @@ export class PolicyChangeManifest {
 
   getRecordCount(): number {
     return this.recordCount;
+  }
+
+  /** Serializable snapshot (what `sinter ship` keeps on disk). */
+  toJSON(): { recordCount: number; records: PolicyChangeRecord[] } {
+    return { recordCount: this.recordCount, records: this.getAll() };
+  }
+
+  /** Rebuild a manifest from {@link toJSON} output; ids keep counting from where they stopped. */
+  static fromJSON(data: unknown): PolicyChangeManifest {
+    const manifest = new PolicyChangeManifest();
+    const d = data as { recordCount?: unknown; records?: unknown } | null;
+    if (!d || typeof d !== 'object' || !Array.isArray(d.records)) {
+      throw new Error('PolicyChangeManifest: malformed snapshot (records missing)');
+    }
+    const count = d.recordCount ?? 0;
+    if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0 || count >= Number.MAX_SAFE_INTEGER) {
+      throw new Error('PolicyChangeManifest: invalid record counter');
+    }
+    for (const r of d.records as PolicyChangeRecord[]) {
+      const ordinal = typeof r?.id === 'string' && /^change-[1-9][0-9]*$/.test(r.id) ? Number(r.id.slice(7)) : NaN;
+      if (!Number.isSafeInteger(ordinal) || ordinal >= Number.MAX_SAFE_INTEGER || manifest.records.has(r.id)
+          || !['staged', 'promoted', 'rolled-back'].includes(r.status)
+          || typeof r.policyKind !== 'string' || typeof r.changeDescription !== 'string'
+          || typeof r.promotedAt !== 'string' || !Number.isFinite(Date.parse(r.promotedAt))
+          || !isMetricSnapshot(r.metricsBefore) || !isMetricSnapshot(r.metricsAfter)
+          || [r.triggerWeakness, r.experimentId, r.rollbackTargetId].some(value =>
+            value !== undefined && typeof value !== 'string')) {
+        throw new Error('PolicyChangeManifest: malformed record in snapshot');
+      }
+      manifest.records.set(r.id, r);
+      manifest.recordCount = Math.max(manifest.recordCount, ordinal);
+    }
+    manifest.recordCount = Math.max(manifest.recordCount, count);
+    return manifest;
   }
 }

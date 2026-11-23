@@ -4,50 +4,20 @@
  * Renders Hydra video synthesis in a container and exposes
  * synth outputs and frame data for cross-layer communication.
  *
- * SECURITY: generated Hydra code is untrusted. Block browser escape hatches
- * before the legacy Function constructor path can execute.
+ * SECURITY: generated Hydra code is untrusted. It never runs in the host
+ * realm: it is mounted in a sandboxed iframe (see sandboxFrame.ts, #1533).
+ * GeneratedCodeGuard and the pattern list below are pre-checks that refuse to
+ * mount; the iframe is the boundary.
  */
 
 import type { Layer, GlobalSettings } from '../types.js';
 import type { LayerAdapter, Export, Import } from './index.js';
 import type { RenderContext } from '../CompositionEngine.js';
-import { getWebGLBlendFunc } from '../utils/blendModes.js';
 import { VENDOR_ASSETS } from '../../utils/vendorAssets.js';
 import { Logger } from '../../utils/Logger.js';
-import { compileGeneratedCode } from '../../guardrails/GeneratedCodeGuard.js';
+import { findGeneratedCodeViolations } from '../../guardrails/GeneratedCodeGuard.js';
+import { importsPrelude, loadSandboxLib, mountGuardedFrame, type SandboxedInstance } from './sandboxFrame.js';
 import { scriptSafe } from '../../utils/scriptEmbed.js';
-
-/** Hydra synth instance type */
-interface HydraSynth {
-  /** Canvas element */
-  canvas: HTMLCanvasElement;
-  /** Width of the canvas */
-  width: number;
-  /** Height of the canvas */
-  height: number;
-  /** Stop rendering */
-  stop: () => void;
-  /** Start rendering */
-  start: () => void;
-  /** Set resolution */
-  setResolution: (width: number, height: number) => void;
-  /** Output objects */
-  o0: { src: (synth: HydraSynth) => void };
-  o1: { src: (synth: HydraSynth) => void };
-  o2: { src: (synth: HydraSynth) => void };
-  o3: { src: (synth: HydraSynth) => void };
-  /** Source functions */
-  src: (input: unknown) => HydraSynth;
-}
-
-/** Hydra constructor type */
-type HydraConstructor = new (options: {
-  canvas: HTMLCanvasElement;
-  autoLoop?: boolean;
-  makeGlobal?: boolean;
-  width?: number;
-  height?: number;
-}) => HydraSynth;
 
 const DANGEROUS_HYDRA_CODE_PATTERNS: Array<{ pattern: RegExp; name: string }> = [
   { pattern: /\bwindow\s*[[.]/i, name: 'window access' },
@@ -86,156 +56,79 @@ function findDangerousHydraCodePatterns(code: string): string[] {
  * and exposes outputs for cross-layer communication.
  */
 export class HydraAdapter implements LayerAdapter {
-  private hydraModule?: { default: HydraConstructor };
-  private instances = new Map<string, HydraSynth>();
+  private hydraSource?: string;
+  private instances = new Map<string, SandboxedInstance>();
 
-  /**
-   * Load Hydra module dynamically.
-   */
-  initialize(): void {
-    if (!this.hydraModule) {
-      // In browser, Hydra is loaded via CDN
-      if (typeof window !== 'undefined' && (window as unknown as { Hydra: HydraConstructor }).Hydra) {
-        this.hydraModule = { default: (window as unknown as { Hydra: HydraConstructor }).Hydra };
-      }
-      // Note: Hydra is browser-only, no Node.js import
-    }
+  /** Load the vendored Hydra source that is inlined into each sandbox frame. */
+  async initialize(): Promise<void> {
+    if (!this.hydraSource) this.hydraSource = await loadSandboxLib(VENDOR_ASSETS.hydra);
   }
 
   /**
-   * Render a Hydra layer into the container.
-   * 
+   * Render a Hydra layer into the container (inside a sandboxed iframe).
+   *
    * @param layer - The layer to render
    * @param container - The container element
    * @param context - Optional render context for cross-layer communication
-   * @returns The Hydra synth instance
+   * @returns The sandboxed instance (frame plus mirrored state)
    */
-  render(layer: Layer, container: HTMLElement, context?: RenderContext): HydraSynth {
-    const Hydra = this.hydraModule?.default;
-    if (!Hydra) {
+  render(layer: Layer, container: HTMLElement, context?: RenderContext): SandboxedInstance {
+    const hydraSource = this.hydraSource;
+    if (!hydraSource) {
       throw new Error('Hydra not loaded. Call async initialize() first.');
     }
 
-    // Create canvas element
-    const canvas = document.createElement('canvas');
-    canvas.style.width = '100%';
-    canvas.style.height = '100%';
-    container.appendChild(canvas);
-
-    // Get settings from context
     const settings = context?.settings;
     const width = settings?.width || 800;
     const height = settings?.height || 600;
 
-    // Set canvas dimensions
-    canvas.width = width;
-    canvas.height = height;
+    const violations = [
+      ...findGeneratedCodeViolations(layer.code),
+      ...findDangerousHydraCodePatterns(layer.code),
+    ];
+    if (violations.length > 0) {
+      Logger.warn('HydraAdapter', `Blocked unsafe Hydra layer code: ${violations.join(', ')}`);
+    }
 
-    // Create Hydra instance
-    const hydra = new Hydra({
-      canvas,
-      autoLoop: true,
-      makeGlobal: true,
+    const imports = context?.state.get<Record<string, unknown>>(`__imports_${layer.id}`);
+    const script = `${importsPrelude(imports)}
+(function () {
+  var canvas = document.createElement('canvas');
+  canvas.width = ${width}; canvas.height = ${height};
+  canvas.style.width = '100%'; canvas.style.height = '100%';
+  document.body.appendChild(canvas);
+  var hydra = new Hydra({ canvas: canvas, autoLoop: true, makeGlobal: true, detectAudio: false, width: ${width}, height: ${height} });
+  window.__s1ntrReport({ width: ${width}, height: ${height} });
+${layer.code}
+})();`;
+
+    const instance = mountGuardedFrame(container, violations, {
+      libs: [hydraSource],
+      script,
       width,
       height,
+      transparent: layer.config.transparentBackground,
+      title: `Hydra layer ${layer.id}`,
     });
-
-    // Apply WebGL blend mode if not normal
-    const gl = canvas.getContext('webgl');
-    if (gl && layer.config.blendMode !== 'normal') {
-      const { src, dst } = getWebGLBlendFunc(layer.config.blendMode);
-      gl.enable(gl.BLEND);
-      gl.blendFunc(src, dst);
-    }
-
-    // Store instance
-    this.instances.set(layer.id, hydra);
-
-    // Execute user code
-    try {
-      // Create a function from the code and execute it with hydra in scope
-      const userCode = layer.code;
-      
-      // Set up imports if context exists
-      if (context) {
-        const imports = context.state.get<Record<string, unknown>>(`__imports_${layer.id}`);
-        if (imports && typeof window !== 'undefined') {
-          Object.entries(imports).forEach(([key, value]) => {
-            (window as unknown as Record<string, unknown>)[`__import_${key}`] = value;
-          });
-        }
-      }
-
-      const blockedPatterns = findDangerousHydraCodePatterns(userCode);
-      if (blockedPatterns.length > 0) {
-        Logger.warn('HydraAdapter', `Blocked unsafe Hydra layer code: ${blockedPatterns.join(', ')}`);
-      } else {
-        // Execute the Hydra code
-        // GeneratedCodeGuard: AST denylist + runtime computed-key guard + strict mode.
-        compileGeneratedCode(userCode)();
-      }
-    } catch (error) {
-      Logger.error('HydraAdapter', 'Error executing Hydra code:', error);
-    }
-
-    return hydra;
+    this.instances.get(layer.id)?.destroy();
+    this.instances.set(layer.id, instance);
+    return instance;
   }
 
   /**
    * Get exports from a Hydra layer.
-   * 
-   * Exports the canvas and output references for use by other layers.
-   * 
-   * @param layer - The layer to get exports from
-   * @returns Array of export definitions
+   *
+   * Only plain data crosses the sandbox boundary, so the canvas and output
+   * handles (o0-o3) are no longer exported.
    */
   getExports(layer: Layer): Export[] {
-    const hydra = this.instances.get(layer.id);
-    if (!hydra) return [];
+    const instance = this.instances.get(layer.id);
+    if (!instance) return [];
+    const read = (key: string) => () => instance.state[key];
 
     return [
-      {
-        name: 'canvas',
-        type: 'canvas',
-        getter: () => hydra.canvas,
-        description: 'Hydra canvas element',
-      },
-      {
-        name: 'width',
-        type: 'number',
-        getter: () => hydra.width,
-        description: 'Canvas width',
-      },
-      {
-        name: 'height',
-        type: 'number',
-        getter: () => hydra.height,
-        description: 'Canvas height',
-      },
-      {
-        name: 'o0',
-        type: 'object',
-        getter: () => hydra.o0,
-        description: 'Output 0 reference',
-      },
-      {
-        name: 'o1',
-        type: 'object',
-        getter: () => hydra.o1,
-        description: 'Output 1 reference',
-      },
-      {
-        name: 'o2',
-        type: 'object',
-        getter: () => hydra.o2,
-        description: 'Output 2 reference',
-      },
-      {
-        name: 'o3',
-        type: 'object',
-        getter: () => hydra.o3,
-        description: 'Output 3 reference',
-      },
+      { name: 'width', type: 'number', getter: read('width'), description: 'Canvas width' },
+      { name: 'height', type: 'number', getter: read('height'), description: 'Canvas height' },
     ];
   }
 
@@ -265,21 +158,15 @@ export class HydraAdapter implements LayerAdapter {
   }
 
   /**
-   * Destroy/cleanup a Hydra layer instance.
-   * 
+   * Destroy/cleanup a Hydra layer instance: removes the sandbox frame.
+   *
    * @param layer - The layer to destroy
    * @param _instance - The instance to cleanup (unused, we track internally)
    */
   destroy(layer: Layer, _instance: unknown): void {
-    const hydra = this.instances.get(layer.id);
-    if (hydra) {
-      hydra.stop();
-      
-      // Remove canvas from DOM
-      if (hydra.canvas && hydra.canvas.parentNode) {
-        hydra.canvas.parentNode.removeChild(hydra.canvas);
-      }
-      
+    const instance = this.instances.get(layer.id);
+    if (instance) {
+      instance.destroy();
       this.instances.delete(layer.id);
     }
   }

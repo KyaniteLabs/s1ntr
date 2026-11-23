@@ -151,6 +151,15 @@ function summarizeOpenAIResponse(data: unknown): string {
   return `choices=${choices.length}, finish_reason=${finishReason}, content_kind=${contentKind}, reasoning_present=${reasoningContent ? 'yes' : 'no'}, snippet=${JSON.stringify(rawContent).slice(0, 200)}`;
 }
 
+/** True for the first-party OpenAI API host, which accepts only `reasoning_effort` on chat completions. */
+function isOpenAIDirectHost(baseUrl: string | undefined): boolean {
+  try {
+    return new URL(baseUrl ?? '').hostname.toLowerCase() === 'api.openai.com';
+  } catch {
+    return false;
+  }
+}
+
 export class OpenAIProvider extends BaseProvider {
   readonly name = 'openai';
 
@@ -228,7 +237,10 @@ export class OpenAIProvider extends BaseProvider {
       } else if (req.thinking?.enabled && this.capabilities.thinking) {
         const effort = req.thinking.effort || 'medium';
         body.reasoning_effort = effort;
-        body.reasoning = { effort };
+        // api.openai.com /chat/completions rejects the Responses-style `reasoning`
+        // object (400 unknown_parameter: 'reasoning', gpt-6.2-sol, 2026-11-17).
+        // Gateways (cliproxy, Kilo, LiteLLM) still get both shapes.
+        if (!isOpenAIDirectHost(this.config.baseUrl)) body.reasoning = { effort };
       } else if (!this.capabilities.thinking && this.capabilities.thinkingStyle === 'none') {
         // Moonshot/Kimi coding defaults thinking on; without an explicit disable,
         // reasoning_content can consume the entire max_tokens budget (empty content).

@@ -25,7 +25,9 @@ export function encodeLiminalDurableValue(value: unknown): unknown {
 }
 
 export function liminalDurablePayloadDigest(value: unknown): string {
+  // A void effect (undefined) is journaled as JSON null: JSON.stringify(undefined) is undefined and
+  // hash.update(undefined) throws, and null is what a JSON round-trip of the stored result yields.
   return createHash('sha256').update(
-    JSON.stringify(encodeLiminalDurableValue(value)),
+    JSON.stringify(encodeLiminalDurableValue(value ?? null)),
   ).digest('hex');
 }

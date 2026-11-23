@@ -20,7 +20,10 @@ describe('Dispatch rotation health', () => {
     expect(executorForLane({ modelId: 'qwen/qwen3.8-27b:free', provider: 'openai', baseUrl: 'https://api.kilo.ai/v1' })).toBeNull();
     expect(executorForLane({ modelId: 'gemini-3.7-flash-medium', provider: 'cli', baseUrl: 'cli://agy' })).toBe('agy-gemini-flash');
     expect(executorForLane({ modelId: 'gemini-3.7-flash-medium', provider: 'cli', baseUrl: 'cli://agy/chat/completions' })).toBe('agy-gemini-flash');
-    expect(executorForLane({ modelId: 'gemini-3.8-flash-high', provider: 'cli', baseUrl: 'cli://agy' })).toBeNull();
+    expect(executorForLane({ modelId: 'gemini-3.8-flash-high', provider: 'cli', baseUrl: 'cli://agy' })).toBe('agy-gemini-flash');
+    expect(executorForLane({ modelId: 'gemini-3.8-flash-low', provider: 'cli', baseUrl: 'cli://agy/low' })).toBe('agy-gemini-flash');
+    expect(executorForLane({ modelId: 'claude-sonnet-4-6', provider: 'cli', baseUrl: 'cli://agy' })).toBeNull();
+    expect(executorForLane({ modelId: 'gpt-oss-120b-medium', provider: 'cli', baseUrl: 'cli://agy' })).toBeNull();
     expect(executorForLane({ modelId: 'deepseek/deepseek-v4-pro', provider: 'cli', baseUrl: 'cli://command-code' })).toBe('command-code');
     expect(executorForLane({ modelId: 'deepseek/deepseek-v4-pro', provider: 'cli', baseUrl: 'cli://command-code/chat/completions' })).toBe('command-code');
     expect(executorForLane({ modelId: 'deepseek/deepseek-v4-flash', provider: 'cli', baseUrl: 'cli://command-code/chat/completions' })).toBeNull();

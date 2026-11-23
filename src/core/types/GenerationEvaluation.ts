@@ -1,10 +1,16 @@
 import type { LuminanceMeasure, LuminanceVerdict } from '../../render/LuminanceVerdict.js';
+import type { ValueStructureMeasure } from '../../render/ValueStructure.js';
+import type { GlitchLivenessMeasure } from '../../render/GlitchLiveness.js';
 
 export type RenderMeasure = LuminanceMeasure & {
   verdict: LuminanceVerdict;
   /** True when the late frame measured non-ok while the first frame was ok —
    *  the animation decayed after capture (H13). */
   temporalDecay?: boolean;
+  /** Painter's value-structure check; overmixed frames are capped and get repair advice. */
+  valueStructure?: ValueStructureMeasure;
+  /** Early/late frame evidence that a saturated, structured, moving frame is alive glitch, not broken. */
+  glitchLiveness?: GlitchLivenessMeasure;
 };
 
 export interface RenderEvidence {
@@ -28,6 +34,8 @@ export interface RenderEvidence {
     width?: number;
     height?: number;
   };
+  /** How far piece time got before the late frame (Sol L3-07): the late frame is only the piece's steady state if it reached the horizon. */
+  arc?: { horizonMs: number; reachedMs: number; wallMs: number };
   logRef?: string;
   audio?: {
     success: boolean;
@@ -42,6 +50,8 @@ export interface RenderEvidence {
     loudnessDb?: number;
     noisiness?: number | null;
     floorFailure?: string;
+    /** AUDIO_CAPTURE_VERSION of the capture that produced the samples; absent = stored before the stamp. */
+    captureVersion?: number;
   };
   playback?: { controlsAccessible: boolean; started: boolean };
   interaction?: { actions: number; stateChanged: boolean | null; target?: 'control' | 'canvas-pointer' | 'none' | 'error' };
@@ -108,4 +118,9 @@ export interface GenerationEvaluation {
   dimensionScores?: Record<string, number>;
   /** Exact learned judgment profile applied to the overall score. */
   calibrationDigest?: string;
+  /**
+   * The judge's own 1-10 integer rating of how hard the BRIEF is to realise well (1 = trivial, 10 = at the edge of what
+   * the medium can do), independent of how well this artifact did. Absent when the judge did not give a usable one.
+   */
+  difficulty?: number;
 }

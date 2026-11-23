@@ -1,0 +1,10 @@
+## 02-glitch-liveness.txt
+# organ: guardrails | step: glitch-liveness | data: real
+$ npx tsx <repo>/scripts/dogfood/glitch-liveness-check.ts <reel>/f_14.png <reel>/f_26.png
+# cwd: <out>/_proj (repo: <repo>)
+# --- stdout
+{"palette":190,"chroma":0.06614379084967315,"edge":0.045173840399871434,"coarseRatio":1.7411548331917668,"motion":0.16921302106027436,"alive":false}
+palette=190, chroma=0.07, edge=0.045, coarse=1.74, motion=0.17
+# --- stderr
+# exit: 0
+

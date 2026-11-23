@@ -1,0 +1,27 @@
+## 01-name.txt
+# organ: naming | step: name | data: real
+$ node <repo>/bin/sinter name
+# cwd: <out>/_proj (repo: <repo>)
+# --- stdout
+[name] nothing to name
+# --- stderr
+# exit: 0
+
+## 02-json.txt
+# organ: taxonomy | step: json | data: real
+$ node <repo>/bin/sinter taxonomy --json --no-write
+# cwd: <out>/_proj (repo: <repo>)
+# --- stdout
+{
+ "domains": {},
+ "totals": {
+  "coined": 0,
+  "accepted": 0,
+  "store": 0,
+  "beads": 0,
+  "domains": 0
+ }
+}
+# --- stderr
+# exit: 0
+

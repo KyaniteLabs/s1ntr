@@ -57,7 +57,7 @@ export const DOMAIN_CHECKLISTS: Readonly<Record<string, readonly string[]>> = Ob
     'MUST load D3.js (script tag or import) — a dataviz piece without D3 fails validation',
     'balance all tags; browser-only imports',
   ],
-  meta: [
+  custom: [
     'MUST include a render mount (the element your composition attaches to)',
     'balance all tags',
   ],
@@ -92,11 +92,37 @@ export const DOMAIN_CHECKLISTS: Readonly<Record<string, readonly string[]>> = Ob
     'nothing external: no fetch, no URL images or video, no staticFile, no Audio/Video nodes — the render is offline',
     'the scene must animate (yield* on node signals) and end: total length between 4 and 20 seconds',
   ],
+  nbe: [
+    'one JSON object of nbe engine settings and nothing else — no HTML, no code, no markdown',
+    'palette is 3-6 hex colours darkest first, deliberately chosen for the brief; numeric fields stay inside the stated ranges',
+    'layout, emitters, fieldScale, flow and swirl are chosen so this brief looks different from a generic default',
+    'reason is one sentence saying why these settings fit the brief',
+  ],
 });
 
-/** User-prompt block for a domain; empty string when the domain has no list. */
-export function validatorChecklistBlock(domain: string): string {
-  const rules = DOMAIN_CHECKLISTS[domain === 'shader' ? 'glsl' : domain];
+/**
+ * three.js checklist for a holospot piece. The generic three list above
+ * (renderer.render, key/ambient light ranges, a 0x2a3a4e background) contradicts
+ * the kit and, riding the user prompt, beat the library card in the v7 run
+ * (3/3 outputs copied its numbers). Not in DOMAIN_CHECKLISTS: the drift guard
+ * covers the canonical per-domain rows only.
+ */
+export const HOLOSPOT_THREE_CHECKLIST: readonly string[] = Object.freeze([
+  'import * as THREE from "three" and { Holo } from "holospot" (exactly ONE THREE import); import only names holospot really exports (Holo, shotCamera, shotRotation, ...) — there is NO `studio` export',
+  'create scene, camera, renderer and ONE `new Holo(renderer, { background })`; call holo.render(scene, camera) every frame (setAnimationLoop) and never renderer.render',
+  'no three.js lights — they do nothing to holo objects; light with holo.setScene({"studio.preset": "studio"})',
+  'background is set on the kit: new Holo(renderer, { background: "black" }) (black by default); no scene.background / setClearColor',
+  'one hero object, put through holo.apply or holo.card, with slow continuous motion (rotation, sway or orbit) so the foil colour plays',
+]);
+
+const HOLOSPOT_REQUEST = /\bholospot\b/i;
+
+/** User-prompt block for a domain; empty string when the domain has no list.
+ * `request` is the user's brief: a three request that names holospot gets the
+ * holospot checklist instead of the generic three one. */
+export function validatorChecklistBlock(domain: string, request?: string): string {
+  const holo = domain === 'three' && request !== undefined && HOLOSPOT_REQUEST.test(request);
+  const rules = holo ? HOLOSPOT_THREE_CHECKLIST : DOMAIN_CHECKLISTS[domain === 'shader' ? 'glsl' : domain];
   if (!rules || rules.length === 0) return '';
   const lines = rules.map((rule, i) => `${i + 1}. ${rule}`).join('\n');
   return `REQUIRED BUILD RULES — a machine validator checks your code and ANY single failed rule rejects the whole piece:\n${lines}`;

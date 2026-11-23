@@ -340,6 +340,7 @@ export async function reevaluateAuthoritativeC0(
   const priorEvidence = stored.result.evidence;
   const result = await service.reevaluate(stored.command, sourceResult, {
     status: 'rendered', rendererIdentity: priorEvidence.rendererIdentity,
+    rendered: priorEvidence.rendered,
     earlyFrame, lateFrame,
     earlyFrameSize: { width: earlyMeta.width, height: earlyMeta.height },
     lateFrameSize: { width: lateMeta.width, height: lateMeta.height },
@@ -347,6 +348,10 @@ export async function reevaluateAuthoritativeC0(
     rendererEnvironmentDigest: priorEvidence.rendererEnvironmentDigest,
     containment: priorEvidence.containment, playback: priorEvidence.playback,
     interaction: priorEvidence.interaction, audio: priorEvidence.audio,
+    // bindEvidence hashes these when present; dropping them changes the digest and fails REEVALUATION_RENDERED_EVIDENCE_INVALID.
+    ...(priorEvidence.rendered !== undefined ? { rendered: priorEvidence.rendered } : {}),
+    ...(priorEvidence.failureCause ? { failureCause: priorEvidence.failureCause } : {}),
+    ...(priorEvidence.arc ? { arc: priorEvidence.arc } : {}),
   }, { idempotencyKey: `${stored.command.idempotencyKey}:evaluation:${reevaluationAuthorityDigest}`,
     maxTransportAttempts: 1, actionAuthorityDigest: reevaluationAuthorityDigest }, stored.result);
   const completed = Object.freeze({ ...stored, result });

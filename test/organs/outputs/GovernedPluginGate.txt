@@ -1,0 +1,24 @@
+## 02-pinned-manifest-ok.txt
+# organ: plugins | step: pinned-manifest-ok | data: real
+$ node -e 
+import('./dist/plugins/GovernedPluginGate.js').then(m=>{console.log(JSON.stringify(m.createPinnedPluginManifest({id:'demo-plugin',version:'1.0.0',entryDigest:'a'.repeat(64),domains:['p5js']}),null,1))
+# cwd: <repo> (repo: <repo>)
+# --- stdout
+{
+ "schema": "sinter.pinned-plugin",
+ "schemaVersion": 1,
+ "id": "demo-plugin",
+ "version": "1.0.0",
+ "entryDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+ "domains": [
+  "p5js"
+ ],
+ "permissions": [
+  "generate"
+ ],
+ "manifestDigest": "6db49d73c8afb27636e00308a306fbc6f193a29441a05b3f716f6f94b19b930d"
+}
+bad digest -> PINNED_PLUGIN_MANIFEST_INVALID
+# --- stderr
+# exit: 0
+

@@ -261,6 +261,28 @@ describe('TuiBridgeService command handlers', () => {
       });
     });
 
+    it('/reject on an already-rejected candidate does not record a second reject preference', async () => {
+      const candidate = addReviewCandidate('weak sketch');
+
+      await service.submitInput(sessionId, { mode: 'chat', text: `/reject ${candidate.id}` });
+      await service.submitInput(sessionId, { mode: 'chat', text: `/reject ${candidate.id}` });
+
+      expect(lastCommandContent()).toContain('already rejected');
+      expect(readPreferenceRecords().filter(r => r.action === 'reject')).toHaveLength(1);
+      expect(events().filter(e => e.type === 'review.candidate_rejected')).toHaveLength(1);
+    });
+
+    it('/reject cannot silently flip an accepted candidate', async () => {
+      const candidate = addReviewCandidate('chosen sketch');
+
+      await service.submitInput(sessionId, { mode: 'chat', text: `/accept ${candidate.id}` });
+      await service.submitInput(sessionId, { mode: 'chat', text: `/reject ${candidate.id}` });
+
+      expect(lastCommandContent()).toContain('already accepted');
+      expect(readPreferenceRecords().filter(r => r.action === 'reject')).toHaveLength(0);
+      expect((service as any).reviewManager.get(candidate.id).status).toBe('accepted');
+    });
+
     it('/diff requires two ids', async () => {
       await service.submitInput(sessionId, { mode: 'chat', text: '/diff' });
       const content = lastCommandContent();
@@ -325,6 +347,18 @@ describe('TuiBridgeService command handlers', () => {
       await service.submitInput(sessionId, { mode: 'chat', text: '/goal done' });
       const content = lastCommandContent();
       expect(content).toContain('Usage: /goal done <id>');
+    });
+
+    it('/goal done on a removed goal does not resurrect it', async () => {
+      const store = (service as any).getGoalStore();
+      const goal = store.addGoal({ text: 'retire the old shader path' });
+
+      await service.submitInput(sessionId, { mode: 'chat', text: `/goal remove ${goal.id}` });
+      await service.submitInput(sessionId, { mode: 'chat', text: `/goal done ${goal.id}` });
+
+      expect(lastCommandContent()).toContain('is dropped');
+      expect(events().some(e => e.type === 'cortex.goal_completed')).toBe(false);
+      expect(store.getGoal(goal.id).status).toBe('dropped');
     });
   });
 

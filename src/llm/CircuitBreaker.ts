@@ -179,6 +179,17 @@ export class CircuitBreaker {
   }
 
   /**
+   * Give back a half-open probe slot taken by `canExecute()` when the attempt
+   * never reached the provider (local refusal, abort). It is neither a success
+   * nor a failure, so the next real call must still be able to probe.
+   */
+  releaseProbe(): void {
+    if (this.state === 'half-open' && this.halfOpenAttempts > 0) {
+      this.halfOpenAttempts--;
+    }
+  }
+
+  /**
    * Return the current circuit state.
    *
    * This does **not** trigger an automatic state transition; call

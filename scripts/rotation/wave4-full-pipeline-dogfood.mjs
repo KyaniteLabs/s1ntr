@@ -38,6 +38,32 @@ const EXPECTED = {
   chat: { brain: 'GLM', modelIncludes: ['glm-5.2', 'glm'] },
 };
 
+export function resolvePipelineRoster(freeze, wave, live) {
+  const block = freeze[`wave${wave}`];
+  const seats = {};
+  const expected = {};
+  for (const [role, legacy] of Object.entries(EXPECTED)) {
+    const brain = block?.[role];
+    if (!brain) throw new Error(`freeze.wave${wave} missing ${role}`);
+    seats[role] = brain;
+    if (live && (wave !== 4 || brain !== legacy.brain)) {
+      throw new Error('Full-pipeline live transports are pinned to wave 4. Use the freeze-driven rotation runner for seat batteries.');
+    }
+    if (wave === 4 && brain === legacy.brain) {
+      expected[role] = legacy;
+    } else {
+      const pin = freeze.brains?.[brain];
+      if (typeof pin?.model !== 'string' || !pin.model) throw new Error('missing model for ' + brain);
+      const aliases = pin.modelIncludes ?? [pin.model];
+      if (!Array.isArray(aliases) || !aliases.length || !aliases.every(v => typeof v === 'string' && v.length)) {
+        throw new Error('invalid model identity for ' + brain);
+      }
+      expected[role] = { brain, modelIncludes: aliases };
+    }
+  }
+  return { seats, expected };
+}
+
 function parseArgs(argv) {
   const out = {
     live: false,
@@ -46,12 +72,20 @@ function parseArgs(argv) {
     out: null,
     domain: 'p5',
     skipStudio: false,
+    wave: 4,
+    freezePath: FREEZE_PATH,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--live') out.live = true;
     else if (a === '--dry-run') out.dryRun = true;
-    else if (a === '--seed' && argv[i + 1]) out.seed = String(argv[++i]);
+    else if (a === '--wave') {
+      out.wave = Number(argv[++i]);
+      if (!Number.isSafeInteger(out.wave) || out.wave < 1) throw new Error('--wave requires a positive integer');
+    } else if (a === '--freeze') {
+      if (!argv[i + 1] || argv[i + 1].startsWith('--')) throw new Error('--freeze requires a file');
+      out.freezePath = path.resolve(argv[++i]);
+    } else if (a === '--seed' && argv[i + 1]) out.seed = String(argv[++i]);
     else if (a === '--out' && argv[i + 1]) out.out = String(argv[++i]);
     else if (a === '--domain' && argv[i + 1]) out.domain = String(argv[++i]);
     else if (a === '--skip-studio') out.skipStudio = true;
@@ -62,6 +96,7 @@ function parseArgs(argv) {
       process.exit(0);
     }
   }
+  if (out.dryRun) out.live = false;
   if (!out.live && !out.dryRun) out.dryRun = true;
   return out;
 }
@@ -93,9 +128,6 @@ function gitTip() {
   return (r.stdout || '').trim() || null;
 }
 
-function loadFreeze() {
-  return JSON.parse(fs.readFileSync(FREEZE_PATH, 'utf8'));
-}
 
 function ensureDir(p) {
   fs.mkdirSync(p, { recursive: true });
@@ -785,11 +817,8 @@ function writeArtifactEvalBundle(evalDir, artifact, domain) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const freeze = loadFreeze();
-  const w4 = freeze.wave4;
-  if (!w4?.harness || !w4?.generator || !w4?.evaluator || !w4?.chat) {
-    throw new Error('freeze.wave4 missing seats');
-  }
+  const freeze = JSON.parse(fs.readFileSync(args.freezePath, 'utf8'));
+  const { seats: w4, expected } = resolvePipelineRoster(freeze, args.wave, args.live);
 
   if (args.live && isSpendKilled()) {
     console.error('[full-pipeline] HARD STOP: LIMINAL_WAVE_SPEND is off');
@@ -797,7 +826,7 @@ async function main() {
   }
 
   const runId = `full-pipeline-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}Z`;
-  const outRoot = args.out || path.join(REPO, '.quality', 'tour', 'wave-4', runId);
+  const outRoot = args.out || path.join(REPO, '.quality', 'tour', `wave-${args.wave}`, runId);
   ensureDir(outRoot);
   const tip = gitTip();
 
@@ -805,6 +834,7 @@ async function main() {
   const receipt = {
     schema: 'sinter-wave4-full-pipeline-v1',
     runId,
+    wave: args.wave,
     ts: new Date().toISOString(),
     tip,
     live: args.live,
@@ -839,13 +869,15 @@ async function main() {
   };
 
   // --- 0 bootstrap + operator ---
-  const providerProbe = runCmd(
+  const contractOnly = args.wave !== 4 && args.dryRun;
+  const unprobed = { code: null, stdout: '', stderr: 'Contract-only run' };
+  const providerProbe = contractOnly ? unprobed : runCmd(
     process.execPath,
     [path.join(REPO, 'bin/sinter'), 'provider', 'status'],
     { timeoutMs: 60_000 },
   );
   writeText(path.join(outRoot, '00-bootstrap', 'provider-status.log'), providerProbe.stdout + providerProbe.stderr);
-  const ledgerProbe = runCmd(
+  const ledgerProbe = contractOnly ? unprobed : runCmd(
     process.execPath,
     [path.join(REPO, 'bin/sinter'), 'ledger', 'list'],
     { timeoutMs: 60_000 },
@@ -854,7 +886,7 @@ async function main() {
 
   let studio = { ok: false, skipped: true };
   let bridge = { ok: false, skipped: true };
-  if (!args.skipStudio) {
+  if (!args.skipStudio && !contractOnly) {
     // L6: try live bridge; auto-start once if down (Wave 4 operator flank)
     bridge = await probeHttp('http://127.0.0.1:3000/health').catch(() => ({ ok: false }));
     if (!bridge.ok) {
@@ -880,7 +912,7 @@ async function main() {
     // Studio is a required operator flank unless explicitly skipped for a partial run.
     studio = await probeHttp('http://localhost:5173/').catch(() => ({ ok: false }));
   }
-  const operatorCoverage = classifyOperatorCoverage(args.skipStudio, studio, bridge);
+  const operatorCoverage = classifyOperatorCoverage(args.skipStudio || contractOnly, studio, bridge);
   receipt.operator = {
     providerStatusCode: providerProbe.code,
     ledgerListCode: ledgerProbe.code,
@@ -899,7 +931,7 @@ async function main() {
   const chat =
     args.live
       ? await stageChatLive(args.seed, args.domain, freeze)
-      : { ...stageChatContract(args.seed, args.domain), mode: 'dry-contract', liveModelUsed: false, model: 'glm-5.2' };
+      : { ...stageChatContract(args.seed, args.domain), mode: 'dry-contract', liveModelUsed: false, model: expected.chat.modelIncludes[0] };
   writeText(path.join(outRoot, '01-chat', 'brief.md'), chat.briefMarkdown);
   writeText(path.join(outRoot, '01-chat', 'generate-prompt.txt'), chat.generatePrompt);
   writeJson(path.join(outRoot, '01-chat', 'findings.json'), {
@@ -907,14 +939,14 @@ async function main() {
     mode: chat.mode,
     model: chat.model,
   });
-  const chatId = assertSeatModel('chat', chat.model || 'glm-5.2', EXPECTED.chat);
+  const chatId = assertSeatModel('chat', chat.model || 'glm-5.2', expected.chat);
   if (chat.apiCall) {
     receipt.modelIdentity.calls.push(chat.apiCall);
   }
   // Prefer API-observed model when present
   const chatIdLive = args.live
     ? chat.apiCall
-      ? resolveObservedIdentity('chat', receipt.modelIdentity.calls, EXPECTED.chat, chat.model)
+      ? resolveObservedIdentity('chat', receipt.modelIdentity.calls, expected.chat, chat.model)
       : { cosplay: chat.liveModelUsed ? 'chat: live text without apiCall/model field' : chatId.cosplay, observed: false, model: chat.model }
     : { cosplay: null, observed: false, model: chat.model };
   receipt.modelIdentity.chatCosplay = args.live ? chatIdLive.cosplay || chatId.cosplay : chatId.cosplay;
@@ -1036,7 +1068,7 @@ async function main() {
   }
 
   const genId = args.live
-    ? resolveObservedIdentity('generator', receipt.modelIdentity.calls, EXPECTED.generator, genModelUsed)
+    ? resolveObservedIdentity('generator', receipt.modelIdentity.calls, expected.generator, genModelUsed)
     : { cosplay: null, observed: false, model: genModelUsed };
   if (args.live) {
     receipt.modelIdentity.generatorCosplay = genId.cosplay;
@@ -1175,7 +1207,7 @@ async function main() {
     evalDetail = args.live ? 'skipped-no-craft' : 'dry-run';
   }
   const evalId = args.live
-    ? resolveObservedIdentity('evaluator', receipt.modelIdentity.calls, EXPECTED.evaluator, evalModel || 'grok-4.5')
+    ? resolveObservedIdentity('evaluator', receipt.modelIdentity.calls, expected.evaluator, evalModel || 'grok-4.5')
     : { cosplay: null, observed: false, model: 'dry-run' };
   if (args.live) {
     receipt.modelIdentity.evaluatorCosplay = evalId.cosplay;
@@ -1197,7 +1229,7 @@ async function main() {
   const harnessDir = path.join(outRoot, '05-harness');
   ensureDir(harnessDir);
   let harnessOk = false;
-  let harnessModel = 'gpt-5.6-sol';
+  let harnessModel = expected.harness.modelIncludes[0];
   if (args.live) {
     const contextNote = path.join(harnessDir, 'PIPELINE-CONTEXT.md');
     const briefText = fs.readFileSync(path.join(outRoot, '01-chat', 'brief.md'), 'utf8');
@@ -1258,7 +1290,7 @@ async function main() {
       if (fs.existsSync(sumPath)) {
         const sum = JSON.parse(fs.readFileSync(sumPath, 'utf8'));
         if (sum?.model) {
-          const check = assertSeatModel('harness', sum.model, EXPECTED.harness);
+          const check = assertSeatModel('harness', sum.model, expected.harness);
           if (!check.cosplay) {
             receipt.modelIdentity.calls.push({
               role: 'harness',
@@ -1308,7 +1340,7 @@ async function main() {
         try {
           const j = JSON.parse(rd.stdout || '{}');
           const m = j?.model || (rd.code === 0 ? 'gpt-5.6-sol' : null);
-          if (m && !assertSeatModel('harness', m, EXPECTED.harness).cosplay) {
+          if (m && !assertSeatModel('harness', m, expected.harness).cosplay) {
             receipt.modelIdentity.calls.push({
               role: 'harness',
               host: 'localhost:8317',
@@ -1368,13 +1400,13 @@ async function main() {
     writeText(path.join(harnessDir, 'harness-dry.txt'), 'Dry-run: harness not spent.\n');
     writeText(
       path.join(harnessDir, 'harness-diagnosis.md'),
-      '# harness-diagnosis\n\nDry-run — no live Sol spend. Placeholder ≥200 chars for structure: ' +
+      '# harness-diagnosis\n\nDry-run — no live harness spend. Placeholder ≥200 chars for structure: ' +
         'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n',
     );
     harnessOk = true;
   }
   const harnessId = args.live
-    ? resolveObservedIdentity('harness', receipt.modelIdentity.calls, EXPECTED.harness, harnessModel)
+    ? resolveObservedIdentity('harness', receipt.modelIdentity.calls, expected.harness, harnessModel)
     : { cosplay: null, observed: false, model: harnessModel };
   if (args.live) {
     receipt.modelIdentity.harnessCosplay = harnessId.cosplay;
@@ -1501,7 +1533,7 @@ async function main() {
     '',
     '## Re-run',
     '```bash',
-    `node scripts/rotation/wave4-full-pipeline-dogfood.mjs --live --seed ${JSON.stringify(args.seed)}`,
+    `node scripts/rotation/wave4-full-pipeline-dogfood.mjs --wave ${args.wave} ${args.live ? '--live' : '--dry-run'} --freeze <freeze-file> --seed <seed>`,
     '```',
     '',
   ].join('\n');

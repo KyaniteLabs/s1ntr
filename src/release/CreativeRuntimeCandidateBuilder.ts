@@ -5,7 +5,7 @@
  * Validates candidates against golden suites before promotion.
  */
 
-import type { PolicyChangeRecord } from './PolicyChangeManifest.js';
+import { comparablePolicyMetrics, type PolicyChangeRecord } from './PolicyChangeManifest.js';
 
 export interface RuntimeCandidate {
   id: string;
@@ -42,9 +42,15 @@ export class CreativeRuntimeCandidateBuilder {
     // Compute validation score from metric improvements
     let totalImprovement = 0;
     let metricCount = 0;
+    let complete = allPromoted && promotedChanges.length > 0;
     for (const change of promotedChanges) {
-      for (const key of Object.keys(change.metricsAfter)) {
-        const before = change.metricsBefore[key] ?? 0;
+      const names = comparablePolicyMetrics(change.metricsBefore, change.metricsAfter);
+      if (!names) {
+        complete = false;
+        break;
+      }
+      for (const key of names) {
+        const before = change.metricsBefore[key];
         const after = change.metricsAfter[key];
         totalImprovement += Math.max(0, after - before);
         metricCount++;
@@ -52,7 +58,7 @@ export class CreativeRuntimeCandidateBuilder {
     }
 
     const avgImprovement = metricCount > 0 ? totalImprovement / metricCount : 0;
-    const validationScore = allPromoted ? Math.min(1, 0.5 + avgImprovement * 5) : 0;
+    const validationScore = complete ? Math.min(1, 0.5 + avgImprovement * 5) : 0;
 
     return {
       id,
@@ -60,7 +66,7 @@ export class CreativeRuntimeCandidateBuilder {
       changes: promotedChanges,
       builtAt: new Date().toISOString(),
       validationScore,
-      passed: validationScore >= this.passingThreshold,
+      passed: complete && validationScore >= this.passingThreshold,
     };
   }
 

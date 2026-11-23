@@ -64,6 +64,10 @@ export interface GenerateMusicOptions {
   llm?: LLMClient;
   creativeThesis?: CreativeThesis;
   deterministicArtifact?: boolean;
+  /** Explicit opt-in to the built-in pattern when the model fails or is unconfigured. Off by default: a template is not generation. */
+  allowTemplateFallback?: boolean;
+  /** Opt-in (`live-music --theory`): add the theory engines' key, scale, rhythm and chords for this mood to the model's brief. */
+  theoryBrief?: boolean;
 }
 
 export interface GenerateMusicResult {
@@ -118,15 +122,20 @@ export async function generateMusic(options: GenerateMusicOptions): Promise<Gene
   }
 
   // Try LLM generation first
+  let llmFailure: unknown = new Error('no provider is configured');
   if (LLMClient.isConfigured()) {
     try {
-      const code = await generateMusicLLM(prompt, bpm, platform, signal, llm, thesis);
+      const code = await generateMusicLLM(prompt, bpm, platform, signal, llm, thesis, options.theoryBrief === true);
       if (code) return { code, source: 'llm' };
+      llmFailure = new Error('LLM returned no code');
     } catch (err) {
-      // Log error but continue to template fallback
-      Logger.error('generateMusic', 'LLM generation failed, using template fallback:', err);
-      // Continue to template fallback - don't throw to ensure user gets something
+      llmFailure = err;
+      Logger.error('generateMusic', 'LLM generation failed:', err);
     }
+  }
+  if (options.allowTemplateFallback !== true) {
+    const detail = llmFailure instanceof Error ? llmFailure.message : String(llmFailure);
+    throw new Error(`Music generation failed (${detail}); refusing the built-in pattern. Pass allowTemplateFallback to opt in.`);
   }
 
   // Template fallback - always indicate this is a template
@@ -148,7 +157,7 @@ export async function generateMusic(options: GenerateMusicOptions): Promise<Gene
 /**
  * Generate music code via LLM. Returns empty string on failure.
  */
-async function generateMusicLLM(prompt: string, bpm: number, platform: GenerateMusicPlatform, signal?: AbortSignal, llm?: LLMClient, creativeThesis?: CreativeThesis): Promise<string> {
+async function generateMusicLLM(prompt: string, bpm: number, platform: GenerateMusicPlatform, signal?: AbortSignal, llm?: LLMClient, creativeThesis?: CreativeThesis, theoryBrief = false): Promise<string> {
   const client = llm ?? new LLMClient({ role: 'generator' });
 
   let systemPrompt: string;
@@ -164,6 +173,7 @@ async function generateMusicLLM(prompt: string, bpm: number, platform: GenerateM
     userPrompt = creativeThesis ? `${rendered.user}\n\n${creativeThesisPromptContext(creativeThesis)}` : rendered.user;
   }
 
+  if (theoryBrief) userPrompt = `${userPrompt}\n\n${buildMusicTheoryBrief(prompt.trim().toLowerCase(), bpm)}`;
   const response = await client.generate(systemPrompt, userPrompt, signal);
 
   if (!response.success || !response.code || response.code.trim().length === 0) {
@@ -219,6 +229,26 @@ function deriveMusicalIntent(prompt: string): MusicalIntent {
   }
   // Default: C major pentatonic, classic tresillo rhythm.
   return { root: 'C', scale: 'pentatonicMajor', steps: 8, pulses: 3, rotation: 0, arpMode: 'up' };
+}
+
+/**
+ * The theory engines' answer for this mood, written as a brief the model can follow: key and scale notes
+ * (TheoryEngine), the onset pattern (EuclideanRhythm) and a chord progression. Distinct moods give distinct text.
+ */
+export function buildMusicTheoryBrief(prompt: string, bpm = 120): string {
+  const intent = deriveMusicalIntent(prompt.toLowerCase());
+  const scaleNotes = getScaleNotes(intent.root, intent.scale, 3, 4).slice(0, 8).map(midiToStrudelNote);
+  const onsets = rotatePattern(generateEuclideanPattern(intent.steps, intent.pulses), intent.rotation);
+  const minorish = ['minor', 'pentatonicMinor', 'blues'].includes(intent.scale);
+  const chords = generateProgression(intent.root, minorish ? 'ii-V-I' : 'I-IV-V-I', 4)
+    .map((c) => `${c.root} ${c.type}`).join(' | ');
+  return [
+    'Music theory plan (use it; do not invent a different key):',
+    `- Key and scale: ${intent.root} ${intent.scale} at ${bpm} BPM`,
+    `- Scale notes: ${scaleNotes.join(' ')}`,
+    `- Rhythm: Euclidean E(${intent.pulses},${intent.steps}) = ${euclideanToStrudelMask(onsets, 'x')}`,
+    `- Chords: ${chords}`,
+  ].join('\n');
 }
 
 /** MIDI note number → Strudel mini-notation note name (e.g. 60 → "c4"). */

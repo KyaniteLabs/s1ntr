@@ -103,6 +103,12 @@ export class RenderAndScorePipeline {
     // Set up overall timeout
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.options.timeout);
+    // Sol L3-05: aborting a controller nobody listens to stopped nothing. Every awaited stage races this deadline.
+    const deadline = new Promise<never>((_, reject) => {
+      controller.signal.addEventListener('abort', () => reject(new Error(
+        `PIPELINE_TIMEOUT: render and score exceeded ${this.options.timeout} ms`)), { once: true });
+    });
+    deadline.catch(() => undefined);
 
     try {
       // Detect domain
@@ -117,10 +123,12 @@ export class RenderAndScorePipeline {
       // Render the code
       // Auto-detected bpy is never promoted to an explicit blender domain: Blender runs
       // model-written Python, so only a caller-supplied hint opts in.
-      const renderResult = await this.renderer.render(code, {
+      const renderResult = await Promise.race([this.renderer.render(code, {
         ...this.options.render,
+        // The renderer owns a hard stop that closes its own page; the race below only frees this caller.
+        hardDeadlineMs: Math.min(this.options.render?.hardDeadlineMs || this.options.timeout, this.options.timeout),
         domain: !domainHint && domain === 'blender' ? 'unknown' : domain,
-      });
+      }), deadline]);
 
       if (!renderResult.success) {
         return {
@@ -137,11 +145,12 @@ export class RenderAndScorePipeline {
       let visualScore: VisualScoreResult | undefined;
       if (shouldScoreVisual && renderResult.screenshot?.success) {
         try {
-          visualScore = await this.visualScorer.score(renderResult.screenshot.buffer);
+          visualScore = await Promise.race([this.visualScorer.score(renderResult.screenshot.buffer), deadline]);
           if (visualScore.warnings?.length) {
             warnings.push(...visualScore.warnings);
           }
         } catch (error) {
+          if (controller.signal.aborted) throw error;
           Logger.warn('RenderAndScorePipeline', 'Visual scoring failed:', error);
           warnings.push(`Visual scoring failed: ${error instanceof Error ? error.message : 'unknown error'}`);
         }
@@ -205,7 +214,7 @@ export class RenderAndScorePipeline {
    * Check if domain produces visual output
    */
   private isVisualDomain(domain: RenderDomain): boolean {
-    return ['p5', 'three', 'glsl', 'hydra', 'svg', 'html', 'dataviz', 'meta', 'ascii', 'kinetic', 'blender'].includes(domain);
+    return ['p5', 'three', 'glsl', 'hydra', 'svg', 'html', 'dataviz', 'custom', 'ascii', 'kinetic', 'blender', 'nbe'].includes(domain);
   }
 
   /**

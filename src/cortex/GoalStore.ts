@@ -18,7 +18,16 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
 import type { SinterFS } from '../fs/SinterFS.js';
+import { canTransitionGoal, IllegalGoalTransitionError } from './GoalLifecycle.js';
 import type { CortexGoal, GoalPriority, GoalCategory, GoalStatus } from './types.js';
+
+export {
+  GOAL_STATUSES,
+  GOAL_TRANSITIONS,
+  IllegalGoalTransitionError,
+  canTransitionGoal,
+  isGoalStatus,
+} from './GoalLifecycle.js';
 
 const GOAL_PREFIX = 'cortex/goal';
 
@@ -88,29 +97,32 @@ export class GoalStore {
   }
 
   /**
-   * Mark a goal as completed.
+   * Mark a goal as completed. Returns null if the goal does not exist; throws
+   * {@link IllegalGoalTransitionError} if it is already completed or dropped.
    */
   completeGoal(goalId: string): CortexGoal | null {
-    const goal = this.getGoal(goalId);
-    if (!goal) return null;
-
-    goal.status = 'completed';
-    goal.updatedAt = new Date().toISOString();
-    this.fs.writeManifest(`${GOAL_PREFIX}/${goalId}/manifest`, goal as unknown as Record<string, unknown>);
-    return goal;
+    return this.transitionGoal(goalId, 'completed');
   }
 
   /**
-   * Remove a goal entirely.
+   * Remove a goal (writes a 'dropped' tombstone). Returns false if the goal
+   * does not exist; throws {@link IllegalGoalTransitionError} if it is
+   * already dropped.
    */
   removeGoal(goalId: string): boolean {
-    const goal = this.getGoal(goalId);
-    if (!goal) return false;
+    return this.transitionGoal(goalId, 'dropped') !== null;
+  }
 
-    // Write a tombstone with 'dropped' status
-    goal.status = 'dropped';
+  /** The single writer of `status` for an existing goal. */
+  private transitionGoal(goalId: string, to: GoalStatus): CortexGoal | null {
+    const goal = this.getGoal(goalId);
+    if (!goal) return null;
+    if (!canTransitionGoal(goal.status, to)) {
+      throw new IllegalGoalTransitionError(goalId, goal.status, to);
+    }
+    goal.status = to;
     goal.updatedAt = new Date().toISOString();
     this.fs.writeManifest(`${GOAL_PREFIX}/${goalId}/manifest`, goal as unknown as Record<string, unknown>);
-    return true;
+    return goal;
   }
 }

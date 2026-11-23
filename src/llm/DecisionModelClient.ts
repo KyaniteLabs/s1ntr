@@ -17,6 +17,7 @@
  */
 
 import { CapabilityRegistry } from './CapabilityRegistry.js';
+import { assertProviderAttemptAllowed } from './LLMClient.js';
 import { TIMEOUT_EVALUATOR_MS } from '../constants/limits.js';
 
 export type DecisionQuestion =
@@ -134,6 +135,7 @@ export class DecisionModelClient {
 
   private async post(body: string): Promise<Response> {
     for (let attempt = 0; ; attempt++) {
+      await assertProviderAttemptAllowed();
       let response: Response;
       try {
         response = await this.fetchImpl(`${this.baseUrl}/v1/systemone`, {

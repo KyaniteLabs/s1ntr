@@ -126,18 +126,19 @@ export class DataVizGenerator extends TierBasedGenerator {
       '',
       `User request: ${prompt}`,
     ].join('\n');
-    const retryPrompt = [
+    const retryPrompt = (why?: string) => [
       'The previous attempt did not return a valid self-contained D3 visualization.',
+      ...(why ? [`What was wrong: ${why.slice(0, 600)}`] : []),
       'Return ONE complete HTML file only — no fences, no prose.',
       `Start with <!DOCTYPE html>, include a non-empty <title> in <head>, load <script src="/vendor/d3/7.9.0/d3.min.js"></script>, and end with </html>.`,
       'Embed a small inline sample-data array, build d3 scales + axes, and draw the marks into an <svg> mount that fills the viewport.',
       `User request: ${prompt}`,
     ].join('\n');
 
-    const prompts = [primaryPrompt, retryPrompt];
     let lastError: string | undefined;
 
-    for (const userPrompt of prompts) {
+    for (const attempt of [0, 1]) {
+      const userPrompt = attempt === 0 ? primaryPrompt : retryPrompt(lastError);
       let result: Awaited<ReturnType<typeof this.llm.complete>>;
       try {
         result = await this.withAttemptTimeout(

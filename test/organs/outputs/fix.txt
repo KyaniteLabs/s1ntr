@@ -1,0 +1,18 @@
+# organ: fix | data: real command, fake provider
+$ sinter fix src/add.js --error "add(1,2) returned -1, expected 3" --confirm never
+🔧 Sinter Fix
+
+Starting fix...
+  Type: file-error
+  Target: src/add.js
+
+[08:17:42.037] LLMModeAgent process:progress [█░░░░░░░░░░░░░░░░░░░] 1/15 planning step 1
+
+❌ Fix failed
+   Error: Fix failed after 1 steps
+   Task ID: fix-1795076262020-36h0sf
+   Changes: 0
+   Build passed: false
+   Tests passed: false
+# exit: 1
+

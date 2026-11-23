@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { RenderEvidence } from '../core/types/GenerationEvaluation.js';
 import type { PhotosensitivityVerdict } from '../guardrails/FlashMeasure.js';
 import type { OwnerCaptureInputs } from '../creative-run/OwnerQualityReview.js';
+import { CREATIVE_PROOF_SCHEMA_VERSION, evaluateCreativeProof, type CreativeProofResult } from '../quality/CreativeProofGate.js';
 
 type Asset = { readonly ref: string; readonly mimeType: string; readonly payload: string };
 type Frame = NonNullable<RenderEvidence['screenshot']>;
@@ -10,6 +11,11 @@ export interface OwnerCapturedEvidence {
   readonly inputs: Partial<Pick<OwnerCaptureInputs,
     'timeSamples' | 'interactionTrace' | 'runtimeState' | 'clockEvents' | 'accessibility' | 'knownFailures'>>;
   readonly limitations: readonly string[];
+  /**
+   * CreativeProofGate verdict over the captured frames (bytes re-hashed). Only the technical claim is
+   * requested: coordination and creative quality are never asserted from a capture (owner decides).
+   */
+  readonly proof?: CreativeProofResult;
 }
 
 /** Renders one finished HTML artifact and measures its flashes from the frames the screen shows. */
@@ -69,7 +75,26 @@ export function ownerCaptureFromRender(
     });
     if (!flash.pass && flash.issue) knownFailures.push(flash.issue);
   } else limitations.push('accessibility-not-measured');
-  return Object.freeze({ inputs: Object.freeze({ ...inputs, knownFailures }), limitations });
+  const frames = [['time.early', early], ['time.late', evidence.lateScreenshot]]
+    .filter((f): f is [string, Frame] => Boolean(f[1]) && inputs.timeSamples !== undefined);
+  const bytesByRef = new Map(frames.map(([name, f]) => [ref(name), Buffer.from(f.dataBase64, 'base64')]));
+  const proof = frames.length === 0 ? undefined : evaluateCreativeProof({
+    schemaVersion: CREATIVE_PROOF_SCHEMA_VERSION,
+    domains: [{ name: 'html', requiredModalities: ['visual'] }],
+    evidence: frames.map(([name]) => ({
+      ref: ref(name), kind: 'image' as const, modalities: ['visual' as const],
+      sha256: createHash('sha256').update(bytesByRef.get(ref(name))!).digest('hex'),
+      bytes: bytesByRef.get(ref(name))!.byteLength,
+    })),
+    verdicts: {
+      technical: { status: evidence.candidateFailure ? 'fail' : 'pass', evidenceRefs: frames.map(([n]) => ref(n)) },
+      coordination: { status: 'not-evaluated', evidenceRefs: [] },
+      creativeQuality: { status: 'not-evaluated', evidenceRefs: [] },
+    },
+    requestedClaims: { technicalSuccess: true, coordinationImproved: false, creativeQualityImproved: false },
+  }, { readEvidence: (r) => bytesByRef.get(r) ?? null });
+  if (proof && proof.outcome === 'FAIL') limitations.push(`capture-proof-failed:${proof.violations.join(',')}`);
+  return Object.freeze({ inputs: Object.freeze({ ...inputs, knownFailures }), limitations, ...(proof ? { proof } : {}) });
 }
 
 /** Captures per brief, then per candidate slot: slot ids repeat across briefs. */
@@ -102,7 +127,7 @@ export async function createProductionOwnerCaptureRenderer(): Promise<OwnerCaptu
     import('../render/HeadlessRenderer.js'), import('../guardrails/AccessibilityGuardrails.js'),
   ]);
   const launched = await HeadlessRenderer.getInstance().initialize().then(() => true, () => false);
-  if (!launched) return { render: async () => NOT_RENDERED, measureFlash: async () => null };
+  if (!launched) return { render: () => Promise.resolve(NOT_RENDERED), measureFlash: () => Promise.resolve(null) };
   return {
     render: (html) => HeadlessRenderer.getInstance().renderWithEvidence(html, {
       domain: 'html', lateCaptureDelay: 3000, observeInteraction: true,

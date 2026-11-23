@@ -32,6 +32,15 @@ export interface ModelCapabilities extends ProviderCapabilities {
   /** When set, the model only accepts this exact temperature (e.g. kimi-k3
    *  rejects anything but 1). Call-site and role temperatures are overridden. */
   temperatureFixed?: number;
+  /**
+   * On the Anthropic wire this model thinks even when the request does not ask,
+   * and ignores `budget_tokens`, so only max_tokens bounds its thinking. The
+   * value is the model's output ceiling; the provider sends it as max_tokens so
+   * thinking cannot crowd out the answer (z.ai probe 2026-11-16: no thinking
+   * field -> all 600 tokens thinking; budget 1024 -> all 3000 tokens thinking;
+   * max_tokens accepted up to 131072).
+   */
+  uncappedThinkingMaxOutput?: number;
 }
 
 const DEFAULT_CAPABILITIES: ModelCapabilities = {
@@ -128,6 +137,8 @@ const MODEL_CAPABILITIES: Record<string, Partial<ModelCapabilities>> = {
   'glm-5v-turbo*':      { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 200000, thinkingStyle: 'reasoning_content', streamingStyle: 'sse' },
   'glm-5.1*':           { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 205000, thinkingStyle: 'reasoning_content', streamingStyle: 'sse' },
   'glm-5-turbo*':       { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 200000, thinkingStyle: 'reasoning_content', streamingStyle: 'sse' },
+  // glm-5.3 / glm-5.3-flash on z.ai think by default and ignore budget_tokens (see uncappedThinkingMaxOutput).
+  'glm-5.3*':           { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 205000, thinkingStyle: 'reasoning_content', streamingStyle: 'sse', uncappedThinkingMaxOutput: 131_072 },
   'glm-5*':             { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 205000, thinkingStyle: 'reasoning_content', streamingStyle: 'sse' },
   'glm-4.7*':           { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 200000, thinkingStyle: 'reasoning_content', streamingStyle: 'sse' },
   'glm-4.5*':           { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 128000, thinkingStyle: 'reasoning_content', streamingStyle: 'sse' },
@@ -159,13 +170,15 @@ const MODEL_CAPABILITIES: Record<string, Partial<ModelCapabilities>> = {
   'kimi-k3*':               { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 1048576, thinkingStyle: 'reasoning_content', streamingStyle: 'sse', temperatureFixed: 1 },
   'moonshotai/kimi-k3*':    { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 1048576, thinkingStyle: 'reasoning_content', streamingStyle: 'sse', temperatureFixed: 1 },
   // GPT-6 family (luna, sol, astra, 6.1-terra) on the Codex backend; listed live 2026-11-10.
-  'gpt-6*':                 { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 1050000, thinkingStyle: 'effort_level', streamingStyle: 'sse' },
+  // api.openai.com rejects any temperature but the default for gpt-6.2-sol (400, probe 2026-11-18).
+  'gpt-6*':                 { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 1050000, thinkingStyle: 'effort_level', streamingStyle: 'sse', temperatureFixed: 1 },
   'gpt-5.6-luna*':          { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 1050000, thinkingStyle: 'effort_level', streamingStyle: 'sse' },
   'openai/gpt-5.6-luna*':   { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 1050000, thinkingStyle: 'effort_level', streamingStyle: 'sse' },
   // Gemini 3.x via OpenAI-compatible proxy (cliproxy / AGY; effort-level thinking)
   'gemini-3.6-flash-high*': { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 1048576, thinkingStyle: 'effort_level', streamingStyle: 'sse' },
   'gemini-3.1-pro-low*':    { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 1048576, thinkingStyle: 'effort_level', streamingStyle: 'sse' },
   'gemini-3.6*':            { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 1048576, thinkingStyle: 'effort_level', streamingStyle: 'sse' },
+  'gemini-3.8*':            { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 1048576, thinkingStyle: 'effort_level', streamingStyle: 'sse' },
   'gemini-3.1*':            { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 1048576, thinkingStyle: 'effort_level', streamingStyle: 'sse' },
   'gemini-3*':              { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 1048576, thinkingStyle: 'effort_level', streamingStyle: 'sse' },
   'google/gemini-3.6*':     { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 1048576, thinkingStyle: 'effort_level', streamingStyle: 'sse' },

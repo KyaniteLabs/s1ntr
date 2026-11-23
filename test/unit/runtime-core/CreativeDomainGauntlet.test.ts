@@ -20,13 +20,12 @@ describe('runCreativeDomainGauntlet', () => {
       'hydra',
       'strudel',
       'tone',
-      'revideo',
-      'hyperframes',
       'ascii',
       'kinetic',
       'textgen',
       'html',
       'dataviz',
+      'nbe',
     ]);
     expect(result.domains.every((domain) => domain.checks.route && domain.checks.implementation && domain.checks.verification)).toBe(true);
   });

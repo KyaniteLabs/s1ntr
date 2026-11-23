@@ -97,3 +97,15 @@ describe('PromptOrgan Conductor lane (Elixis layered-combination v1)', () => {
     expect(['combinatorial', 'frontier', 'cross-pollination', 'constraint']).toContain(p.source);
   });
 });
+
+describe('PromptOrgan domains', () => {
+  it('never rolls a removed art domain (revideo, hyperframes)', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'sinter-organ-domains-'));
+    try {
+      for (let seed = 1; seed <= 300; seed++) {
+        const p = new PromptOrgan(cwd, seed).next();
+        expect(['revideo', 'hyperframes']).not.toContain(p.domain);
+      }
+    } finally { rmSync(cwd, { recursive: true, force: true }); }
+  });
+});

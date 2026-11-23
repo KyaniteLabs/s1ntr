@@ -20,7 +20,7 @@ interface VisionImage { mimeType: string; dataBase64: string; width?: number; he
 /** The slice of LLMClient this lane needs (injectable so unit tests never call a provider). */
 export interface VisionClient {
   generateWithImages(system: string, user: string, images: VisionImage[],
-    signal?: AbortSignal, bypassCache?: boolean, opts?: { jsonMode?: boolean; maxTokens?: number })
+    signal?: AbortSignal, bypassCache?: boolean, opts?: { jsonMode?: boolean; maxTokens?: number; requireVision?: boolean })
     : Promise<{ code: string; success?: boolean; error?: string }>;
   /** When present, the model is checked first: a text-only model would drop the image and guess. */
   resolveEffectiveModel?(): Promise<string>;
@@ -52,10 +52,15 @@ function extractJson(text: string): unknown {
 export async function deriveArcFromImage(filePath: string, durationSec: number, client: VisionClient)
   : Promise<{ arc: Arc; source: string; sent: VisionSendReceipt }> {
   const file = path.basename(filePath);
-  const source = `vision:${file}`;
   const original = await readLocalFile(filePath, MAX_ARC_IMAGE_BYTES).catch((e: Error) => {
     throw new Error(`REVERSE_ARC_UNREADABLE: ${file}: ${e.message}`);
   });
+  return { ...await deriveArcFromImageBytes(original, file, durationSec, client), source: `vision:${file}` };
+}
+
+export async function deriveArcFromImageBytes(original: Buffer, file: string, durationSec: number, client: VisionClient)
+  : Promise<{ arc: Arc; sent: VisionSendReceipt }> {
+  const source = `vision:${file}`;
   let meta: { width?: number; height?: number };
   let scaled: { data: Buffer; info: { width: number; height: number } };
   try {
@@ -80,7 +85,7 @@ export async function deriveArcFromImage(filePath: string, durationSec: number, 
     + 'Read the attached image as the energy arc of that piece.';
   const response = await client.generateWithImages(SYSTEM, user,
     [{ mimeType: 'image/jpeg', dataBase64: scaled.data.toString('base64'),
-      width: sent.width, height: sent.height, label: 'arc' }], undefined, true, { jsonMode: true });
+      width: sent.width, height: sent.height, label: 'arc' }], undefined, true, { jsonMode: true, requireVision: true });
   if (response.success === false) {
     throw new Error(`REVERSE_VISION_FAILED: ${file}: ${response.error ?? 'the vision model returned no answer'}`);
   }
@@ -88,5 +93,5 @@ export async function deriveArcFromImage(filePath: string, durationSec: number, 
   try { parsed = extractJson(response.code ?? ''); } catch {
     throw new ArcValidationError(['not valid JSON (the model may not be vision-capable)'], source);
   }
-  return { arc: validateArc(parsed, source), source, sent };
+  return { arc: validateArc(parsed, source), sent };
 }

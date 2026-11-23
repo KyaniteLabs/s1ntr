@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -16,6 +16,7 @@ const storeFile = async () => {
 
 afterEach(async () => {
   delete process.env.LIMINAL_PRODUCT_STORE_LEASE_TIMEOUT_MS;
+  delete process.env.LIMINAL_PRODUCT_STORE_LEASE_MAX_WAIT_MS;
   await Promise.all(dirs.splice(0).map(dir => rm(dir, { recursive: true, force: true })));
 });
 
@@ -89,8 +90,22 @@ describe('FileLiminalProductCommandStore lease (#707)', () => {
     }
   });
 
+  it('honors a short deadline while another process holds the stale-reclaim mutex', async () => {
+    const file = await storeFile();
+    const name = (await import('node:crypto')).createHash('sha256').update('dead').digest('hex').slice(0, 16);
+    const lease = path.join(`${file}.leases`, `${name}.lease`);
+    await mkdir(lease, { recursive: true });
+    const old = new Date(Date.now() - 60_000);
+    await utimes(lease, old, old);
+    await mkdir(`${lease}.reclaim`);
+
+    const store = new FileLiminalProductCommandStore(file, { leaseTimeoutMs: 100 });
+    await expect(store.withLease('dead', async () => 'stolen')).rejects.toThrow(/LIMINAL_PRODUCT_STORE_LEASE_TIMEOUT/);
+  }, 2_000);
+
   it('times out with a coded error that names the holder, honoring the env timeout', async () => {
     process.env.LIMINAL_PRODUCT_STORE_LEASE_TIMEOUT_MS = '150';
+    process.env.LIMINAL_PRODUCT_STORE_LEASE_MAX_WAIT_MS = '150';
     const file = await storeFile();
     const a = new FileLiminalProductCommandStore(file, { leaseTimeoutMs: 5_000 });
     const b = new FileLiminalProductCommandStore(file, { onLeaseWait: () => undefined });
@@ -102,5 +117,71 @@ describe('FileLiminalProductCommandStore lease (#707)', () => {
     expect((error as Error).message).toContain(`held by pid ${process.pid}`);
     expect((error as Error).message).toContain('after 150ms');
     await holding;
+  });
+
+  it('waits past the base timeout while the holder is alive and heartbeating (nbe r7 RCA)', async () => {
+    const file = await storeFile();
+    const a = new FileLiminalProductCommandStore(file, { leaseTimeoutMs: 5_000 });
+    const b = new FileLiminalProductCommandStore(file,
+      { leaseTimeoutMs: 100, leaseMaxWaitMs: 5_000, onLeaseWait: () => undefined });
+    const events: string[] = [];
+    const holding = a.withLease('long', async () => { await sleep(500); events.push('a:end'); });
+    await sleep(30);
+    await b.withLease('long', async () => { events.push('b:start'); });   // 100 ms base timeout, 500 ms holder
+    await holding;
+    expect(events).toEqual(['a:end', 'b:start']);
+  });
+
+  it('reclaims a lease whose holder died, and never evicts a live pid with a stale heartbeat', async () => {
+    const file = await storeFile();
+    const store = new FileLiminalProductCommandStore(file, { leaseTimeoutMs: 400, leaseMaxWaitMs: 400, onLeaseWait: () => undefined });
+    const name = (await import('node:crypto')).createHash('sha256').update('dead').digest('hex').slice(0, 16);
+    const lease = path.join(`${file}.leases`, `${name}.lease`);
+    await mkdir(lease, { recursive: true });
+    await writeFile(path.join(lease, 'owner.json'), JSON.stringify({ token: 'x', pid: 2_147_483_000 }));
+    const old = new Date(Date.now() - 60_000);
+    await utimes(lease, old, old);
+    await expect(store.withLease('dead', async () => 'took over')).resolves.toBe('took over');
+    // live pid (this process) but heartbeat older than 20 s: not evicted, waiter times out
+    const liveName = (await import('node:crypto')).createHash('sha256').update('live').digest('hex').slice(0, 16);
+    const live = path.join(`${file}.leases`, `${liveName}.lease`);
+    await mkdir(live, { recursive: true });
+    await writeFile(path.join(live, 'owner.json'), JSON.stringify({ token: 'y', pid: process.pid }));
+    await utimes(live, old, old);
+    await expect(store.withLease('live', async () => 'stolen')).rejects.toThrow(/LIMINAL_PRODUCT_STORE_LEASE_TIMEOUT/);
+  });
+
+  it('N parallel generates on one store run the work exactly once and all see its result', async () => {
+    const file = await storeFile();
+    const stores = Array.from({ length: 8 }, () =>
+      new FileLiminalProductCommandStore(file, { leaseTimeoutMs: 100, leaseMaxWaitMs: 20_000, onLeaseWait: () => undefined }));
+    let runs = 0;
+    const generate = (store: FileLiminalProductCommandStore) => store.withLease('production-create:abc', async () => {
+      const done = await store.read('production-create:abc');
+      if (done) return done;       // replay, as ProductCommandPort.settle does
+      runs += 1;
+      await sleep(250);            // longer than every waiter's base timeout
+      const made = projection('made');
+      await store.write('production-create:abc', made);
+      return made;
+    });
+    const results = await Promise.all(stores.map(generate));
+    expect(runs).toBe(1);
+    for (const r of results) expect(r).toEqual(projection('made'));
+  });
+
+  it('stale-lease reclaim by many waiters never yields two holders', async () => {
+    const file = await storeFile();
+    const crypto = await import('node:crypto');
+    const lease = path.join(`${file}.leases`, `${crypto.createHash('sha256').update('race').digest('hex').slice(0, 16)}.lease`);
+    await mkdir(lease, { recursive: true });
+    await writeFile(path.join(lease, 'owner.json'), JSON.stringify({ token: 'dead', pid: 2_147_483_000 }));
+    const old = new Date(Date.now() - 60_000);
+    await utimes(lease, old, old);
+    let inside = 0, maxInside = 0;
+    await Promise.all(Array.from({ length: 10 }, () =>
+      new FileLiminalProductCommandStore(file, { leaseTimeoutMs: 20_000, onLeaseWait: () => undefined })
+        .withLease('race', async () => { inside += 1; maxInside = Math.max(maxInside, inside); await sleep(20); inside -= 1; })));
+    expect(maxInside).toBe(1);
   });
 });

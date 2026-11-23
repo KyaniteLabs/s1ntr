@@ -1,0 +1,3 @@
+# organ: embeddings | EmbeddingService (local provider; no weights loaded here) | data: real, in-process call
+dimension=384
+cache={"size":0,"maxSize":10000}

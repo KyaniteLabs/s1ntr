@@ -1,0 +1,3 @@
+# organ: collab | quickScore | data: real, in-process call
+animated canvas piece: 0.65
+the text "hello": 0.2

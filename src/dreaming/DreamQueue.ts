@@ -25,6 +25,63 @@ export type DreamStrategy =
 
 export type DreamTaskKind = 'artifact' | 'composition';
 
+/**
+ * Dream task lifecycle — the ONLY legal moves. Every status write in this
+ * file goes through {@link transitionDreamTask}.
+ *
+ *   enqueue ─► queued ──claim──► running ──complete──► completed
+ *                ▲                  │
+ *                └────reclaim───────┤ (on load: its consumer died mid-dream)
+ *                                   └──────fail──────► failed
+ *
+ * `completed` and `failed` are terminal; prune() removes them from the queue.
+ * The persisted JSON stores exactly these four strings.
+ */
+export const DREAM_TASK_STATUSES = ['queued', 'running', 'completed', 'failed'] as const;
+export type DreamTaskStatus = (typeof DREAM_TASK_STATUSES)[number];
+
+export const DREAM_TASK_TRANSITIONS: Readonly<Record<DreamTaskStatus, readonly DreamTaskStatus[]>> = {
+  queued: ['running'],
+  running: ['completed', 'failed', 'queued'],
+  completed: [],
+  failed: [],
+};
+
+export function isDreamTaskStatus(value: unknown): value is DreamTaskStatus {
+  return typeof value === 'string' && (DREAM_TASK_STATUSES as readonly string[]).includes(value);
+}
+
+export function isTerminalDreamTaskStatus(status: DreamTaskStatus): boolean {
+  return DREAM_TASK_TRANSITIONS[status].length === 0;
+}
+
+export class IllegalDreamTaskTransitionError extends Error {
+  constructor(readonly taskId: string, readonly from: unknown, readonly to: DreamTaskStatus) {
+    super(`Illegal dream task transition for ${taskId}: ${String(from)} -> ${to}`);
+    this.name = 'IllegalDreamTaskTransitionError';
+  }
+}
+
+/**
+ * Apply one lifecycle move to a task, stamping the matching timestamp.
+ * Throws {@link IllegalDreamTaskTransitionError} for any move not in
+ * {@link DREAM_TASK_TRANSITIONS}.
+ */
+export function transitionDreamTask(
+  task: DreamTask,
+  to: DreamTaskStatus,
+  now: string = new Date().toISOString(),
+): DreamTask {
+  const from = task.status;
+  if (!isDreamTaskStatus(from) || !DREAM_TASK_TRANSITIONS[from].includes(to)) {
+    throw new IllegalDreamTaskTransitionError(task.id, from, to);
+  }
+  task.status = to;
+  if (to === 'running') task.startedAt = now;
+  if (isTerminalDreamTaskStatus(to)) task.completedAt = now;
+  return task;
+}
+
 export interface DreamTask {
   id: string;
   kind: DreamTaskKind;
@@ -38,7 +95,7 @@ export interface DreamTask {
     artifact?: { domain: DomainType; prompt: string; code: string };
   }>;
   priority: number;
-  status: 'queued' | 'running' | 'completed' | 'failed';
+  status: DreamTaskStatus;
   result?: {
     candidateDescriptor: number[];
     parentIds: string[];
@@ -75,7 +132,6 @@ export class DreamQueue {
   private readonly maxConcurrent: number;
   private readonly maxQueueSize: number;
   private readonly persistPath?: string;
-  private runningCount = 0;
   private taskIdCounter = 0;
 
   constructor(config: DreamQueueConfig = {}) {
@@ -112,9 +168,17 @@ export class DreamQueue {
     }
     for (const task of tasks) {
       task.kind ??= 'artifact';
+      // A status no reader handles (hand-edited or from a future build) would
+      // otherwise sit in the queue forever: never dequeued, never pruned,
+      // never evicted, and miscounted by getStatus(). Retire it as failed so
+      // the next prune() reclaims its slot.
+      if (!isDreamTaskStatus(task.status)) {
+        task.status = 'failed';
+        task.completedAt ??= new Date().toISOString();
+      }
       // A persisted 'running' task means its consumer died mid-dream (single
       // consumer model: the self-improve cycle). Reclaim it so it can run again.
-      if (task.status === 'running') task.status = 'queued';
+      if (task.status === 'running') transitionDreamTask(task, 'queued');
       this.queue.push(task);
       const idNum = Number(/^dream-(\d+)-/.exec(task.id)?.[1] ?? 0);
       if (idNum > this.taskIdCounter) this.taskIdCounter = idNum;
@@ -142,26 +206,7 @@ export class DreamQueue {
     sources: DreamTask['sources'],
     priority: number,
   ): string | undefined {
-    this.prune();
-    if (this.queue.length >= this.maxQueueSize && !this.evictStaleQueuedTask()) {
-      return undefined;
-    }
-
-    const id = `dream-${++this.taskIdCounter}-${Date.now()}`;
-    const task: DreamTask = {
-      id,
-      kind: 'artifact',
-      strategy,
-      sources,
-      priority,
-      status: 'queued',
-      enqueuedAt: new Date().toISOString(),
-    };
-
-    this.queue.push(task);
-    this.queue.sort((a, b) => b.priority - a.priority);
-    this.persist();
-    return id;
+    return this.admit({ kind: 'artifact', strategy, sources, priority });
   }
 
   enqueueComposition(
@@ -169,19 +214,30 @@ export class DreamQueue {
     sources: DreamTask['sources'],
     priority: number,
   ): string | undefined {
+    return this.admit({
+      kind: 'composition',
+      strategy: 'cross-modal',
+      sources,
+      priority,
+      compositionPlan: plan,
+    });
+  }
+
+  /** The single entry point into the `queued` state. */
+  private admit(
+    fields: Omit<DreamTask, 'id' | 'status' | 'enqueuedAt'>,
+  ): string | undefined {
     this.prune();
     if (this.queue.length >= this.maxQueueSize && !this.evictStaleQueuedTask()) {
       return undefined;
     }
     const id = `dream-${++this.taskIdCounter}-${Date.now()}`;
+    const { compositionPlan, ...rest } = fields;
     this.queue.push({
       id,
-      kind: 'composition',
-      strategy: 'cross-modal',
-      sources,
-      priority,
+      ...rest,
       status: 'queued',
-      compositionPlan: plan,
+      ...(compositionPlan ? { compositionPlan } : {}),
       enqueuedAt: new Date().toISOString(),
     });
     this.queue.sort((a, b) => b.priority - a.priority);
@@ -202,73 +258,68 @@ export class DreamQueue {
     return true;
   }
 
+  /** Tasks currently `running` — derived, never tracked separately. */
+  private runningCount(): number {
+    return this.queue.reduce((n, task) => n + (task.status === 'running' ? 1 : 0), 0);
+  }
+
   /**
    * Dequeue the next runnable task (highest priority that fits concurrency).
    */
   dequeue(kind: DreamTaskKind = 'artifact'): DreamTask | undefined {
-    if (this.runningCount >= this.maxConcurrent) return undefined;
-
-    const task = this.queue.find(t => t.status === 'queued' && t.kind === kind);
-    if (!task) return undefined;
-
-    task.status = 'running';
-    task.startedAt = new Date().toISOString();
-    this.runningCount++;
-    this.persist();
-    return task;
+    return this.claim(t => t.status === 'queued' && t.kind === kind);
   }
 
   /** Resume one previously claimed task without selecting newer generic work. */
   dequeueExact(taskId: string): DreamTask | undefined {
-    if (this.runningCount >= this.maxConcurrent) return undefined;
-    const task = this.queue.find(candidate =>
-      candidate.id === taskId && candidate.status === 'queued');
+    return this.claim(t => t.id === taskId && t.status === 'queued');
+  }
+
+  /** queued -> running, respecting the concurrency cap. */
+  private claim(match: (task: DreamTask) => boolean): DreamTask | undefined {
+    if (this.runningCount() >= this.maxConcurrent) return undefined;
+    const task = this.queue.find(match);
     if (!task) return undefined;
-    task.status = 'running';
-    task.startedAt = new Date().toISOString();
-    this.runningCount++;
+    transitionDreamTask(task, 'running');
     this.persist();
     return task;
   }
 
   /**
-   * Mark a task as completed with its result.
+   * Mark a task as completed with its result. Returns false (and changes
+   * nothing) when the task is unknown or not `running`.
    */
-  complete(taskId: string, result: DreamTask['result']): void {
-    const task = this.queue.find(t => t.id === taskId);
-    if (!task || task.status !== 'running') return;
-
-    task.status = 'completed';
-    task.completedAt = new Date().toISOString();
-    task.result = result;
-    this.runningCount--;
-    this.persist();
+  complete(taskId: string, result: DreamTask['result']): boolean {
+    return this.finish(taskId, 'completed', result);
   }
 
   /**
-   * Mark a task as failed.
+   * Mark a task as failed. Returns false (and changes nothing) when the task
+   * is unknown or not `running`.
    */
-  fail(taskId: string, result?: DreamTask['result']): void {
-    const task = this.queue.find(t => t.id === taskId);
-    if (!task || task.status !== 'running') return;
+  fail(taskId: string, result?: DreamTask['result']): boolean {
+    return this.finish(taskId, 'failed', result);
+  }
 
-    task.status = 'failed';
-    task.completedAt = new Date().toISOString();
+  /** running -> completed | failed. */
+  private finish(
+    taskId: string,
+    to: 'completed' | 'failed',
+    result: DreamTask['result'],
+  ): boolean {
+    const task = this.queue.find(t => t.id === taskId);
+    if (!task || task.status !== 'running') return false;
+    transitionDreamTask(task, to);
     task.result = result;
-    this.runningCount--;
     this.persist();
+    return true;
   }
 
   /**
    * Get current queue status.
    */
-  getStatus(): {
-    queued: number;
-    running: number;
-    completed: number;
-    failed: number;
-  } {
-    const counts = { queued: 0, running: 0, completed: 0, failed: 0 };
+  getStatus(): Record<DreamTaskStatus, number> {
+    const counts = Object.fromEntries(DREAM_TASK_STATUSES.map(s => [s, 0])) as Record<DreamTaskStatus, number>;
     for (const task of this.queue) counts[task.status]++;
     return counts;
   }
@@ -276,7 +327,7 @@ export class DreamQueue {
   /**
    * Get all tasks, optionally filtered by status.
    */
-  getTasks(status?: DreamTask['status']): DreamTask[] {
+  getTasks(status?: DreamTaskStatus): DreamTask[] {
     if (status) return this.queue.filter(t => t.status === status);
     return [...this.queue];
   }
@@ -286,7 +337,7 @@ export class DreamQueue {
    */
   prune(): number {
     const before = this.queue.length;
-    const prunable = this.queue.filter(t => t.status === 'completed' || t.status === 'failed');
+    const prunable = this.queue.filter(t => isTerminalDreamTaskStatus(t.status));
     for (const t of prunable) {
       const idx = this.queue.indexOf(t);
       if (idx >= 0) this.queue.splice(idx, 1);

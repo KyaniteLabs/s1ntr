@@ -14,15 +14,14 @@ const ENTRY_TO_DOMAIN: Record<string, Domain> = {
   strudel: Domain.STRUDEL,
   ascii: Domain.ASCII,
   kinetic: Domain.KINETIC,
-  revideo: Domain.REVIDEO,
-  hyperframes: Domain.HYPERFRAMES,
   p5: Domain.P5,
-  // `meta` is the explicit-only custom-domain catch-all. It only wins dispatch
+  // `custom` (formerly `meta`) is the explicit-only custom-domain catch-all. It only wins dispatch
   // when the prompt explicitly asks for a custom/arbitrary medium (or --domain
-  // meta is forced); a normal prompt scores 0 for meta and routes elsewhere, so
+  // custom is forced); a normal prompt scores 0 for custom and routes elsewhere, so
   // default/unknown routing is unchanged.
-  meta: Domain.META,
+  custom: Domain.CUSTOM,
   blender: Domain.BLENDER,
+  nbe: Domain.NBE,
 };
 
 /**

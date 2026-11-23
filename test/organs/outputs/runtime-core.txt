@@ -1,0 +1,28 @@
+## run6.log
+piece v16-mainframe-boot GPT-6 Luna 0.33
+
+🎨 Sinter: Creative Coding Agent
+📝 Prompt: "A 1989 mainframe boots, made only with HTML and CSS animation: lines of system checks type themselves out in one monospace font, memory counts up, a progress bar fills, and the screen brief
+🔄 Governed candidates: 1
+📁 Output: <out>/generate/run6
+
+Generating: A 1989 mainframe boots, made only with HTML and CSS animation: lines of system checks type themselves out in one monospace font, memory counts up, a progress bar fills, and the screen brie
+
+🎯 Domain (forced via --domain): kinetic
+
+[LLMClient] [attestation] non-harness generator attempt completes unattested: EXECUTOR_AUTHORITY_UNAVAILABLE: metered funding evidence missing for unknown
+[07:02:37.002] LLMClient llm:response <email>:34985 local/gpt-5.4 222ms ok
+[SandboxConfig] Chromium has no usable OS sandbox on this host, so it runs unsandboxed. Give Chromium an AppArmor profile that allows userns, or set LIMINAL_DISABLE_SANDBOX=true to choose this on purp
+[LLMClient] [attestation] non-harness evaluator attempt completes unattested: EXECUTOR_AUTHORITY_UNAVAILABLE: metered funding evidence missing for unknown
+[07:03:41.637] LLMClient llm:response <email>:34985 local/gpt-5.4 61ms ok
+
+⚠️  Generated, but not accepted
+🎯 Reason: below-quality-floor
+⭐ Quality score: 0.29
+🤖 Model: openai/gpt-5.4
+🧾 Provider calls: 2/2
+✅ Saved: <out>/generate/run6/artifacts/9161e17799265427919465a76831201b1c9d212ff91656d7b4a30ed822cd2822/source.txt
+✅ HTML: <out>/generate/run6/artifacts/9161e17799265427919465a76831201b1c9d212ff91656d7b4a30ed822cd2822/playable.html
+🧾 Authority receipt: 9529e13eb68a71f385899542eedcdf30e3ddf9eb3644f375808bf1a3ac70e6e1
+
+

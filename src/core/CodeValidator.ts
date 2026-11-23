@@ -13,6 +13,8 @@
  * - ASCIIValidator: src/core/validators/ASCIIValidator.ts
  */
 
+import { parseMoshPlan } from '../render/DatamoshPlan.js';
+import { FootageLibrary } from '../footage/FootageLibrary.js';
 import { repairRejected } from './recovery/DeterministicRepair.js';
 import path from 'path';
 import { P5Validator } from './validators/P5Validator.js';
@@ -31,6 +33,7 @@ import { LibraryRulesValidator } from './validators/LibraryRulesValidator.js';
 import { findForbiddenBlenderConstruct } from '../render/BlenderRenderer.js';
 import { validateSVG } from '../generators/svg/SVGValidator.js';
 import { stripLeadingMetaDescriptor } from './validators/MetaDescriptor.js';
+import { canonicalDomainId } from '../types/domains.js';
 import { validateImportPath, ImportValidationError } from '../security/ImportValidator.js';
 import {
   type ValidationResult,
@@ -51,7 +54,7 @@ import {
 // the same dangerous-pattern checks to every executable JS art domain.
 // -----------------------------------------------------------------------------
 const EXECUTABLE_JS_DOMAINS: ReadonlySet<Domain> = new Set<Domain>([
-  'p5', 'three', 'hydra', 'tone', 'kinetic', 'strudel', 'shader', 'glsl',
+  'p5', 'three', 'hydra', 'tone', 'kinetic', 'strudel', 'shader', 'glsl', 'nbe',
 ]);
 
 // Always-dangerous in raw JS regardless of markup context.
@@ -152,12 +155,13 @@ const MIN_SIZE_REQUIREMENTS: Record<Domain, number> = {
   'hyperframes': HyperFramesValidator.getMinSize(),
   'html': HTMLValidator.getMinSize(),
   'dataviz': HTMLValidator.getMinSize(),
-  'meta': HTMLValidator.getMinSize(),
+  'custom': HTMLValidator.getMinSize(),
   'ascii': ASCIIValidator.getMinSize(),
   'kinetic': KineticValidator.getMinSize(),
   'music': 100,
   'textgen': TextGenValidator.getMinSize(),
   'blender': 40,
+  'nbe': HTMLValidator.getMinSize(),
   'unknown': 100,
 };
 
@@ -173,7 +177,7 @@ function detectDomain(code: string): Domain {
   // validation pass (e.g. Exporter.exportHTML) routes to the meta case — which
   // strips the descriptor before the HTML structural check — instead of falling
   // through to plain 'html' and failing on the pre-doctype comment.
-  if (/<!--SINTER-META-DESCRIPTOR\b/.test(code)) return 'meta';
+  if (/<!--SINTER-META-DESCRIPTOR\b/.test(code)) return 'custom';
   if (/data-composition-id/i.test(code) && (/gsap\.(?:timeline|from|to)\s*\(/.test(code) || /window\.__timelines/.test(code))) return 'hyperframes';
   if (/window\.__timelines/.test(code) && /class\s*=\s*["'][^"']*\bclip\b[^"']*["']/i.test(code)) return 'hyperframes';
 
@@ -290,7 +294,7 @@ function validateStructure(code: string, domain: Domain): { errors: string[]; th
   errors.push(...detectContamination(trimmed));
   errors.push(...validateNoGuaranteedRuntimeThrow(trimmed, domain));
   errors.push(...validateJSSecurity(trimmed, domain));
-  errors.push(...LibraryRulesValidator.validate(trimmed).errors);
+  errors.push(...LibraryRulesValidator.validate(trimmed, domain).errors);
 
   switch (domain) {
     case 'p5': {
@@ -364,11 +368,11 @@ function validateStructure(code: string, domain: Domain): { errors: string[]; th
         errors.push('dataviz code must load D3.js or use the d3 global');
       }
       if (!/<svg\b/i.test(trimmed) && !/<canvas\b/i.test(trimmed) && !/\.append\s*\(\s*["']svg["']\s*\)/.test(trimmed)) {
-        errors.push('dataviz code must include an <svg> or <canvas> visualization mount');
+        errors.push("dataviz code must include an <svg> or <canvas> visualization mount: selecting a <div> is not enough, create the svg in it, like d3.select('#chart').append('svg').attr('viewBox', '0 0 800 500'), then draw the marks into that svg");
       }
       break;
     }
-    case 'meta': {
+    case 'custom': {
       // Meta is the custom-domain catch-all: output is a complete HTML page that
       // renders an arbitrary medium. Validate HTML structure and require a render
       // mount, but stay OPEN-ENDED — do NOT pin a library/runtime (the medium is
@@ -414,6 +418,21 @@ function validateStructure(code: string, domain: Domain): { errors: string[]; th
       const forbidden = findForbiddenBlenderConstruct(trimmed);
       if (forbidden) {
         errors.push(`blender script uses "${forbidden}", which is not allowed in the sandboxed render (no network, subprocess, shell or dynamic code)`);
+      }
+      break;
+    }
+    case 'nbe': {
+      // NBE output is a complete self-contained HTML page (see NbeGenerator):
+      // validate the HTML structure, then require the canvas the cascade
+      // neural-field paints and the convergence signal screenshot capture
+      // waits on, so a plain HTML page is not silently accepted as nbe.
+      const result = HTMLValidator.validate(trimmed);
+      errors.push(...result.errors);
+      if (!/<canvas\b/i.test(trimmed)) {
+        errors.push('nbe code must include a <canvas> for the cascade neural-field simulation');
+      }
+      if (!/postMessage\s*\(\s*['"]nbe:converged['"]/.test(trimmed)) {
+        errors.push('nbe code must post the "nbe:converged" signal via window.postMessage once the field has evolved');
       }
       break;
     }
@@ -468,7 +487,7 @@ function validateSelfContained(code: string, domain: Domain): string[] {
       }
       break;
     }
-    case 'meta': {
+    case 'custom': {
       // Self-contained custom-medium page: HTML structure + render mount are
       // checked on the main validation pass. Open-ended catch-all, so no library
       // requirement here (the medium may be vanilla with no external dependency).
@@ -490,11 +509,28 @@ function validateSize(code: string, domain: Domain): string[] {
 // -----------------------------------------------------------------------------
 // Public API
 // -----------------------------------------------------------------------------
+function validateDatamoshPlan(code: string): ValidationResult {
+  try {
+    const { plan } = parseMoshPlan(code);
+    const known = new Set(new FootageLibrary().list().map((m) => m.id));
+    const unknown = plan.segments.find((seg) => !known.has(seg.clip));
+    if (unknown) {
+      return { valid: false, cleanedCode: code, errors: [`datamosh plan names footage "${unknown.clip}" which is not in the library (${[...known].join(', ') || 'library is empty'})`] };
+    }
+    return { valid: true, cleanedCode: JSON.stringify(plan), errors: [] };
+  } catch (error) {
+    return { valid: false, cleanedCode: code, errors: [`datamosh plan invalid: ${error instanceof Error ? error.message : String(error)}`] };
+  }
+}
+
 export class CodeValidator {
   static validate(code: string, domain?: string): ValidationResult {
+    if (domain !== undefined) domain = canonicalDomainId(domain);
     if (!code || typeof code !== 'string') {
       return { valid: false, cleanedCode: '', errors: ['No code provided'] };
     }
+    // Next-release domain (flag-gated): the artifact is a JSON plan, not code.
+    if (domain === 'datamosh') return validateDatamoshPlan(code);
 
     const explicitTextOutput = domain === 'textgen' || domain === 'ascii';
     const decontaminated = stripContamination(code, explicitTextOutput);

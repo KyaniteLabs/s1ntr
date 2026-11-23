@@ -18,6 +18,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
  */
 
 import { OpenAIProvider } from '../../../src/llm/providers/OpenAIProvider.js';
+import { usesMaxCompletionTokens } from '../../../src/llm/providers/BaseProvider.js';
 import { AnthropicProvider } from '../../../src/llm/providers/AnthropicProvider.js';
 import { OllamaProvider } from '../../../src/llm/providers/OllamaProvider.js';
 import { OpenRouterProvider } from '../../../src/llm/providers/OpenRouterProvider.js';
@@ -1162,12 +1163,40 @@ describe('OpenAIProvider dogfood fixes', () => {
 
   it('emits reasoning_effort + reasoning for thinking-capable models when thinking enabled', async () => {
     mockCapabilities.thinking = true;
-    const p = new OpenAIProvider(makeConfig({ model: 'kimi-k3' }));
+    const p = new OpenAIProvider(makeConfig({ model: 'kimi-k3', baseUrl: 'http://127.0.0.1:8317/v1' }));
     mockFetchResponse(okBody());
     await p.generate(makeRequest({ thinking: { enabled: true, effort: 'high' } }));
     const body = JSON.parse(mockFetch.mock.calls[0][1].body as string);
     expect(body.reasoning_effort).toBe('high');
     expect(body.reasoning).toEqual({ effort: 'high' });
+  });
+
+  it('sends only reasoning_effort to api.openai.com, which rejects the reasoning object', async () => {
+    mockCapabilities.thinking = true;
+    const p = new OpenAIProvider(makeConfig({ model: 'gpt-6.2-sol' }));
+    mockFetchResponse(okBody());
+    await p.generate(makeRequest({ thinking: { enabled: true, effort: 'xhigh' } }));
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body as string);
+    expect(body.reasoning_effort).toBe('xhigh');
+    expect(body.reasoning).toBeUndefined();
+  });
+
+  it('sends max_completion_tokens to gpt-6.2-sol, which rejects max_tokens', async () => {
+    const p = new OpenAIProvider(makeConfig({ model: 'gpt-6.2-sol' }));
+    mockFetchResponse(okBody());
+    await p.generate(makeRequest());
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body as string);
+    expect(body.max_completion_tokens).toBe(4096);
+    expect(body.max_tokens).toBeUndefined();
+  });
+
+  it('picks max_completion_tokens for GPT-5-and-later and o-series models only', () => {
+    for (const m of ['gpt-5', 'gpt-5.6-sol', 'gpt-6.2-sol', 'gpt-6-astra', 'gpt-10', 'o1', 'o3-mini', 'o4-mini']) {
+      expect(usesMaxCompletionTokens(m), m).toBe(true);
+    }
+    for (const m of ['gpt-4', 'gpt-4o', 'gpt-4.1-mini', 'gpt-3.5-turbo', 'glm-5.3', 'ollama', 'kimi-k3']) {
+      expect(usesMaxCompletionTokens(m), m).toBe(false);
+    }
   });
 
   it('never emits reasoning params for thinking:false models even when requested', async () => {

@@ -12,7 +12,7 @@ type TestRenderer = HeadlessRenderer & {
   captureScreenshot: () => Promise<{ buffer: Buffer; width: number; height: number; success: boolean }>;
 };
 
-function makeRenderer(runForDelayMs = 0) {
+function makeRenderer(runForDelayMs = 0, wallPerPieceMs = 0) {
   const events: string[] = [];
   const page = {
     setViewportSize: vi.fn().mockResolvedValue(undefined),
@@ -27,7 +27,8 @@ function makeRenderer(runForDelayMs = 0) {
     clock: {
       install: vi.fn(async () => { events.push('clock'); }),
       runFor: vi.fn(async (ms: number) => {
-        if (runForDelayMs) await new Promise(resolve => setTimeout(resolve, runForDelayMs));
+        const delay = runForDelayMs + ms * wallPerPieceMs;
+        if (delay) await new Promise(resolve => setTimeout(resolve, delay));
         events.push(`run:${ms}`);
       }),
     },
@@ -75,6 +76,27 @@ describe('HeadlessRenderer arc capture (#1637)', () => {
       domain: 'p5', arcHorizonMs: 60_000, arcWallBudgetMs: 60_000, maximumDurationMs: 10_100 });
     expect(result.arc!.reachedMs).toBeLessThan(60_000);
     expect(result.arc!.wallMs).toBeLessThan(1_000);
+  });
+
+  it('sizes each step to the wall left, so a heavy frame loop (foil shaders on swiftshader) cannot overrun the cap', async () => {
+    // 1 ms of wall per ms of piece time: a fixed one-second step started with
+    // 400 ms left would run to 1 s and push the render past maximumDurationMs.
+    const { renderer } = makeRenderer(0, 1);
+    const result = await renderer.render('function setup(){} function draw(){}', {
+      domain: 'three', arcHorizonMs: 60_000, arcWallBudgetMs: 60_000, maximumDurationMs: 12_500 });
+    expect(result.arc!.reachedMs).toBeGreaterThan(1_000);
+    expect(result.arc!.reachedMs).toBeLessThan(60_000);
+    expect(result.arc!.wallMs).toBeLessThan(2_750);
+  });
+
+  it('gives a piece that cannot reach the horizon only half the arc budget', async () => {
+    // At 1 ms of wall per ms of piece time the 60 s horizon is hopeless: the
+    // late frame sits at ~2 s either way, so do not burn the whole budget.
+    const { renderer } = makeRenderer(0, 1);
+    const result = await renderer.render('function setup(){} function draw(){}', {
+      domain: 'three', arcHorizonMs: 60_000, arcWallBudgetMs: 4_000, maximumDurationMs: 70_000 });
+    expect(result.arc!.reachedMs).toBeGreaterThan(500);
+    expect(result.arc!.wallMs).toBeLessThan(2_400);
   });
 
   it.each(['tone', 'strudel', 'svg', 'ascii', 'textgen'] as const)(

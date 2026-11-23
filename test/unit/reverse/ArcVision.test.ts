@@ -46,7 +46,7 @@ describe('deriveArcFromImage', () => {
     expect(Buffer.from(images[0].dataBase64, 'base64')).toHaveLength(out.sent.bytes);
     expect(signal).toBeUndefined();
     expect(bypass).toBe(true);
-    expect(opts).toEqual({ jsonMode: true });
+    expect(opts).toEqual({ jsonMode: true, requireVision: true });
   });
 
   it('accepts JSON wrapped in a code fence with prose around it', async () => {

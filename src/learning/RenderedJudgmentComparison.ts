@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { boundedEvaluatorImages } from '../core/ScoringEngine.js';
+import { evaluatorCall } from '../core/EvaluatorScope.js';
 import type { LLMClient } from '../llm/LLMClient.js';
 import { loadCreativeJudgmentProfile, type CreativeJudgmentProfile } from './CreativeJudgmentCalibration.js';
 
@@ -33,7 +34,7 @@ export async function compareRenderedJudgment(
     { ...candidate.late, label: `candidate-${candidate.id}-late` },
   ])));
   const ids = candidates.map(candidate => candidate.id);
-  const response = await llm.generateWithImages(
+  const response = await evaluatorCall(() => llm.generateWithImages(
     `You are a blind comparative visual-art judge. Rank only the supplied rendered evidence.
 Judge primordial craft: cohesion, structural depth, spatial embodiment, materiality,
 form-revealing motion, composition, palette, and finish. Demonstrated volume and material
@@ -45,8 +46,8 @@ Return JSON only: {"ranking":["id"],"reasoning":"concise comparative explanation
     images,
     AbortSignal.timeout(120_000),
     true,
-    { jsonMode: true },
-  );
+    { jsonMode: true, requireVision: true },
+  ));
   const parsed = JSON.parse(response.code) as { ranking?: unknown; reasoning?: unknown };
   if (!Array.isArray(parsed.ranking)
     || parsed.ranking.length !== ids.length

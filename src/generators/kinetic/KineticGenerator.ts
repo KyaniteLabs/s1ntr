@@ -3,14 +3,14 @@
  */
 
 import { TierBasedGenerator, type TierBasedGeneratorOptions } from '../TierBasedGenerator.js';
-import type { LLMResponse } from '../../llm/LLMClient.js';
-import { LLMClient } from '../../llm/LLMClient.js';
+import type { LLMClient, LLMResponse } from '../../llm/LLMClient.js';
 import { CodeValidator } from '../../core/CodeValidator.js';
 import { KINETIC_SYSTEM_PROMPT, buildKineticPrompt } from './kineticPrompt.js';
 import { KineticWrapper } from './KineticWrapper.js';
 import { Logger } from '../../utils/Logger.js';
 import { GenerationError } from '../../errors/GenerationError.js';
 import { answerCode } from '../../llm/ModelOutput.js';
+import { directAttemptTimeoutMs } from '../directAttemptTimeout.js';
 
 export type KineticGeneratorOptions = TierBasedGeneratorOptions;
 
@@ -39,7 +39,7 @@ export class KineticGenerator extends TierBasedGenerator {
     let response = await this.tryCompactDirect(prompt, options);
     if (!response) {
       if (this.usesMiniMaxAnthropic()) {
-        return this.buildFailedKineticResponse('MiniMax Anthropic-compatible endpoint did not return valid CSS kinetic HTML inside the bounded live-journey budget');
+        return this.buildFailedKineticResponse('MiniMax direct attempt did not return valid CSS kinetic HTML inside the bounded live-journey budget');
       }
       try {
         response = await this.llm.generate(
@@ -100,8 +100,9 @@ export class KineticGenerator extends TierBasedGenerator {
   }
 
   private async tryCompactDirect(prompt: string, options?: KineticGeneratorOptions): Promise<LLMResponse | null> {
-    const directLlm = this.createDirectKineticClient();
-    const result = await this.completeWithAttemptTimeout(directLlm, {
+    await this.resolveConfigIfNeeded();
+    const attemptTimeoutMs = KineticGenerator.directAttemptTimeoutMs(this.llm.getTimeoutOverride());
+    const result = await this.completeWithAttemptTimeout({
       systemPrompt: 'You are a deterministic source-code printer. Do not reason. Do not explain. Output only the requested source file.',
       prompt: [
         'Print one complete HTML file only.',
@@ -119,10 +120,9 @@ export class KineticGenerator extends TierBasedGenerator {
       maxTokens: Math.min(options?.maxTokens ?? 4000, 4500),
       temperature: 0.1,
       // The compact-direct attempt runs BEFORE the main path and its budget
-      // comes out of the caller's overall window — under provider slowness a
-      // hardcoded 60s burned half the proof budget and starved the fallback
-      // (audit F21). Keep 60s as the default, let ops widen it per env.
-    }, options?.signal, KineticGenerator.directAttemptTimeoutMs());
+      // comes out of the caller's overall window (audit F21).
+      preferMiniMaxOpenAI: true,
+    }, options?.signal, attemptTimeoutMs);
     if (!result.success || !result.text) return null;
     const extracted = this.extractKineticHtml(result.text);
     if (!extracted) return null;
@@ -138,7 +138,6 @@ export class KineticGenerator extends TierBasedGenerator {
   }
 
   private async completeWithAttemptTimeout(
-    llm: LLMClient,
     request: Parameters<LLMClient['complete']>[0],
     parentSignal: AbortSignal | undefined,
     timeoutMs: number,
@@ -151,7 +150,7 @@ export class KineticGenerator extends TierBasedGenerator {
     const abortFromParent = () => controller.abort(parentSignal?.reason);
     parentSignal?.addEventListener('abort', abortFromParent, { once: true });
     try {
-      return await llm.complete({ ...request, signal: controller.signal });
+      return await this.llm.complete({ ...request, signal: controller.signal, providerTimeoutMs: timeoutMs });
     } finally {
       clearTimeout(timeout);
       parentSignal?.removeEventListener('abort', abortFromParent);
@@ -159,23 +158,8 @@ export class KineticGenerator extends TierBasedGenerator {
   }
 
   /** Wall-clock budget for the compact-direct first attempt (default 60s). */
-  static directAttemptTimeoutMs(): number {
-    const raw = Number(process.env.SINTER_KINETIC_DIRECT_TIMEOUT_MS);
-    return Number.isFinite(raw) && raw >= 5_000 ? raw : 60_000;
-  }
-
-  private createDirectKineticClient(): LLMClient {
-    const config = this.llm.getConfig();
-    if (this.usesMiniMaxAnthropic()) {
-      return new LLMClient({
-        baseUrl: 'https://api.minimax.io/v1',
-        apiKey: config.apiKey,
-        model: config.model,
-        temperature: 0.1,
-        maxTokens: 4000,
-      });
-    }
-    return this.llm;
+  static directAttemptTimeoutMs(configuredTimeout?: number): number {
+    return directAttemptTimeoutMs(configuredTimeout);
   }
 
   private usesMiniMaxAnthropic(): boolean {

@@ -7,7 +7,7 @@
  * visual domain. The script never renders itself; the driver does, with
  * capped resolution and samples.
  *
- * Mirrors MetaGenerator/DataVizGenerator: a bounded direct retry loop calling
+ * Mirrors CustomGenerator/DataVizGenerator: a bounded direct retry loop calling
  * llm.complete(), no generic tool loop.
  */
 

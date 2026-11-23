@@ -26,6 +26,7 @@ import type {
   Provenance,
 } from './types.js';
 import { Logger } from '../utils/Logger.js';
+import type { CreativeLabelAdmission } from '../learning/CreativeLabelAdmission.js';
 import type { DreamArchiveSourceAdmission,
   DreamArchiveSourceCapability } from '../dreaming/research/DreamArchiveSourceAdmission.js';
 
@@ -44,10 +45,17 @@ export interface CreativeRunInput {
   runParams?: Record<string, unknown>;
   /** Run ID from SinterFS */
   runId?: string;
+  /** Stable artifact identity when a durable producer can replay one output. */
+  artifactId?: string;
+  /** Lineage already persisted by the governed recorder. */
+  lineage?: LineageRecord;
   /** Optional metadata for descriptor extraction */
   metadata?: Record<string, unknown>;
   /** Opaque host-issued proof that this exact rendered artifact was owner accepted. */
   dreamSourceAdmission?: DreamArchiveSourceCapability;
+  /** Signed label and the independently verified digest of its artifact. */
+  creativeLabel?: CreativeLabelAdmission;
+  verifiedArtifactDigest?: string;
 }
 
 export interface CreativeRunResult {
@@ -131,15 +139,19 @@ export class EmergenceHooks {
    */
   async onCreativeRun(input: CreativeRunInput): Promise<CreativeRunResult> {
     // 1. Extract behavior descriptor
+    if (input.creativeLabel && input.verifiedArtifactDigest !== input.creativeLabel.artifactDigest) {
+      throw new Error('CREATIVE_LABEL_ARTIFACT_MISMATCH');
+    }
     const descriptor = this.extractor.extract(input.output, input.metadata);
 
     // 2. Record lineage
-    const lineage = await this.lineageTracker.record({
+    const lineage = input.lineage ?? await this.lineageTracker.record({
       parentIds: input.parentIds,
       provenance: input.provenance,
       seed: input.seed,
       runParams: input.runParams,
       runId: input.runId,
+      artifactId: input.artifactId,
     });
 
     // 3. Compute emergence signals via EmergenceCritic ensemble
@@ -149,6 +161,7 @@ export class EmergenceHooks {
     const placeholderRef = {
       uri: `sinter://artifact/${lineage.artifactId}`,
       kind: 'generated-code' as const,
+      ...(input.verifiedArtifactDigest ? { hash: input.verifiedArtifactDigest } : {}),
     };
 
     const placement = this.archive.place({
@@ -157,6 +170,7 @@ export class EmergenceHooks {
       lineage,
       qualityScore: input.qualityScore,
       signals,
+      ...(input.creativeLabel ? { creativeLabel: input.creativeLabel } : {}),
       ...(this.dreamSourceAdmission?.resolve(input.dreamSourceAdmission)
         ? { dreamAdmission: this.dreamSourceAdmission.resolve(input.dreamSourceAdmission) } : {}),
     });

@@ -1,7 +1,8 @@
-import { createHash, createHmac } from 'node:crypto';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
+import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { writeFileAtomicSync } from '../../utils/atomicWrite.js';
+import { parseOperatorStateFile } from '../../utils/operatorStateFile.js';
 import type { DreamFindingAdmission } from './DreamLearningAdmission.js';
 import type { DreamLearningCapability,
   DreamLearningGateway } from './DreamLearningGateway.js';
@@ -131,6 +132,8 @@ interface FileKnowledgeState {
   readonly schemaVersion: 1;
   readonly snapshots: Readonly<Record<string, ActivatedKnowledgeSnapshot>>;
   readonly rolledBack: Readonly<Record<string, string>>;
+  /** Activation order; absent in stores written before ordering existed. */
+  readonly activations?: Readonly<Record<string, { sequence: number; at: string }>>;
 }
 
 const EMPTY_KNOWLEDGE_STATE: FileKnowledgeState = Object.freeze({
@@ -140,32 +143,91 @@ const EMPTY_KNOWLEDGE_STATE: FileKnowledgeState = Object.freeze({
 
 /** Durable product store for activated snapshots and explicit rollback state. */
 export class FileActivatedKnowledgeStore implements ActivatedKnowledgeStore {
-  constructor(private readonly file: string) {
+  private readonly lockTimeoutMs: number;
+  constructor(private readonly file: string, options: { lockTimeoutMs?: number } = {}) {
     if (!path.isAbsolute(file)) throw new Error('KNOWLEDGE_STORE_PATH_NOT_ABSOLUTE');
+    this.lockTimeoutMs = options.lockTimeoutMs ?? 10_000;
   }
+  get path(): string { return this.file; }
   save(snapshot: ActivatedKnowledgeSnapshot): void {
-    const state = this.readState();
-    if (state.snapshots[snapshot.snapshotDigest]) throw new Error('KNOWLEDGE_SNAPSHOT_ALREADY_EXISTS');
-    this.writeState({ ...state, snapshots: { ...state.snapshots,
-      [snapshot.snapshotDigest]: snapshot } });
+    this.withLock(() => {
+      const state = this.readState();
+      if (state.snapshots[snapshot.snapshotDigest]) throw new Error('KNOWLEDGE_SNAPSHOT_ALREADY_EXISTS');
+      const sequence = Math.max(Object.keys(state.snapshots).length,
+        ...Object.values(state.activations ?? {}).map(item => item.sequence)) + 1;
+      this.writeState({ ...state, snapshots: { ...state.snapshots,
+        [snapshot.snapshotDigest]: snapshot },
+      activations: { ...state.activations,
+        [snapshot.snapshotDigest]: { sequence, at: new Date().toISOString() } } });
+    });
   }
   read(snapshotDigest: string): ActivatedKnowledgeSnapshot | undefined {
     return this.readState().snapshots[snapshotDigest];
+  }
+  /** Most recently activated non-rolled-back snapshot whose scope list contains exactly `scope`. */
+  latestActive(scope: string): ActivatedKnowledgeSnapshot | undefined {
+    const state = this.readState();
+    const order = (item: ActivatedKnowledgeSnapshot, index: number): number =>
+      state.activations?.[item.snapshotDigest]?.sequence ?? index;
+    return Object.values(state.snapshots)
+      .map((item, index) => ({ item, seq: order(item, index) }))
+      .filter(({ item }) => !state.rolledBack[item.snapshotDigest]
+        && item.scope.some(entry => entry === scope))
+      .sort((a, b) => a.seq - b.seq).at(-1)?.item;
   }
   isActive(snapshotDigest: string): boolean {
     const state = this.readState();
     return Boolean(state.snapshots[snapshotDigest] && !state.rolledBack[snapshotDigest]);
   }
   rollback(snapshotDigest: string, reason: string): void {
-    const state = this.readState();
-    if (!state.snapshots[snapshotDigest]) throw new Error('KNOWLEDGE_SNAPSHOT_UNKNOWN');
-    if (!reason.trim()) throw new Error('KNOWLEDGE_ROLLBACK_REASON_REQUIRED');
-    this.writeState({ ...state, rolledBack: { ...state.rolledBack, [snapshotDigest]: reason } });
+    this.withLock(() => {
+      const state = this.readState();
+      if (!state.snapshots[snapshotDigest]) throw new Error('KNOWLEDGE_SNAPSHOT_UNKNOWN');
+      if (!reason.trim()) throw new Error('KNOWLEDGE_ROLLBACK_REASON_REQUIRED');
+      this.writeState({ ...state, rolledBack: { ...state.rolledBack, [snapshotDigest]: reason } });
+    });
+  }
+
+  /**
+   * Cross-process read-modify-write lock: an exclusive mkdir that records an owner token. A stale (60 s)
+   * lock is broken by an atomic rename to a private name, so only one breaker wins, and the moved
+   * directory is re-checked: a lock that turns out to be live is put back. The holder removes the lock
+   * only while its own token is still inside, so a broken lock is never deleted by its old holder.
+   */
+  private withLock<T>(action: () => T): T {
+    const lock = `${this.file}.lock`;
+    const token = randomUUID();
+    mkdirSync(path.dirname(this.file), { recursive: true });
+    const deadline = Date.now() + this.lockTimeoutMs;
+    for (;;) {
+      try { mkdirSync(lock); writeFileSync(path.join(lock, 'owner'), token); break; } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        this.breakIfStale(lock, token);
+        if (Date.now() > deadline) throw new Error('KNOWLEDGE_STORE_LOCKED');
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+      }
+    }
+    try { return action(); } finally {
+      try {
+        if (readFileSync(path.join(lock, 'owner'), 'utf8') === token) rmSync(lock, { recursive: true, force: true });
+      } catch { /* lock already broken and replaced: not ours to remove */ }
+    }
+  }
+
+  private breakIfStale(lock: string, token: string): void {
+    const stale = (target: string): boolean => {
+      try { return Date.now() - statSync(target).mtimeMs > 60_000; } catch { return false; }
+    };
+    if (!stale(lock)) return;
+    const moved = `${lock}.stale-${token}`;
+    try { renameSync(lock, moved); } catch { return; }
+    if (stale(moved)) { rmSync(moved, { recursive: true, force: true }); return; }
+    try { renameSync(moved, lock); } catch { rmSync(moved, { recursive: true, force: true }); }
   }
 
   private readState(): FileKnowledgeState {
     try {
-      const state = JSON.parse(readFileSync(this.file, 'utf8')) as Partial<FileKnowledgeState>;
+      const state = parseOperatorStateFile<Partial<FileKnowledgeState>>(this.file, readFileSync(this.file, 'utf8'));
       if (state.schema !== EMPTY_KNOWLEDGE_STATE.schema || state.schemaVersion !== 1
         || !state.snapshots || typeof state.snapshots !== 'object'
         || !state.rolledBack || typeof state.rolledBack !== 'object') {

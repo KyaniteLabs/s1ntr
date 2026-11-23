@@ -1,58 +1,25 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { mockRender } = vi.hoisted(() => ({
-  mockRender: vi.fn(),
-}));
-
-vi.mock('../../../src/chat/ConversationManager.js', () => ({
-  ConversationManager: vi.fn().mockImplementation(function () {
-    return {
-      startNewSession: vi.fn(),
-    };
-  }),
-}));
-
-vi.mock('../../../src/chat/ChatCLI.js', () => ({
-  ChatCLI: vi.fn().mockImplementation(function () {
-    return {
-      render: mockRender,
-    };
-  }),
-}));
-
-vi.mock('../../../src/core/RalphLoop.js', () => ({
-  RalphLoop: {},
-}));
+const { mockReflect } = vi.hoisted(() => ({ mockReflect: vi.fn() }));
+vi.mock('../../../src/chat/commands/chatReflect.js', () => ({ runChatReflect: mockReflect }));
 
 import { chatCommand } from '../../../src/chat/commands/chat.js';
 
-describe('chatCommand', () => {
+describe('chatCommand (old name for chat reflect)', () => {
   const originalExitCode = process.exitCode;
-  let originalIsTTYDescriptor: PropertyDescriptor | undefined;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => { process.exitCode = undefined; mockReflect.mockReset(); });
+  afterEach(() => { process.exitCode = originalExitCode; });
 
-  beforeEach(() => {
-    originalIsTTYDescriptor = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
-    process.exitCode = undefined;
-    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    mockRender.mockClear();
+  it('delegates to chat reflect with the requested session limit', async () => {
+    mockReflect.mockResolvedValue(0);
+    await chatCommand({ limit: 3 });
+    expect(mockReflect).toHaveBeenCalledWith({ limit: 3 });
+    expect(process.exitCode).toBeUndefined();
   });
 
-  afterEach(() => {
-    if (originalIsTTYDescriptor) {
-      Object.defineProperty(process.stdin, 'isTTY', originalIsTTYDescriptor);
-    }
-    process.exitCode = originalExitCode;
-    errorSpy.mockRestore();
-  });
-
-  it('refuses non-interactive stdin before rendering the long-lived chat UI', async () => {
-    Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: false });
-
+  it('carries a failed reflection into the process exit code', async () => {
+    mockReflect.mockResolvedValue(1);
     await chatCommand();
-
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('sinter chat requires an interactive terminal'));
     expect(process.exitCode).toBe(1);
-    expect(mockRender).not.toHaveBeenCalled();
   });
 });

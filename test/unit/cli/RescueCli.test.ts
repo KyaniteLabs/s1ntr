@@ -115,4 +115,29 @@ describe('runRescueCommand', () => {
     expect(logs[0]).toBe('[rescue-sweep] scanned=0 salvaged=0 dead=0 falseKillRate=0% skipped=0');
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  // Sol F11: the typed global flag must reach manual mode even when the token is not in cmdArgs.
+  it('the typed noLlm flag alone makes zero provider requests in manual mode', async () => {
+    mkdirSync(join(home, '.sinter'), { recursive: true });
+    writeFileSync(join(home, '.sinter', 'config.json'), JSON.stringify({
+      roles: { harness: { baseUrl: 'https://llm.example.invalid/v1', model: 'test-model', apiKey: 'k' } },
+    }));
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const p = pool({ 'broken.js': BROKEN_P5 });
+    await runRescueCommand([p], { noLlm: true });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(logs).toContain('\npool=1  false-kill=0  recovered=0  llm-salvage=0  dead=1  no-code=0');
+  });
+
+  it('an Anthropic base that already ends in /v1 is not doubled', async () => {
+    mkdirSync(join(home, '.sinter'), { recursive: true });
+    writeFileSync(join(home, '.sinter', 'config.json'), JSON.stringify({
+      roles: { harness: { baseUrl: 'https://api.anthropic.example.invalid/v1', provider: 'anthropic', model: 'm', apiKey: 'k' } },
+    }));
+    const fetchMock = vi.fn().mockResolvedValue({ json: async () => ({ content: [{ text: GOOD_P5 }] }) });
+    vi.stubGlobal('fetch', fetchMock);
+    await runRescueCommand([pool({ 'broken.js': BROKEN_P5 })]);
+    expect(fetchMock.mock.calls[0][0]).toBe('https://api.anthropic.example.invalid/v1/messages');
+  });
 });

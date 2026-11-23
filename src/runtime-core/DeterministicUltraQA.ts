@@ -55,7 +55,7 @@ export const FIXED_ULTRAQA_COMMANDS: readonly FixedUltraQACommand[] = Object.fre
   { kind: 'pack', argv: ['pnpm', 'pack', '--pack-destination', '.quality/wave-8/ultraqa-pack'], artifactRoots: ['.quality/wave-8/ultraqa-pack'], expectedOutput: '.tgz' },
   { kind: 'packed-install', argv: ['node', 'scripts/proof/git-ci-install.mjs'], artifactRoots: ['dist'], expectedOutput: 'Git CI install proof passed' },
   { kind: 'installed-startup', argv: ['node', 'scripts/ci/wave7-packed-install-smoke.mjs'], artifactRoots: ['dist'], expectedOutput: 'packed-install-smoke' },
-  { kind: 'startup', argv: ['node', 'bin/sinter', '--help'], artifactRoots: ['dist', 'bin/sinter'], expectedOutput: '🎨 Sinter: Creative Coding Agent' },
+  { kind: 'startup', argv: ['node', 'bin/sinter', '--help'], artifactRoots: ['dist', 'bin/sinter'], expectedOutput: '🎨 S1NTR: a tool for coding art.' },
   { kind: 'deterministic-no-spend', argv: ['pnpm', 'exec', 'tsx', 'scripts/proof/wave7-no-spend-circulation.ts', '--output', `${EVIDENCE_ROOT}/deterministic-no-spend.json`], artifactRoots: [`${EVIDENCE_ROOT}/deterministic-no-spend.json`], expectedOutput: `${EVIDENCE_ROOT}/deterministic-no-spend.json` },
   { kind: 'leak-audit', argv: ['pnpm', 'exec', 'tsx', 'scripts/ci/wave7-leak-audit.ts', 'dist', '--output', `${EVIDENCE_ROOT}/leak-audit.json`], artifactRoots: [`${EVIDENCE_ROOT}/leak-audit.json`], expectedOutput: 'wave7-leak-audit' },
   // These three reports and the provisional current root are emitted just before this command.

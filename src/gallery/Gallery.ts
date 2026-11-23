@@ -10,6 +10,8 @@
  */
 
 import fs from 'fs/promises';
+import { writeFileAtomic } from '../utils/atomicWrite.js';
+import { withFileLock } from '../utils/fileLock.js';
 import { normalizePath, assertSafeSegment } from '../utils/normalizePath.js';
 import { Logger } from '../utils/Logger.js';
 import { CodeValidator } from '../core/CodeValidator.js';
@@ -117,7 +119,7 @@ export class Gallery {
    * @param code - Code to save (must be non-empty string)
    * @throws Error if validation fails or file system error occurs
    */
-  async saveIteration(project: string, version: number, code: string): Promise<void> {
+  async saveIteration(project: string, version: number, code: string, date = new Date()): Promise<void> {
     // Validate project name
     if (!project || typeof project !== 'string' || project.trim() === '') {
       throw new Error('Project name is required and must be a non-empty string');
@@ -135,7 +137,6 @@ export class Gallery {
     }
 
     // Create date-based directory name
-    const date = new Date();
     const dateStr = date.toISOString().split('T')[0]; // YYYY-MM-DD
     const projectDirName = `${dateStr}--${project.trim()}`;
     const projectDir = normalizePath(this.galleryDir, projectDirName);
@@ -298,6 +299,28 @@ export class Gallery {
     await fs.writeFile(filepath, JSON.stringify(payload), 'utf-8');
   }
 
+  async recordComposition(
+    html: string,
+    meta: { title: string; layers: string[] },
+    { reuseExisting = false } = {},
+  ): Promise<{ slug: string; version: number }> {
+    const title = meta.title.trim() || 'Composition';
+    const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'composition';
+    await fs.mkdir(this.galleryDir, { recursive: true });
+    return withFileLock(normalizePath(this.galleryDir, `.composition-${slug}.lock`), async () => {
+      const history = await this.loadHistory(slug);
+      if (reuseExisting) {
+        const match = history.find(entry => 'type' in entry && entry.type === 'composition'
+          && entry.code === html.trim() && entry.title === title
+          && entry.layers.length === meta.layers.length && entry.layers.every((layer, i) => layer === meta.layers[i]));
+        if (match) return { slug, version: match.version };
+      }
+      const version = (history.at(-1)?.version ?? 0) + 1;
+      await this.saveComposition(slug, version, html, { ...meta, title });
+      return { slug, version };
+    });
+  }
+
   private validateGalleryVersionCode(code: string): string {
     const validation = CodeValidator.validate(code);
     if (!validation.valid) {
@@ -348,7 +371,7 @@ export class Gallery {
       layers: Array.isArray(meta.layers) ? meta.layers.map(String) : [],
     };
     const filepath = normalizePath(projectDir, `v${version}.js`);
-    await fs.writeFile(filepath, JSON.stringify(payload), 'utf-8');
+    await writeFileAtomic(filepath, JSON.stringify(payload));
   }
 
   /**

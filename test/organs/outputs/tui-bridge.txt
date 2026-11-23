@@ -1,0 +1,4 @@
+# organ: tui-bridge | buildCreativeDomainRouteTruth | data: real, in-process call
+hydra+drone -> {"requestedDomain":"hydra","selectedDomain":"hydra","domains":["hydra"],"promptDomainLocked":true,"source":"prompt"}
+three.js cube -> {"requestedDomain":"three","selectedDomain":"three","domains":["three"],"promptDomainLocked":true,"source":"prompt"}
+inferCreativeDomain("a glsl tunnel") = glsl

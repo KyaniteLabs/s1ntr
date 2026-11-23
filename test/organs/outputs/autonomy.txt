@@ -1,0 +1,45 @@
+## 04-4-garden-status.txt
+# organ: chain | step: 4-garden-status | data: real
+$ node <repo>/bin/sinter garden status
+# cwd: <out>/_chain (repo: <repo>)
+# --- stdout
+
+=== Garden Status ===
+  Health: 75.4% [thriving]
+  Entries: 10  Occupancy: 100.0%
+  Fertility: 0.512  Lineage depth: 1.0
+  Stagnation: NO
+
+  Next actions:
+    frontier-seeking (priority 0.9) — Fill empty niche
+    frontier-seeking (priority 0.9) — Fill empty niche
+    branch-fertile (priority 0.7) — Branch from fertile lineage (0.76)
+    branch-fertile (priority 0.7) — Branch from fertile lineage (0.74)
+    branch-fertile (priority 0.7) — Branch from fertile lineage (0.66)
+
+# --- stderr
+# exit: 0
+
+## 01-rebalance.txt
+# organ: garden | step: rebalance | data: real
+$ node <repo>/bin/sinter garden rebalance
+# cwd: <out>/_proj (repo: <repo>)
+# --- stdout
+
+=== Garden Rebalance ===
+  Current balance: 100.0%
+  Target niches: 10
+    order-chaos:0|sparse-dense:0|symmetry-asymmetry:0|smooth-bursty:0|static-evolving:0|harmonic-dissonant:0: empty (allocated 0.00)
+    order-chaos:1|sparse-dense:0|symmetry-asymmetry:0|smooth-bursty:1|static-evolving:0|harmonic-dissonant:0: empty (allocated 0.00)
+    order-chaos:2|sparse-dense:0|symmetry-asymmetry:0|smooth-bursty:2|static-evolving:0|harmonic-dissonant:0: empty (allocated 0.00)
+    order-chaos:3|sparse-dense:0|symmetry-asymmetry:0|smooth-bursty:3|static-evolving:0|harmonic-dissonant:0: empty (allocated 0.00)
+    order-chaos:4|sparse-dense:0|symmetry-asymmetry:0|smooth-bursty:4|static-evolving:0|harmonic-dissonant:0: empty (allocated 0.00)
+    order-chaos:5|sparse-dense:0|symmetry-asymmetry:0|smooth-bursty:5|static-evolving:0|harmonic-dissonant:0: empty (allocated 0.00)
+    order-chaos:6|sparse-dense:0|symmetry-asymmetry:0|smooth-bursty:6|static-evolving:0|harmonic-dissonant:0: empty (allocated 0.00)
+    order-chaos:7|sparse-dense:0|symmetry-asymmetry:0|smooth-bursty:7|static-evolving:0|harmonic-dissonant:0: empty (allocated 0.00)
+    order-chaos:8|sparse-dense:0|symmetry-asymmetry:0|smooth-bursty:8|static-evolving:0|harmonic-dissonant:0: empty (allocated 0.00)
+    order-chaos:9|sparse-dense:0|symmetry-asymmetry:0|smooth-bursty:9|static-evolving:0|harmonic-dissonant:0: empty (allocated 0.00)
+
+# --- stderr
+# exit: 0
+

@@ -1,0 +1,13 @@
+## 01-canonical-domain.txt
+# organ: types | step: canonical-domain | data: real
+$ node -e import('./dist/types/domains.js').then(m=>{for(const d of ['meta','html','p5js','kinetic','svg'])console.log(d,'->',m.canonicalDomainId(d))})
+# cwd: <repo> (repo: <repo>)
+# --- stdout
+meta -> custom
+html -> html
+p5js -> p5js
+kinetic -> kinetic
+svg -> svg
+# --- stderr
+# exit: 0
+

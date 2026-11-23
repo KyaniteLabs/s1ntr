@@ -2,6 +2,7 @@
 /**
  * sinter rotation — standing per-seat batteries for model rotation (#401)
  */
+import { isSeatRateLimit, RATE_LIMIT_EXIT } from './rate-sub.mjs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runBattery, loadSummary } from './batteries.mjs';
@@ -232,7 +233,11 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
   }
 
   const seat = args.seat;
-  const liveMerged = Boolean(args.live || deps.live);
+  // One decision for every spend-affecting mode. The host CLI's global parser consumes --dry-run before this
+  // helper sees argv and hands it back as deps.dryRun, so dry-run must be merged exactly like live/mock.
+  // Dry-run is the no-spend mode and wins over --live: a contradictory pair never reaches a provider.
+  const dryRunMerged = Boolean(args.dryRun || deps.dryRun);
+  const liveMerged = Boolean(args.live || deps.live) && !dryRunMerged;
   const mockMerged = Boolean(args.mock || deps.mock);
 
   // F24: live generator/harness shells bin/sinter → dist/index.js
@@ -348,24 +353,31 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
 
   console.log(
     `[rotation] seat=${seat} model=${modelOverride || '(RoleConfig)'} `
-    + `dryRun=${args.dryRun} mock=${mockMerged} live=${liveMerged}`
+    + `dryRun=${dryRunMerged} mock=${mockMerged} live=${liveMerged}`
     + (args.wave != null ? ` wave=${args.wave}` : ''),
   );
 
-  const result = await (deps.runBattery || runBattery)(seat, {
-    modelOverride,
-    reasoning: args.reasoning,
-    out: args.out,
-    dryRun: args.dryRun,
-    mock: mockMerged,
-    live: liveMerged,
-    maxTasks: args.maxTasks ?? deps.maxTasks ?? null,
-    loadRoleConfig,
-    seatRunner: deps.seatRunner,
-    liveAdapters: deps.liveAdapters,
-    recordEvent: deps.recordEvent,
-    wave: args.wave ?? deps.wave ?? null,
-  });
+  let result;
+  try {
+    result = await (deps.runBattery || runBattery)(seat, {
+      modelOverride,
+      reasoning: args.reasoning,
+      out: args.out,
+      dryRun: dryRunMerged,
+      mock: mockMerged,
+      live: liveMerged,
+      rateLimitModel: liveMerged && !mockMerged ? modelOverride : null,
+      maxTasks: args.maxTasks ?? deps.maxTasks ?? null,
+      loadRoleConfig,
+      seatRunner: deps.seatRunner,
+      liveAdapters: deps.liveAdapters,
+      recordEvent: deps.recordEvent,
+      wave: args.wave ?? deps.wave ?? null,
+    });
+  } catch (error) {
+    if (liveMerged && !mockMerged && isSeatRateLimit(error, modelOverride)) return RATE_LIMIT_EXIT;
+    throw error;
+  }
 
   console.log(`[rotation] mode=${result.mode}`);
   if (result.mode === 'live-partial' && result.gapTaskIds?.length) {

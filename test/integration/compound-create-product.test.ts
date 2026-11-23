@@ -147,6 +147,22 @@ describe('later Create compound-gain product path', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it('binds judge source and Dream evidence to the signed command after teaching', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'compound-create-')); roots.push(root);
+    const f = fixture(root);
+    const command = createCommand({ prompt: 'taught depth study', domain: 'html', layers: ['depth'],
+      maxTransportAttempts: 2, teaching: { targetScope: 'visual', snapshotDigest: snapshot.snapshotDigest } });
+
+    const create = await f.product.submitCreate('cli', command);
+    const signedCommand = create.result.receipt.commandDigest;
+    expect(create.commandDigest).not.toBe(signedCommand);
+    const bound = await f.product.readBoundJudgeSource(command.idempotencyKey);
+    expect(bound.source).toContain('Activated creative principles:');
+    expect(bound.evidence.createCommandDigest).toBe(signedCommand);
+    const dreamEvidence = await f.product.verifiedJudgeEvidence(command.idempotencyKey, true);
+    expect(dreamEvidence.createCommandDigest).toBe(signedCommand);
+  });
+
   it('replays the durable terminal projection without another Create effect', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'compound-create-')); roots.push(root);
     const f = fixture(root);

@@ -5,6 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { isolatedCliEnv } from '../helpers/isolatedCli.js';
 
 /**
  * Behavioral CLI-wiring test for `sinter model audition <model> --live`.
@@ -94,7 +95,7 @@ async function runAuditionCli(baseUrl: string): Promise<CliResult> {
       {
         cwd: repoRoot,
         env: {
-          ...process.env,
+          ...isolatedCliEnv().env,
           NODE_ENV: 'test',
           DOTENV_CONFIG_QUIET: 'true',
           // Stub is loopback-only; SSRF still blocks non-localhost private IPs.

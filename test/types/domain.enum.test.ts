@@ -54,10 +54,6 @@ describe('Domain enum', () => {
     expect(Domain.CODE).toBe('code');
   });
   
-  it('should have REVIDEO = revideo', () => {
-    expect(Domain.REVIDEO).toBe('revideo');
-  });
-  
   it('should have EMPTY = ""', () => {
     expect(Domain.EMPTY).toBe('');
   });
@@ -72,7 +68,6 @@ describe('Domain enum', () => {
     expect(values).toContain('ascii');
     expect(values).toContain('music');
     expect(values).toContain('code');
-    expect(values).toContain('revideo');
   });
 });
 

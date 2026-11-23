@@ -8,12 +8,8 @@ vi.mock('../../../src/generators/DomainTeaching.js', () => ({ buildDomainTeachin
 // they never knew about, losing the whole reply. Every generator call now
 // tells the model how long it has, so it can size its reasoning to fit.
 
-const source = `<!doctype html><html><head></head><body>
-<div data-composition-id="layers"><div class="clip">Foreground</div></div>
-<script>const tl = gsap.timeline({paused:true});
-tl.to('.clip', {x:100,duration:2}); window.__timelines = {layers:tl};</script>
-</body></html>`;
-const repaired = source.replace('</head>', '<script src="/vendor/gsap/3.15.0/gsap.min.js"></script></head>');
+const source = `<p>not an svg</p>`;
+const repaired = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100"><circle cx="50" cy="50" r="40" fill="#4ee6c8"/></svg>`;
 
 function effectsWith(generate: ReturnType<typeof vi.fn>, timeout?: number, generationWallMs?: number) {
   return createLiminalProductionEffects({
@@ -23,7 +19,7 @@ function effectsWith(generate: ReturnType<typeof vi.fn>, timeout?: number, gener
     ...(generationWallMs !== undefined ? { generationWallMs } : {}),
   });
 }
-const request = () => ({ identity: 'fake/generator', domain: 'hyperframes', prompt: 'Layered parallax',
+const request = () => ({ identity: 'fake/generator', domain: 'svg', prompt: 'Layered parallax',
   startTransport: vi.fn(async () => 1), failTransport: vi.fn(async () => {}) });
 
 describe('generation time budget', () => {

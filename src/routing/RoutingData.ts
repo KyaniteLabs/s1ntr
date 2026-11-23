@@ -13,6 +13,7 @@
  */
 
 import fs from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { homedir } from 'node:os';
 import { Logger } from '../utils/Logger.js';
@@ -40,31 +41,49 @@ export interface RollingPerformance {
 }
 
 const PERFORMANCE_WINDOW = 50; // Keep last 50 records per domain
-const PERF_DIR = path.join(homedir(), '.sinter', 'routing');
+const perfDir = (): string => process.env.SINTER_ROUTING_DIR || path.join(homedir(), '.sinter', 'routing');
+
+const hydrated = new Set<string>();
 
 /**
- * Record a generation outcome for dynamic routing.
- * Also feeds the online Thompson Sampling bandit for continuous learning.
- *
- * @deprecated Audit B1: the read side (`getOptimalModelBandit`,
- * `getRollingPerformance`, `getBanditStats`) has zero production callers.
- * Records accumulate in `~/.sinter/routing/*.json` and the in-memory bandit
- * but are never consulted downstream. The static `DOMAIN_ROUTING_DATA` table
- * is the only routing source consulted today.
+ * Replay persisted, still-verifiable outcomes into the in-memory bandit (once per domain per process), so learning
+ * survives a restart. Records whose signed admission no longer verifies are skipped, never trusted.
+ */
+export function hydrateRoutingBandit(domain: DomainType): number {
+  if (hydrated.has(domain)) return 0;
+  hydrated.add(domain);
+  let n = 0;
+  try {
+    const records = JSON.parse(readFileSync(path.join(perfDir(), `${domain}.json`), 'utf-8')) as RoutingRecord[];
+    for (const r of records) {
+      try { generatorBanditRouter.recordOutcome(r.admission); n++; } catch { /* unverifiable: skip */ }
+    }
+  } catch { /* no history yet */ }
+  return n;
+}
+
+/** Test hook: forget which domains were hydrated. */
+export function resetRoutingHydration(): void { hydrated.clear(); }
+
+/**
+ * Record an owner-admitted generation outcome: persisted to ~/.sinter/routing/<domain>.json and fed to the
+ * Thompson bandit. Production writer: LiminalProductCommandPort owner review. Reader: GeneratorRegistry.route()
+ * behind LIMINAL_ROUTING_BANDIT.
  */
 export async function recordRoutingOutcome(record: RoutingRecord): Promise<void> {
   if (record.admission.domain !== record.domain || record.admission.model !== record.model
     || record.admission.criterionScore !== record.qualityScore) {
     throw new Error('ROUTING_RECORD_ADMISSION_MISMATCH');
   }
+  hydrateRoutingBandit(record.domain);
   const records = await loadRoutingRecords(record.domain);
   records.push(record);
   // Keep only the last PERFORMANCE_WINDOW records
   if (records.length > PERFORMANCE_WINDOW) {
     records.splice(0, records.length - PERFORMANCE_WINDOW);
   }
-  const filePath = path.join(PERF_DIR, `${record.domain}.json`);
-  await fs.mkdir(PERF_DIR, { recursive: true });
+  const filePath = path.join(perfDir(), `${record.domain}.json`);
+  await fs.mkdir(perfDir(), { recursive: true });
   await writeFileAtomic(filePath, JSON.stringify(records));
 
   // Feed the online bandit
@@ -76,7 +95,7 @@ export async function recordRoutingOutcome(record: RoutingRecord): Promise<void>
  */
 async function loadRoutingRecords(domain: DomainType): Promise<RoutingRecord[]> {
   try {
-    const filePath = path.join(PERF_DIR, `${domain}.json`);
+    const filePath = path.join(perfDir(), `${domain}.json`);
     const raw = await fs.readFile(filePath, 'utf-8');
     return JSON.parse(raw);
   } catch (err) {
@@ -88,8 +107,6 @@ async function loadRoutingRecords(domain: DomainType): Promise<RoutingRecord[]> 
 /**
  * Get rolling performance averages for a domain based on actual generation outcomes.
  * Falls back to static AB_TEST_RESULTS if no dynamic data exists.
- *
- * @deprecated Audit B1: zero production callers. See `recordRoutingOutcome`.
  */
 export async function getRollingPerformance(domain: DomainType): Promise<RollingPerformance | null> {
   const records = await loadRoutingRecords(domain);
@@ -116,10 +133,9 @@ export async function getRollingPerformance(domain: DomainType): Promise<Rolling
  * Get the optimal model for a domain using Thompson Sampling bandit.
  * Returns null if the bandit hasn't collected enough data yet
  * (caller should fall back to static DOMAIN_ROUTING_DATA).
- *
- * @deprecated Audit B1: zero production callers. See `recordRoutingOutcome`.
  */
 export function getOptimalModelBandit(domain: DomainType): ModelChoice | null {
+  hydrateRoutingBandit(domain);
   if (!generatorBanditRouter.isReady(domain)) {
     return null;
   }
@@ -128,8 +144,6 @@ export function getOptimalModelBandit(domain: DomainType): ModelChoice | null {
 
 /**
  * Get bandit statistics for monitoring/debugging.
- *
- * @deprecated Audit B1: zero production callers. See `recordRoutingOutcome`.
  */
 export function getBanditStats(domain: DomainType) {
   return generatorBanditRouter.getDomainStats(domain);

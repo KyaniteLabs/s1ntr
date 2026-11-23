@@ -211,7 +211,11 @@ export class ThreeValidator {
     // guaranteed-dark case: a lit material present but no light added.
     const usesLitMaterial = /THREE\.Mesh(?:Standard|Physical|Phong|Lambert|Toon)Material\b/.test(code);
     const hasLight = /THREE\.(?:Ambient|Directional|Point|Spot|Hemisphere|RectArea)Light\b/.test(code);
-    if (usesLitMaterial && !hasLight) {
+    // holospot lights its objects with studio.preset; three.js lights do nothing
+    // to them, and the kit's own recipes use lit-material stand-ins with no lights.
+    // Demanding lights here pushed repairs into breaking the holospot card's rules.
+    const usesHolospot = /\bholo\.(?:apply|card)\s*\(/.test(code) && /\bholospot\b|\/vendor\/holospot\//.test(code);
+    if (usesLitMaterial && !hasLight && !usesHolospot) {
       errors.push('Three.js scene uses a lit material (MeshStandard/Physical/Phong/Lambert/Toon) but adds no light — it will render dark; add a THREE.AmbientLight plus a DirectionalLight/PointLight');
     }
 
@@ -219,7 +223,9 @@ export class ThreeValidator {
     // clips MeshStandardMaterial to blown white (W6a beauty-campaign failure).
     errors.push(...this.validateExposure(code, usesLitMaterial, hasLight));
 
-    const darkBackground = this.findDarkBackgroundColor(code);
+    // holospot paints its own (black) background and replaces the stand-in mesh's
+    // material, so neither literal says anything about what is rendered.
+    const darkBackground = usesHolospot ? null : this.findDarkBackgroundColor(code);
     if (darkBackground) {
       errors.push(`Three.js scene background/clear color ${darkBackground} is too dark for image proof; use a deep mid-tone background so the lit subject reads and mean luminance passes render validation`);
     }
@@ -234,7 +240,7 @@ export class ThreeValidator {
     // cube on white (investor-audit F11). Only flag the guaranteed-invisible
     // case — every material color literal in the scene is dark. A mix of dark
     // and bright materials is a legitimate palette.
-    const darkMaterials = this.findUniformlyDarkMaterialColors(code);
+    const darkMaterials = usesHolospot ? null : this.findUniformlyDarkMaterialColors(code);
     if (darkMaterials) {
       errors.push(`Three.js scene's material colors (${darkMaterials.join(', ')}) are all near-black — the subject will be invisible regardless of lighting; use mid-tone or bright material colors for the primary geometry`);
     }

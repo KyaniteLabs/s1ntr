@@ -1,0 +1,7 @@
+# organ: atelier | data: real command, fake provider
+$ sinter gbg
+[CLI] Resolved provider: openai @ http://127.0.0.1:33991/v1 (model=gpt-5.4)
+[gbg] beads +1 (total 1) | cross-domain threads 0
+[gbg] no unplayed thread above threshold this pass
+# exit: 0
+

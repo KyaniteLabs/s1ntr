@@ -38,9 +38,11 @@ export async function capturePlayableScreenshot(playable: string, screenshot: st
     await page.screenshot({ path: screenshot, timeout: 60_000 });
     // eslint-disable-next-line no-console -- stderr is the capture subprocess error channel
     if (pageErrors) console.error(`SCORE_CAPTURE_PAGE_ERRORS: ${pageErrors}`);
-  } catch {
-    // Browser errors can contain artifact URLs, paths, or page-provided text.
-    throw new Error(`SCORE_CAPTURE_FAILED: ${stage}`);
+  } catch (error) {
+    // Browser errors can contain artifact URLs, paths, or page-provided text, so only the stage and the
+    // typed timeout fact leave this function (Sol L3-16: the caller must tell a deadline from a browser failure).
+    const timedOut = (error as { name?: string } | null)?.name === 'TimeoutError';
+    throw Object.assign(new Error(`SCORE_CAPTURE_FAILED: ${stage}${timedOut ? ' (timeout)' : ''}`), { stage, timedOut });
   } finally {
     await browser?.close();
   }

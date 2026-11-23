@@ -7,6 +7,10 @@
  *
  * Usage:
  *   node scripts/rotation/wave2-run.mjs [--wave 2|3|4] [--max-tasks N]
+ *   node scripts/rotation/wave2-run.mjs --freeze FILE --wave N --dry-resolve
+ *   FILE may define brains[id].rotation.baseUrl and an optional reasoning level.
+ *   A wave's rateSubs[seat] is an ordered list of replacements for an attributed
+ *   429. Evaluator replacements require vision: true in their brain entry.
  *   node scripts/rotation/wave2-run.mjs --wave 4          # freeze.wave4 seats
  *   node scripts/rotation/wave2-run.mjs --harness-smoke   # harness max-tasks=1
  *   node scripts/rotation/wave2-run.mjs --full-harness    # full harness pack
@@ -28,6 +32,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { execSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { runWithRateSubs } from './rate-sub.mjs';
 import { loadGrokOidcAuth } from './grok-auth.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -98,8 +103,23 @@ export function loadWave2SeatMap(freezePath = FREEZE_PATH) {
   return loadWaveSeatMap(freezePath, 2);
 }
 
-export function buildSeatArgv(seat, brain, { wave = '2', outDir, maxTasks = null, extra = [] } = {}) {
-  const t = BRAIN_TRANSPORT[brain];
+export function buildSeatArgv(seat, brain, { wave = '2', outDir, maxTasks = null, extra = [], brains = {} } = {}) {
+  if (typeof brain !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(brain)) {
+    throw new Error('invalid brain identifier');
+  }
+  let t = Object.hasOwn(BRAIN_TRANSPORT, brain) ? BRAIN_TRANSPORT[brain] : null;
+  const configured = brains[brain];
+  if (configured?.rotation) {
+    const { baseUrl, reasoning } = configured.rotation;
+    const url = new URL(baseUrl);
+    if (typeof configured.model !== 'string' || !configured.model.trim() || !['https:', 'http:'].includes(url.protocol) ||
+        url.username || url.password || url.search || url.hash) {
+      throw new Error('rotation requires a model and a credential-free endpoint');
+    }
+    const flags = ['--model', configured.model, '--base-url', baseUrl];
+    if (reasoning) flags.push('--reasoning', reasoning);
+    t = { model: configured.model, flags };
+  }
   if (!t) throw new Error(`unknown brain ${brain} for seat ${seat}`);
   const argv = [
     seat,
@@ -133,6 +153,7 @@ export function parseArgs(argv) {
   let resumeStamp = null;
   let onlySeat = null;
   let wave = 2;
+  let freezePath = FREEZE_PATH;
   /** Default parallel — tour law: observe 4-role contention with other systems. */
   let concurrency = 'parallel'; // parallel | sequential
   /** @type {Set<string>} */
@@ -141,7 +162,10 @@ export function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--max-tasks' && argv[i + 1]) maxTasks = Number.parseInt(argv[++i], 10);
-    else if (a === '--wave' && argv[i + 1]) {
+    else if (a === '--freeze') {
+      if (!argv[i + 1] || argv[i + 1].startsWith('--')) throw new Error('--freeze requires a file');
+      freezePath = path.resolve(argv[++i]);
+    } else if (a === '--wave' && argv[i + 1]) {
       wave = Number.parseInt(argv[++i], 10);
       if (!Number.isFinite(wave) || wave < 1) {
         throw new Error(`--wave must be a positive integer, got ${argv[i]}`);
@@ -177,6 +201,7 @@ export function parseArgs(argv) {
     maxTasks,
     harnessMode,
     dryResolve,
+    freezePath,
     resumeStamp,
     onlySeat,
     concurrency,
@@ -216,6 +241,9 @@ export function resolveGitTip(repo = REPO) {
  */
 export function buildWave2Plan({
   seats,
+  brains = {},
+  rateSubs = {},
+  resumeCheckpoint = null,
   maxTasks = null,
   harnessMode = 'full',
   skipSeats = [],
@@ -231,6 +259,12 @@ export function buildWave2Plan({
   for (const seat of order) {
     const brain = seats[seat];
     const outDir = path.join(root, `${seat}-${String(brain).toLowerCase()}`);
+    const chain = rateSubs[seat] ?? [];
+    const ids = Array.isArray(chain) ? [brain, ...chain] : [];
+    if (!ids.length || ids.some(id => typeof id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(id)) ||
+        new Set(ids.map(id => id.toLowerCase())).size !== ids.length) {
+      throw new Error('invalid or duplicate brain identifier for ' + seat);
+    }
 
     if (skip.has(seat) || (seat === 'harness' && harnessMode === 'skip')) {
       plan.push({
@@ -244,14 +278,18 @@ export function buildWave2Plan({
       continue;
     }
 
-    if (resume && seatHasLiveSummary(outDir)) {
+    const prior = resumeCheckpoint?.results?.find(r => r.seat === seat && r.requestedBrain === brain &&
+      r.code === 0 && Array.isArray(r.rateSubs) && chain.includes(r.brain));
+    const resumeDir = prior ? path.join(root, seat + '-' + prior.brain.toLowerCase()) : outDir;
+    if (resume && seatHasLiveSummary(resumeDir)) {
       plan.push({
         seat,
         brain,
         skipped: true,
         skipReason: 'resume-live-summary',
         label: `${seat}-${String(brain).toLowerCase()}-resume-skip`,
-        outDir,
+        outDir: resumeDir,
+        ...(prior && { resumed: prior }),
       });
       continue;
     }
@@ -263,12 +301,21 @@ export function buildWave2Plan({
       outDir,
       maxTasks: seatMax,
       wave: String(wave),
+      brains,
     });
     // K3 high reasoning on generator/harness when seated
     if (brain === 'K3' && !built.argv.includes('--reasoning')) {
       built.argv.push('--reasoning', 'high');
     }
-    plan.push({ seat, brain, skipped: false, outDir, ...built });
+    const substitutes = chain.map(next => {
+      if (!Object.hasOwn(brains, next) || !brains[next]?.rotation) {
+        throw new Error('substitute needs an explicit transport: ' + next);
+      }
+      if (seat === 'evaluator' && brains[next].vision !== true) throw new Error('substitute requires vision');
+      const dest = path.join(root, seat + '-' + next.toLowerCase());
+      return { seat, outDir: dest, ...buildSeatArgv(seat, next, { wave, brains, outDir: dest, maxTasks: seatMax }) };
+    });
+    plan.push({ seat, brain, skipped: false, outDir, ...built, substitutes });
   }
 
   return plan;
@@ -295,7 +342,7 @@ export function buildCheckpoint({
     }
     const r = results.find((x) => x.seat === step.seat || x.label === step.label);
     if (r && r.code === 0 && !r.skipped) {
-      done.push({ seat: step.seat, outDir: step.outDir, label: step.label });
+      done.push({ seat: step.seat, outDir: r.outDir ?? step.outDir, label: r.label ?? step.label });
     } else if (r && r.skipped) {
       skipped.push({ seat: step.seat, reason: r.skipReason || 'skipped', outDir: step.outDir });
     } else {
@@ -319,6 +366,9 @@ export function buildCheckpoint({
       seat: r.seat ?? null,
       label: r.label,
       code: r.code,
+      requestedBrain: r.requestedBrain,
+      brain: r.brain,
+      rateSubs: r.rateSubs,
       skipped: Boolean(r.skipped),
       skipReason: r.skipReason || null,
     })),
@@ -496,8 +546,9 @@ export async function executeWave2Plan(plan, {
   for (const step of plan) {
     if (step.skipped) {
       bySeat.set(step.seat, {
+        ...step.resumed,
         seat: step.seat,
-        label: step.label,
+        label: step.resumed?.label ?? step.label,
         code: 0,
         skipped: true,
         skipReason: step.skipReason,
@@ -516,7 +567,7 @@ export async function executeWave2Plan(plan, {
 
   if (concurrency === 'sequential') {
     for (const step of active) {
-      const r = await runSeat(step, { tip, wave, stamp });
+      const r = await runWithRateSubs(step, runSeat, { tip, wave, stamp });
       bySeat.set(step.seat, r);
       await persist();
     }
@@ -527,7 +578,7 @@ export async function executeWave2Plan(plan, {
     );
     await Promise.all(
       active.map(async (step) => {
-        const r = await runSeat(step, { tip, wave, stamp });
+        const r = await runWithRateSubs(step, runSeat, { tip, wave, stamp });
         bySeat.set(step.seat, r);
         await persist();
         return r;
@@ -549,12 +600,12 @@ async function main() {
   }
 
   const args = parseArgs(process.argv.slice(2));
-  const { seats, fixedJudge, freeze, wave: waveStr, waveKey } = loadWaveSeatMap(
-    FREEZE_PATH,
+  const { seats, fixedJudge, freeze, waveBlock, wave: waveStr, waveKey } = loadWaveSeatMap(
+    args.freezePath,
     args.wave,
   );
   const tip = resolveGitTip();
-  const freezeHash = hashFreezeFile();
+  const freezeHash = hashFreezeFile(args.freezePath);
 
   const stamp = args.resumeStamp
     || new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
@@ -588,7 +639,18 @@ async function main() {
   }
 
   // Fail fast: Grok transport when seated and we will actually run Grok
+  let resumeCheckpoint = null;
+  const checkpointPath = path.join(ROOT, 'wave2-checkpoint.json');
+  if (args.resumeStamp && fsSync.existsSync(checkpointPath)) {
+    resumeCheckpoint = JSON.parse(await fs.readFile(checkpointPath, 'utf8'));
+    if (resumeCheckpoint.freezeHash !== freezeHash || resumeCheckpoint.tip !== tip) {
+      throw new Error('cannot resume with a different freeze or revision');
+    }
+  }
   const planPreview = buildWave2Plan({
+    brains: freeze.brains,
+    rateSubs: waveBlock.rateSubs,
+    resumeCheckpoint,
     seats,
     maxTasks: args.maxTasks,
     harnessMode: args.harnessMode,
@@ -602,7 +664,7 @@ async function main() {
     (s) => !s.skipped && seats[s.seat] === 'Grok',
   );
   let grokMeta = null;
-  if (willRunGrok) {
+  if (willRunGrok && !args.dryResolve) {
     const grok = await loadGrokOidcAuth({ model: 'grok-4.5' });
     if (!process.env.XAI_API_KEY && !process.env.GROK_API_KEY && grok.apiKey) {
       process.env.XAI_API_KEY = grok.apiKey;

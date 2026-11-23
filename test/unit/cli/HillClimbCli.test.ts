@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { runHillClimbCommand, simulateHillClimb } from '../../../src/cli/HillClimbCli.js';
+import { isolatedCliEnv } from '../../helpers/isolatedCli.js';
 
 let dir: string;
 let out: string[];
@@ -219,7 +220,7 @@ describe('bin/sinter hillclimb', () => {
       coverage: 1, ece: 0.1, brier: 0.01,
     }));
     const stdout = execFileSync(process.execPath, ['bin/sinter', 'hillclimb', 'decide', '0.9', calPath], {
-      cwd: process.cwd(), encoding: 'utf8',
+      cwd: process.cwd(), encoding: 'utf8', env: isolatedCliEnv().env,
     });
     expect(stdout).toBe('accept\n');
   });

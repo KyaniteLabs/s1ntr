@@ -15,11 +15,11 @@ const MIC_PREVIEW_HTML = String.raw`<!doctype html>
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sinter Mic Preview</title>
 <style>body{margin:0;background:#07090f;color:#e5e7eb;font-family:Inter,system-ui,sans-serif}main{max-width:940px;margin:0 auto;padding:28px}button{border:1px solid #59e1ff;background:#11131a;color:#e5e7eb;border-radius:6px;padding:10px 14px;font:inherit;cursor:pointer;margin-right:8px}.meter{height:24px;background:#11131a;border:1px solid #334155;border-radius:6px;overflow:hidden;margin:16px 0}.bar{height:100%;width:0;background:linear-gradient(90deg,#58c777,#59e1ff,#f2b84b)}canvas{display:block;width:100%;height:auto;aspect-ratio:16/9;border:1px solid #334155;border-radius:8px;background:#05070f;margin:16px 0}pre{white-space:pre-wrap;background:#11131a;border:1px solid #334155;border-radius:6px;padding:12px}.hint{color:#f2b84b}</style>
 </head>
-<body><main><h1>Sinter Mic Preview</h1><p class="hint">Click Start, then speak, sing, hum, or make noise. Words become prompt text; nonverbal sound becomes synesthetic visual direction.</p><button id="start">Start recording</button><button id="stop" disabled>Stop</button><div class="meter"><div id="bar" class="bar"></div></div><canvas id="scene" width="960" height="540"></canvas><pre id="out">idle</pre></main>
+<body><main><h1>Sinter Mic Preview</h1><p class="hint">Click Start, then speak, hum, or make noise. Words become prompt text; nonverbal sound becomes synesthetic visual direction.</p><button id="start">Start recording</button><button id="stop" disabled>Stop</button><div class="meter"><div id="bar" class="bar"></div></div><canvas id="scene" width="960" height="540"></canvas><pre id="out">idle</pre></main>
 <script>
 let stream,ctx,analyser,timeData,freqData,raf,frames=[],lastSent=0,spokenPrompt='',recognition=null;
 const bar=document.getElementById('bar'),out=document.getElementById('out'),canvas=document.getElementById('scene'),drawCtx=canvas.getContext('2d');
-let glyphs=['speak','sing','hum','noise','image'];
+let glyphs=['speak','hum','noise','image'];
 function rms(values){let s=0;for(const v of values){const x=(v-128)/128;s+=x*x}return Math.sqrt(s/values.length)}
 function centroid(freq){let sum=0,weighted=0;for(let i=0;i<freq.length;i++){sum+=freq[i];weighted+=freq[i]*i}return sum?weighted/sum/freq.length:0}
 async function send(content, done=false, imageBase64){await fetch(location.pathname+'/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content,done,imageBase64})}).catch(()=>{})}

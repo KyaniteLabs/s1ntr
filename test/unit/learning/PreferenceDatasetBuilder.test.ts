@@ -63,6 +63,20 @@ describe('PreferenceDatasetBuilder', () => {
     expect(dataset.pairs[0].winner.quality).toBeGreaterThan(dataset.pairs[0].loser.quality);
   });
 
+  it('a rejected high scorer loses to its neighbours and never wins a score-gap pair (F11)', () => {
+    const builder = new PreferenceDatasetBuilder();
+    const entries = [
+      makeEntry('rejected-high', [0.5], 0.95, { action: 'reject', artifactId: 'rejected-high', capturedAt: new Date().toISOString() }),
+      makeEntry('n1', [0.52], 0.5),
+      makeEntry('n2', [0.2], 0.2),
+    ];
+    const { pairs } = builder.build(entries);
+    expect(pairs.some((p) => p.winner.id === 'rejected-high')).toBe(false);
+    const human = pairs.filter((p) => p.loser.id === 'rejected-high' && p.channel === 'human');
+    expect(human.length).toBeGreaterThanOrEqual(1);
+    expect(human[0].source).toBe('reject');
+  });
+
   it('addSyntheticPair returns a pseudo-label pair, never a human pairwise label', () => {
     const builder = new PreferenceDatasetBuilder();
     const winner = makeEntry('winner', [0.9], 0.9);

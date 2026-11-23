@@ -1,0 +1,39 @@
+## 02-load.txt
+# organ: ledger | step: load | data: real
+$ node <repo>/bin/sinter ledger load <out>/_data/tasks.json
+# cwd: <out>/_proj (repo: <repo>)
+# --- stdout
+Loaded 1 task(s) from <out>/_data/tasks.json
+# --- stderr
+# exit: 0
+
+## 03-list-after-load.txt
+# organ: ledger | step: list-after-load | data: real
+$ node <repo>/bin/sinter ledger list
+# cwd: <out>/_proj (repo: <repo>)
+# --- stdout
+
+  Tasks (1):
+
+  DOG-001 pending      leaf               Surface source-votes stderr in taste ingest
+
+# --- stderr
+# exit: 0
+
+## 04-status.txt
+# organ: ledger | step: status | data: real
+$ node <repo>/bin/sinter ledger status
+# cwd: <out>/_proj (repo: <repo>)
+# --- stdout
+
+  Task Ledger Status
+
+  Total:       1
+  Pending:     1
+  In Progress: 0
+  Completed:   0
+  Failed:      0
+
+# --- stderr
+# exit: 0
+

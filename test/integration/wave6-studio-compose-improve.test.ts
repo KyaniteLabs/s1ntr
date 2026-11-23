@@ -30,6 +30,7 @@ import { createCoupledStudioArtifact } from '../../src/composition/StudioControl
 import { chromiumLaunchOptions } from '../../src/utils/browserPreflight.js';
 import { CreativeRunCoordinator, MemoryCreativeRunPersistence } from '../../src/creative-run/CreativeRunCoordinator.js';
 import { buildTemporalArtifact } from '../../src/creative-intelligence/temporal/TemporalArtifact.js';
+import { isolatedCliEnv } from '../helpers/isolatedCli.js';
 
 const exec = promisify(execFile);
 const digest = (character: string) => character.repeat(64);
@@ -326,7 +327,7 @@ window.Tone = {
       ], {
         cwd: path.resolve('.'),
         env: {
-          ...process.env,
+          ...isolatedCliEnv().env,
           SINTER_STUDIO_LINEAGE_PATH: ledgerPath,
           SINTER_WAVE6_LANE_EXECUTOR: executor,
           SINTER_WAVE6_ALLOW_EXECUTOR_OVERRIDE: '1',
@@ -361,7 +362,7 @@ window.Tone = {
       ], {
         cwd: path.resolve('.'),
         env: {
-          ...process.env,
+          ...isolatedCliEnv().env,
           SINTER_STUDIO_LINEAGE_PATH: ledgerPath,
           SINTER_WAVE6_LANE_EXECUTOR: executor,
         },
@@ -392,7 +393,7 @@ window.Tone = {
       ], {
         cwd: path.resolve('.'),
         env: {
-          ...process.env,
+          ...isolatedCliEnv().env,
           SINTER_STUDIO_LINEAGE_PATH: ledgerPath,
           SINTER_WAVE6_LANE_EXECUTOR: executor,
         },
@@ -420,7 +421,7 @@ window.Tone = {
       ], {
         cwd: path.resolve('.'),
         env: {
-          ...process.env,
+          ...isolatedCliEnv().env,
           SINTER_STUDIO_LINEAGE_PATH: ledgerPath,
           SINTER_WAVE6_LANE_EXECUTOR: executor,
           SINTER_WAVE6_ALLOW_EXECUTOR_OVERRIDE: '1',
@@ -448,7 +449,7 @@ window.Tone = {
       ], {
         cwd: path.resolve('.'),
         env: {
-          ...process.env,
+          ...isolatedCliEnv().env,
           SINTER_STUDIO_LINEAGE_PATH: path.join(dir, 'lineage.jsonl'),
         },
       })).rejects.toMatchObject({ code: 1 });

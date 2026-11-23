@@ -6,7 +6,9 @@ import {
   evaluateVisualPerception,
 } from './HumanPerceptionGuardrails.js';
 import type { PerceptionCheckResult } from './types.js';
-import { analyzeScreenshotBase64, type PixelVisibilityAnalysis } from '../render/DecodedImageVisibility.js';
+import { analyzeScreenshotBase64, decodeImagePixels, type PixelVisibilityAnalysis } from '../render/DecodedImageVisibility.js';
+import { measureValueStructure } from '../render/ValueStructure.js';
+import { measureGlitchLiveness } from '../render/GlitchLiveness.js';
 import { verdictFromMeasure } from '../render/LuminanceVerdict.js';
 
 const screenshotAnalysisCache = new WeakMap<RenderEvidence, {
@@ -48,6 +50,7 @@ function measureFromVisibility(visibility: PixelVisibilityAnalysis): RenderMeasu
     brightFraction: visibility.brightFraction,
     darkFraction: visibility.darkFraction,
     clippedHighlightFraction: visibility.clippedHighlightFraction,
+    clippedBoundsFill: visibility.clippedBoundsFill,
     // LuminanceMeasure documents brightnessStd on the 0..255 luma scale — the
     // same scale verdictFromMeasure consumes above. Normalizing here (FAB-021)
     // made persisted archive measures contradict the calibrated thresholds.
@@ -75,10 +78,36 @@ export async function measureRenderEvidence(evidence: RenderEvidence): Promise<R
       if (lateMeasure.verdict !== 'ok' && measure.verdict === 'ok') {
         lateMeasure.temporalDecay = true;
       }
-      return cacheRenderMeasure(evidence, lateMeasure);
+      return cacheRenderMeasure(evidence, await withGlitchLiveness(
+        await withValueStructure(lateMeasure, evidence.lateScreenshot.dataBase64),
+        evidence.screenshot.dataBase64,
+        evidence.lateScreenshot.dataBase64,
+      ));
     }
   }
-  return cacheRenderMeasure(evidence, measure);
+  return cacheRenderMeasure(evidence, await withValueStructure(measure, evidence.screenshot.dataBase64));
+}
+
+async function withValueStructure(measure: RenderMeasure, dataBase64: string): Promise<RenderMeasure> {
+  try {
+    const valueStructure = measureValueStructure(await decodeImagePixels(Buffer.from(dataBase64, 'base64')));
+    return valueStructure ? { ...measure, valueStructure } : measure;
+  } catch {
+    return measure;
+  }
+}
+
+/** Alive-glitch evidence needs both frames: motion between them is what separates alive from frozen. */
+async function withGlitchLiveness(measure: RenderMeasure, earlyBase64: string, lateBase64: string): Promise<RenderMeasure> {
+  try {
+    const glitchLiveness = measureGlitchLiveness(
+      await decodeImagePixels(Buffer.from(earlyBase64, 'base64')),
+      await decodeImagePixels(Buffer.from(lateBase64, 'base64')),
+    );
+    return glitchLiveness ? { ...measure, glitchLiveness } : measure;
+  } catch {
+    return measure;
+  }
 }
 
 async function hasVisibleScreenshot(evidence: RenderEvidence): Promise<boolean> {
@@ -88,6 +117,17 @@ async function hasVisibleScreenshot(evidence: RenderEvidence): Promise<boolean> 
   const visibility = await analyzeEarlyScreenshot(evidence);
   const measure = measureFromVisibility(visibility);
   if (measure && !evidence.renderMeasure) cacheRenderMeasure(evidence, measure);
+  // Sol L3-07: the late frame is the steady state a viewer keeps, so it decides visibility when one was captured.
+  // A start-up blank is fine if the late frame is healthy; a late blank is not rescued by a healthy first frame;
+  // a late frame that cannot be decoded is bad evidence, never a silent fall back to the early frame.
+  const late = evidence.lateScreenshot;
+  if (late && (late.width ?? 0) > 0 && (late.height ?? 0) > 0) {
+    try {
+      return (await analyzeScreenshotBase64(late.dataBase64)).hasVisibleContent;
+    } catch {
+      return false;
+    }
+  }
   return visibility.hasVisibleContent;
 }
 

@@ -33,4 +33,18 @@ describe('retained domain teaching', () => {
       expect(buildDomainTeaching('tone')).not.toContain('RETAINED_EXEMPLAR_SOURCE');
     });
   }
+  it('a corrupt exemplar tracker keeps the lessons and is reported, not swallowed (Sol G16)', () => {
+    writeFileSync(join(root, '.omx/atelier/best-per-domain.json'), '{not json');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const teaching = buildDomainTeaching('p5');
+    expect(teaching).toContain('RETAINED_P5_LESSON');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('exemplar tracker'));
+  });
+  it('an invalid lessons file is reported while the tracker exemplar survives', () => {
+    writeFileSync(join(root, '.omx/atelier/lessons/hints.json'), '][');
+    writeFileSync(join(root, '.omx/atelier/best-per-domain.json'), JSON.stringify({ p5: { dir: root, mean: 6.7, scoreScale: 10 } }));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    expect(buildDomainTeaching('p5')).toContain('RETAINED_EXEMPLAR_SOURCE');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('system lessons'));
+  });
 });

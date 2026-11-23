@@ -89,7 +89,8 @@ export class FileDreamProjectionStore<T> implements ProjectionStore<T> {
 }
 
 export interface DreamTransferHostComposition {
-  holdout: DreamHoldoutCapability;
+  /** One capability, or a per-study assigner over a precommitted pool (F02). */
+  holdout: DreamHoldoutCapability | ((aggregateId: string) => DreamHoldoutCapability);
   producer: DreamTransferProducer;
   producerIdentityDigest?: string;
   observer: DreamRenderedObserver;
@@ -128,7 +129,8 @@ export class DreamTransferCommandPort {
         throw new Error('DREAM_TRANSFER_EXACT_BUDGET_REQUIRED');
       }
       await this.runner.run({ aggregateId: dream.experimentPlan.aggregateId,
-        holdout: this.host.holdout,
+        holdout: typeof this.host.holdout === 'function'
+          ? this.host.holdout(dream.experimentPlan.aggregateId) : this.host.holdout,
         requiredModalities: [...dream.experimentPlan.requiredModalities],
         producer: this.host.producer,
         producerIdentityDigest: this.host.producerIdentityDigest,
@@ -308,6 +310,9 @@ export class DreamActivationCommandPort {
       || new Set(sources).size !== sources.length) {
       throw new Error('DREAM_ACTIVATION_STUDIES_CORRELATED');
     }
+    // Studies validated against one shared holdout are one observation, however many aggregates ran (F02).
+    const commitments = new Set(studies.map(item => item.dream.experimentPlan.context.transferCommitmentDigest));
+    if (commitments.size !== studies.length) throw new Error('DREAM_ACTIVATION_HOLDOUT_REUSED');
   }
 
   private validate(command: DreamActivationCommand): void {

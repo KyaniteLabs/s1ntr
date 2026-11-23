@@ -55,6 +55,7 @@ function makeDriver(rootDir: string, opts: {
   critiques?: ElementCritique[];
   probeOk?: boolean;
   evolution?: GuiEvolution;
+  eyes?: AtelierTransport[];
 }) {
   const renderer = {
     async renderHtml() { return { succeeded: true, runtimeErrors: 0, renderMs: 200 }; },
@@ -69,7 +70,7 @@ function makeDriver(rootDir: string, opts: {
       async critique() { return []; },
       async probe() { return false; },
     },
-    eyes: [mockEye(opts.critiques ?? [], opts.probeOk ?? true), mockEye(opts.critiques ?? [], opts.probeOk ?? true)],
+    eyes: opts.eyes ?? [mockEye(opts.critiques ?? [], opts.probeOk ?? true), mockEye(opts.critiques ?? [], opts.probeOk ?? true)],
     renderer,
     evolution: opts.evolution ?? new GuiEvolution(),
     baseHtml: fixtureHtml(false),
@@ -157,5 +158,23 @@ describe('Atelier CycleDriver dry-run', () => {
     });
     const report = await second.runCycle(2);
     expect(['deterministic-tie-pairwise-loss', 'pairwise-tiebreak']).toContain(report.decision?.reason);
+  });
+
+  it('a pairwise critique that throws rejects the tie with a reason, never aborts the cycle (#1710)', async () => {
+    const evolution = new GuiEvolution();
+    await makeDriver(dir, { candidateHtml: fixtureHtml(true), evolution }).runCycle(1);
+    // Eye 0 answers the ensemble critique (call 1), then throws on the pairwise calls (call 2+).
+    let calls = 0;
+    const flaky: AtelierTransport = { ...mockEye([], true), async critique() {
+      calls += 1;
+      if (calls > 1) throw new Error('eye transport down');
+      return [];
+    } };
+    const driver = makeDriver(dir, { candidateHtml: fixtureHtml(true), evolution, brainDirective: { id: 'd2' },
+      eyes: [flaky, mockEye([], true)] });
+    const report = await driver.runCycle(2);
+    expect(calls).toBeGreaterThan(1);
+    expect(report.decision?.accepted).toBe(false);
+    expect(report.decision?.reason).toBe('pairwise-critique-failed');
   });
 });
