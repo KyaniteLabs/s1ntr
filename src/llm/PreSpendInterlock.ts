@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   closeSync, mkdirSync, openSync, readFileSync, renameSync,
@@ -328,11 +328,22 @@ interface DurableAuthorizationLedger {
 function claimDurableAuthorization(ledgerPath: string, claim: string, runStartedAt: string, runDeadline: string): void {
   mkdirSync(path.dirname(ledgerPath), { recursive: true, mode: 0o700 });
   const lockPath = `${ledgerPath}.lock`;
-  const tempPath = `${ledgerPath}.tmp-${process.pid}-${Date.now()}`;
+  const tempPath = `${ledgerPath}.tmp-${process.pid}-${randomUUID()}`;
   let lock: number | undefined;
   let failure: Error | undefined;
   try {
-    lock = openSync(lockPath, 'wx', 0o600);
+    const sleepBuf = new Int32Array(new SharedArrayBuffer(4));
+    for (let attempt = 0; attempt < 20; attempt++) {
+      try {
+        lock = openSync(lockPath, 'wx', 0o600);
+        break;
+      } catch (lockErr) {
+        if ((lockErr as NodeJS.ErrnoException).code !== 'EEXIST' || attempt === 19) {
+          throw lockErr;
+        }
+        Atomics.wait(sleepBuf, 0, 0, 15);
+      }
+    }
     let ledger: DurableAuthorizationLedger = {
       schema: 'sinter.wave8-live-authorization-ledger', schemaVersion: 1, claims: [],
       runStartedAt, runDeadline,

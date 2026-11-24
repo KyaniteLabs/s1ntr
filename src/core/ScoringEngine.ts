@@ -33,6 +33,8 @@ import { LLMError } from '../llm/errors.js';
 import type { RenderEvidence, GenerationEvaluation, RenderMeasure } from './types/GenerationEvaluation.js';
 import { ALIVE_GLITCH_SCORE_FLOOR, glitchLivenessSummary } from '../render/GlitchLiveness.js';
 import { OVERMIXED_SCORE_CAP, overmixedRepairAdvice, valueStructureSummary } from '../render/ValueStructure.js';
+import { SPARSE_COVERAGE_MIN_SHARE, frameCoverageSummary, sparseFrameRepairAdvice } from '../render/FrameCoverage.js';
+import { NEAR_FLAT_MAX_STD } from '../render/LuminanceVerdict.js';
 import { evaluateRenderEvidencePerception, measureRenderEvidence } from '../perception/RenderEvidencePerception.js';
 import { DomainEvaluatorRegistry } from './evaluators/DomainEvaluatorRegistry.js';
 import { TIMEOUT_EVALUATOR_MS } from '../constants/limits.js';
@@ -753,6 +755,21 @@ function repairAdviceForRenderMeasure(measure: RenderMeasure) {
   };
 }
 
+function isNearFlatMeasure(measure: RenderMeasure, hasPixelScreenshot: boolean): boolean {
+  return hasPixelScreenshot
+    && measure.brightnessStd !== undefined
+    && Number.isFinite(measure.brightnessStd)
+    && measure.brightnessStd < NEAR_FLAT_MAX_STD;
+}
+
+function repairAdviceForNearFlat(measure: RenderMeasure) {
+  return {
+    issue: `Rendered frame is blank or near-flat: ${renderMeasureSummary(measure)}`,
+    fix: 'Ensure visible foreground geometry renders with clear luminance contrast against the background across the frame.',
+    constraint: `Rendered output must contain visible structure (brightness stddev >= ${NEAR_FLAT_MAX_STD}) before aesthetic evaluation.`,
+  };
+}
+
 /** The judge's brief-difficulty rating: an integer 1-10, or undefined when the reply gave no usable number. */
 export function parseBriefDifficulty(raw: unknown): number | undefined {
   const n = typeof raw === 'number' ? raw : (typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : NaN);
@@ -806,6 +823,17 @@ function applyRenderMeasurePenalty(result: GenerationEvaluation, measure: Render
           ...result,
           score: ALIVE_GLITCH_SCORE_FLOOR,
           reasoning: [result.reasoning, `Alive glitch (${glitchLivenessSummary(live)}): saturated, structured and moving is not broken; score lifted from ${result.score.toFixed(2)} to the ${ALIVE_GLITCH_SCORE_FLOOR} broken-band line.`].filter(Boolean).join(' '),
+          renderMeasure: measure,
+        };
+      }
+      const fc = measure.frameCoverage;
+      if (fc?.sparse) {
+        // Advice only: the score is unchanged, so the judge's reasoning stays the judge's own words. The gallery
+        // archives that reasoning as quoted judge comments for the next brief, which must never quote this warning
+        // as praise (cli-gallery-next-brief). The repair turn reads repairAdvice and renderMeasure.
+        return {
+          ...result,
+          repairAdvice: result.repairAdvice ?? sparseFrameRepairAdvice(fc),
           renderMeasure: measure,
         };
       }
@@ -937,12 +965,16 @@ async function gateRenderedEvidence(evidence: RenderEvidence, domain?: string): 
   }
 
   // Sol L3-08: an audio piece's frame is the player shell, not the work; its pixels never grade the music.
+  const hasPixelScreenshot = Boolean(evidence.screenshot || evidence.lateScreenshot);
   const renderMeasure = domain === 'tone' || domain === 'strudel' ? undefined : await measureRenderEvidence(evidence);
   const perceptionReport = domain ? await evaluateRenderEvidencePerception(evidence, domain) : undefined;
   if (perceptionReport && !perceptionReport.passed) {
     const issueIds = perceptionReport.issues.map(issue => issue.id).join(', ');
     const measuredAdvice = renderMeasure && renderMeasure.verdict !== 'ok'
-      ? repairAdviceForRenderMeasure(renderMeasure) : undefined;
+      ? repairAdviceForRenderMeasure(renderMeasure)
+      : (renderMeasure && isNearFlatMeasure(renderMeasure, hasPixelScreenshot)
+        ? repairAdviceForNearFlat(renderMeasure)
+        : undefined);
     return { renderMeasure, verdict: {
       score: 0,
       confidence: 1,
@@ -953,6 +985,28 @@ async function gateRenderedEvidence(evidence: RenderEvidence, domain?: string): 
         constraint: 'Runtime evidence must satisfy human perception ergonomics before aesthetic evaluation.',
       },
       reasoning: perceptionReport.issues.map(issue => issue.message).join(' '),
+      renderMeasure,
+    } };
+  }
+  // #1744: Gate near-black (too-dark) and blank/near-flat (brightnessStd < 4)
+  // frames before spending a judge LLM call — even when domain is omitted.
+  if (renderMeasure && renderMeasure.verdict === 'too-dark') {
+    return { renderMeasure, verdict: {
+      score: 0,
+      confidence: 1,
+      failureClass: 'render',
+      repairAdvice: repairAdviceForRenderMeasure(renderMeasure),
+      reasoning: `Rendered frame is near-black / too dark (${renderMeasureSummary(renderMeasure)}).`,
+      renderMeasure,
+    } };
+  }
+  if (renderMeasure && isNearFlatMeasure(renderMeasure, hasPixelScreenshot)) {
+    return { renderMeasure, verdict: {
+      score: 0,
+      confidence: 1,
+      failureClass: 'render',
+      repairAdvice: repairAdviceForNearFlat(renderMeasure),
+      reasoning: `Rendered frame is blank or near-flat (std=${renderMeasure.brightnessStd!.toFixed(2)} < ${NEAR_FLAT_MAX_STD}): ${renderMeasureSummary(renderMeasure)}.`,
       renderMeasure,
     } };
   }
@@ -1106,7 +1160,7 @@ issue and fix whenever score < 0.9: name the weakest craft dimension (compositio
     ? (textOnlyJudge ? notVisibleNote.replace('Screenshot', 'Late screenshot') : `\nLate screenshot: attached ${evidence.lateScreenshot.mimeType}${evidence.lateScreenshot.width && evidence.lateScreenshot.height ? ` ${evidence.lateScreenshot.width}x${evidence.lateScreenshot.height}` : ''}`)
     : '\nLate screenshot: not available.';
   const renderMeasureNote = renderMeasure
-    ? `\nRender measure: ${renderMeasureSummary(renderMeasure)}${renderMeasure.glitchLiveness?.alive ? `\nMeasured alive glitch (${glitchLivenessSummary(renderMeasure.glitchLiveness)}): saturated, structured and moving; do not call it broken.` : ''}`
+    ? `\nRender measure: ${renderMeasureSummary(renderMeasure)}${renderMeasure.glitchLiveness?.alive ? `\nMeasured alive glitch (${glitchLivenessSummary(renderMeasure.glitchLiveness)}): saturated, structured and moving; do not call it broken.` : ''}${renderMeasure.frameCoverage?.sparse ? `\nMeasured sparse frame coverage (${frameCoverageSummary(renderMeasure.frameCoverage)}): visible subject covers under ${(SPARSE_COVERAGE_MIN_SHARE * 100).toFixed(0)}% of the canvas.` : ''}`
     : '';
   const audioNote = evidence.audio
     ? `\nMeasured audio: ${evidence.audio.success ? 'audible' : 'inaudible'}; peak ${evidence.audio.peakAmplitude ?? 'n/a'}; rms ${evidence.audio.rmsAmplitude ?? 'n/a'}${(evidence.audio.peakAmplitude ?? 0) > 1 ? ' (peak above 1.0: clipping)' : ''}`

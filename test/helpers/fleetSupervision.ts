@@ -32,8 +32,10 @@ function allCases(): Case[] {
 // These suites run many real child processes: measured at 40+ seconds
 // locally, with a 60-second bound on the standing loop's 50-wave case.
 // The 24-case system-loop suite measured 113s locally (slowest case: 26s).
+// Per-file spawn budgets. system_loop_regressions.py gets 150s: at 60s its wave-restart case hit
+// spawnSync ETIMEDOUT on a loaded 2-slot runner (run 3965, 2026-11-23) while passing in seconds when idle.
 function timeoutFor(filename: string): number {
-  return filename === 'system_loop_regressions.py' ? 60_000
+  return filename === 'system_loop_regressions.py' ? 150_000
     : filename === 'standing_loop_regressions.py' ? 90_000
       : filename === 'art_wave_envelope_regressions.py' ? 15_000 : 45_000;
 }

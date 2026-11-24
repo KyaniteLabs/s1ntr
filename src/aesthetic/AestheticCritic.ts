@@ -95,12 +95,17 @@ export class AestheticCritic {
    * LLM-as-Judge is slower but produces reasoning-aware scores.
    * Use the heuristic path for real-time feedback during generation loops,
    * and the LLM path for final evaluation.
+   *
+   * `brief` is the user's creative brief (#1853). When given, the judge checks
+   * every visual element the brief names and missing ones lower the score and
+   * come back as `brief-coverage` warnings. Omitted, the judge is unchanged.
    */
   async critiqueWithLLM(
     code: string,
     domain: string = 'p5',
     config?: Partial<CriticConfig>,
     imageInputs?: import('../llm/ProviderTypes.js').ProviderImageInput[],
+    brief?: string,
   ): Promise<AestheticReport | LLMJudgeResult> {
     if (!this.llmClient) {
       // No LLM available — fall back to heuristic critics
@@ -111,7 +116,8 @@ export class AestheticCritic {
 
     // Run both paths in parallel: heuristic + LLM
     const heuristicReport = this.critique(code, config);
-    const llmReport = await analyzeWithLLMJudge(code, domain, this.llmClient, constraints, {}, imageInputs);
+    const judgeConfig = brief && brief.trim() ? { brief } : {};
+    const llmReport = await analyzeWithLLMJudge(code, domain, this.llmClient, constraints, judgeConfig, imageInputs);
 
     // Blend: weight LLM score more heavily (0.7 LLM + 0.3 heuristic)
     // unless the LLM call failed

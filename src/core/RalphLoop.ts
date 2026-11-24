@@ -428,8 +428,9 @@ export class RalphLoop {
         const { spawn } = await import('child_process');
 
         // Decode audio file to raw PCM (s16le, mono, 44100Hz) via ffmpeg
-        // Use spawn with timeout to prevent zombie processes
+        // Use spawn with timeout and file-only protocol whitelist to prevent SSRF/zombies
         const ffmpegProcess = spawn('ffmpeg', [
+          '-protocol_whitelist', 'file',
           '-i', normalizedOptions.voiceFile,
           '-f', 's16le',
           '-ac', '1',
@@ -440,15 +441,18 @@ export class RalphLoop {
 
         // Set up timeout to kill hanging processes
         const FFMPEG_TIMEOUT_MS = 30000; // 30 seconds
+        let ffmpegExited = false;
+        let killTimer: ReturnType<typeof setTimeout> | undefined;
         const timeout = setTimeout(() => {
           Logger.warn('RalphLoop', 'ffmpeg timeout reached, killing process');
           ffmpegProcess.kill('SIGTERM');
-          // Force kill after grace period
-          setTimeout(() => {
-            if (!ffmpegProcess.killed) {
+          // Force kill after grace period if process has not actually exited
+          killTimer = setTimeout(() => {
+            if (!ffmpegExited) {
               ffmpegProcess.kill('SIGKILL');
             }
           }, 5000);
+          killTimer.unref?.();
         }, FFMPEG_TIMEOUT_MS);
 
         // Collect stdout data
@@ -457,11 +461,18 @@ export class RalphLoop {
 
         // Wait for process to complete
         const exitCode = await new Promise<number | null>((resolve) => {
-          ffmpegProcess.on('close', (code) => resolve(code));
-          ffmpegProcess.on('error', () => resolve(null));
+          ffmpegProcess.on('close', (code) => {
+            ffmpegExited = true;
+            resolve(code);
+          });
+          ffmpegProcess.on('error', () => {
+            ffmpegExited = true;
+            resolve(null);
+          });
         });
 
         clearTimeout(timeout);
+        if (killTimer) clearTimeout(killTimer);
 
         if (exitCode !== 0) {
           throw new LLMGenerationError(`ffmpeg exited with code ${exitCode}`, { model: 'ffmpeg' });
@@ -470,7 +481,8 @@ export class RalphLoop {
         const pcmBuffer = Buffer.concat(chunks);
 
         // Convert Int16 PCM to Float32 (-1.0 to 1.0)
-        const int16 = new Int16Array(pcmBuffer.buffer, pcmBuffer.byteOffset, pcmBuffer.byteLength / 2);
+        const sampleCount = Math.floor(pcmBuffer.byteLength / 2);
+        const int16 = new Int16Array(pcmBuffer.buffer, pcmBuffer.byteOffset, sampleCount);
         const float32 = new Float32Array(int16.length);
         for (let i = 0; i < int16.length; i++) {
           float32[i] = int16[i] / 32768;
@@ -629,6 +641,7 @@ export class RalphLoop {
       iteration++;
       let generationDurationMs = 0;
       let evaluationDurationMs = 0;
+      const evoRestores: Array<() => void> = [];
 
       try {
         // Emit thoughts during generation for chat display
@@ -660,7 +673,6 @@ export class RalphLoop {
 
         // DF3 Phase 8: Apply EvolutionEngine proposals for this iteration only
         let evoProposal: EvolutionProposal | undefined;
-        const evoRestores: Array<() => void> = [];
         if (evolutionEngine && recentScores.length > 2) {
           const rawProposal = evolutionEngine.propose();
           if (rawProposal) {
@@ -1590,6 +1602,8 @@ export class RalphLoop {
             // rendered artifact, not code alone. critiqueWithLLM falls back to
             // the heuristic critics when no LLM client is wired. Without render
             // evidence, keep the existing heuristic path untouched.
+            // The user's prompt goes along as the brief, so missing named
+            // elements come back as brief-coverage warnings for the repair turn.
             const aestheticConfig = normalizedOptions.aestheticConfig as unknown as Partial<import('../aesthetic/types.js').CriticConfig>;
             const aestheticReport = iterationScreenshot
               ? await critic.critiqueWithLLM(
@@ -1597,6 +1611,8 @@ export class RalphLoop {
                   String(normalizedOptions.collabDomain || 'p5'),
                   aestheticConfig,
                   [iterationScreenshot],
+                  // #1853: the judge checks every element the user's brief names.
+                  prompt,
                 )
               : critic.critique(
                   currentCode,
@@ -2037,31 +2053,31 @@ export class RalphLoop {
           await persistence.saveIteration(iteration, currentCode);
           await persistence.saveMergeStep(iteration);
           persistedCurrentIteration = true;
+        }
 
-          // Attempt video render for video-domain code (revideo/hyperframes)
-          try {
-            const detectedDomain = CodeValidator.detectDomain(currentCode);
-            if (detectedDomain === 'revideo' || detectedDomain === 'hyperframes') {
-              const { Exporter } = await import('../export/Exporter.js');
-              const videoFs = await import('node:fs/promises');
-              const videoOutDir = path.join(normalizedOptions.galleryDir, normalizedOptions.project, 'video');
-              await videoFs.mkdir(videoOutDir, { recursive: true });
-              const videoPath = path.join(videoOutDir, `v${iteration}-${detectedDomain}.mp4`);
-              const exporter = new Exporter();
-              await exporter.exportVideo(currentCode, videoPath, { domain: detectedDomain, fps: 30 });
-              Logger.info('RalphLoop', `Video rendered: ${videoPath}`);
-              // Save video metadata alongside code iteration
-              try {
-                const gallery = new (await import('../gallery/Gallery.js')).Gallery(normalizedOptions.galleryDir);
-                await gallery.saveVideoIteration(normalizedOptions.project, iteration, currentCode, videoPath, detectedDomain);
-              } catch (galleryErr) {
-                Logger.warn('RalphLoop', 'Failed to save video iteration metadata:', galleryErr instanceof Error ? galleryErr.message : galleryErr);
-              }
+        // Attempt video render for video-domain code (revideo/hyperframes)
+        try {
+          const detectedDomain = CodeValidator.detectDomain(currentCode);
+          if (detectedDomain === 'revideo' || detectedDomain === 'hyperframes') {
+            const { Exporter } = await import('../export/Exporter.js');
+            const videoFs = await import('node:fs/promises');
+            const videoOutDir = path.join(normalizedOptions.galleryDir, normalizedOptions.project, 'video');
+            await videoFs.mkdir(videoOutDir, { recursive: true });
+            const videoPath = path.join(videoOutDir, `v${iteration}-${detectedDomain}.mp4`);
+            const exporter = new Exporter();
+            await exporter.exportVideo(currentCode, videoPath, { domain: detectedDomain, fps: 30 });
+            Logger.info('RalphLoop', `Video rendered: ${videoPath}`);
+            // Save video metadata alongside code iteration
+            try {
+              const gallery = new (await import('../gallery/Gallery.js')).Gallery(normalizedOptions.galleryDir);
+              await gallery.saveVideoIteration(normalizedOptions.project, iteration, currentCode, videoPath, detectedDomain);
+            } catch (galleryErr) {
+              Logger.warn('RalphLoop', 'Failed to save video iteration metadata:', galleryErr instanceof Error ? galleryErr.message : galleryErr);
             }
-          } catch (videoErr) {
-            // Non-blocking: video render failure should not stop the loop
-            Logger.warn('RalphLoop', 'Video render skipped:', videoErr instanceof Error ? videoErr.message : videoErr);
           }
+        } catch (videoErr) {
+          // Non-blocking: video render failure should not stop the loop
+          Logger.warn('RalphLoop', 'Video render skipped:', videoErr instanceof Error ? videoErr.message : videoErr);
         }
 
         // Git: auto-commit iteration (agent manages this behind the scenes)
@@ -2154,11 +2170,6 @@ export class RalphLoop {
           break;
         }
 
-        // DF3 Phase 8: Restore any temporarily mutated loop settings
-        for (const restore of evoRestores) {
-          restore();
-        }
-
       } catch (error) {
         if (isAbortError(error) || normalizedOptions.signal?.aborted) {
           completed = false;
@@ -2207,6 +2218,11 @@ export class RalphLoop {
         });
         if (!carried) {
           Logger.warn('RalphLoop', `iteration ${iteration} failed and no earlier code exists: the next iteration carries only the error text (${errorText.slice(0, 200)})`);
+        }
+      } finally {
+        // DF3 Phase 8: Always restore temporarily mutated loop settings, even on break/continue/throw
+        for (const restore of evoRestores) {
+          restore();
         }
       }
     }

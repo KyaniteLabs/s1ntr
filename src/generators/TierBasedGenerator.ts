@@ -331,12 +331,16 @@ export abstract class TierBasedGenerator {
       + ' note up to two concrete improvements you observed about the system, prompts, tools,'
       + ' or process around this task. End your response with a line exactly:'
       + ' IMPROVE: <one short observation or NONE>';
+    const isNonVisualDomain = /audio|music|tone|strudel|text|ascii|caption|creative-writing/i.test(this.domain);
+    const frameFillGuardrail = isNonVisualDomain
+      ? ''
+      : '\n\nFRAME COVERAGE: Fill the full viewport/canvas with your composition — never leave a tiny isolated sprite or corner cluster floating in mostly empty background.';
     const assembledSystem = this.tier === 'tiny'
       ? (builtPrompt.system || '')
       : `${builtPrompt.system || ''}${harnessHint ? `\n\n${harnessHint}` : ''}${dualMandateClause}`;
     const systemPrompt = (assembledSystem.trim().length > 0
       ? assembledSystem
-      : domainSystemFallback) + dualMandateClause;
+      : domainSystemFallback) + frameFillGuardrail + dualMandateClause;
     const userPrompt = this.tier === 'tiny'
       ? (builtPrompt.combined || builtPrompt.user)
       : builtPrompt.user;

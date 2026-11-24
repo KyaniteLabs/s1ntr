@@ -2280,15 +2280,22 @@ if (flags.provider) {
     const providerDefaults = CLI_PROVIDER_DEFAULTS[providerKey];
     // A CLI provider/model selection is a generator override, even when the
     // full loop also evaluates. Keep evaluator, harness, and studio seats pinned.
+    // Set both LIMINAL_* and SINTER_* so neither prefix shadows the CLI flag.
     const envPrefix = 'LIMINAL_GENERATOR';
+    const resolvedBaseUrl = flags.baseUrl || providerDefaults.baseUrl;
     process.env[`${envPrefix}_PROVIDER`] = providerKey;
+    process.env.SINTER_GENERATOR_PROVIDER = providerKey;
     // An explicit --base-url beats the provider default endpoint; both beat any
     // file role config (env-over-file in RoleConfig).
-    process.env[`${envPrefix}_BASE_URL`] = flags.baseUrl || providerDefaults.baseUrl;
-    if (!process.env[`${envPrefix}_MODEL`]) process.env[`${envPrefix}_MODEL`] = providerDefaults.model;
+    process.env[`${envPrefix}_BASE_URL`] = resolvedBaseUrl;
+    process.env.SINTER_GENERATOR_BASE_URL = resolvedBaseUrl;
+    if (!process.env.SINTER_GENERATOR_MODEL && !process.env[`${envPrefix}_MODEL`]) {
+      process.env[`${envPrefix}_MODEL`] = providerDefaults.model;
+      process.env.SINTER_GENERATOR_MODEL = providerDefaults.model;
+    }
     // Requested, not yet resolved — RoleConfig/loadRoles may still surface a
     // different endpoint after env-over-file, and runtime fallbacks may switch again.
-    console.log(`[CLI] Requested provider: ${providerKey} @ ${process.env[`${envPrefix}_BASE_URL`]} (model=${process.env[`${envPrefix}_MODEL`]})`);
+    console.log(`[CLI] Requested provider: ${providerKey} @ ${process.env[`${envPrefix}_BASE_URL`]} (model=${process.env.SINTER_GENERATOR_MODEL || process.env[`${envPrefix}_MODEL`]})`);
   } else {
     console.error(`Unknown --provider "${flags.provider}".`);
     console.error(`Valid providers: ${CLI_PROVIDER_NAMES.join(', ')}`);
@@ -2297,9 +2304,11 @@ if (flags.provider) {
 }
 if (flags.baseUrl && !flags.provider) {
   // --base-url without --provider: still an explicit endpoint override.
+  process.env.SINTER_GENERATOR_BASE_URL = flags.baseUrl;
   process.env.LIMINAL_GENERATOR_BASE_URL = flags.baseUrl;
 }
 if (flags.model) {
+  process.env.SINTER_GENERATOR_MODEL = flags.model;
   process.env.LIMINAL_GENERATOR_MODEL = flags.model;
 }
 
@@ -4647,7 +4656,7 @@ else if (cmd === 'best-of') {
   const { resolveSinterProjectRoot } = await import('../dist/fs/projectRoot.js');
   const entropy = await harvestProjectEntropy(resolveSinterProjectRoot());
   boLog(`[best-of] entropy ${entropy.quality}/${entropy.source} seed=${entropy.seed} phrase="${entropy.phrase}"`);
-  const outcome = runTournament(prompt, N, {
+  const outcome = await runTournament(prompt, N, {
     log: boLog,
     entropyPhrase: entropy.quality === 'harvested' ? entropy.phrase : undefined,
     rejectDir: path.join(process.cwd(), '.omx', 'atelier', 'tournament-rejects'),
@@ -4692,7 +4701,7 @@ else if (cmd === 'best-of') {
   }
   const best = outcome.winner;
   const scoredCount = outcome.scoredCount;
-  console.log(`[best-of] tournament of ${scoredCount}: winner mean=${best.mean.toFixed(2)}${outcome.runnerUp ? `, runner-up ${outcome.runnerUp.mean.toFixed(2)}` : ''}`);
+  console.log(`[best-of] tournament of ${scoredCount}: winner mean=${best.mean.toFixed(2)}${outcome.runnerUp ? `, runner-up ${outcome.runnerUp.mean.toFixed(2)}` : ''}${outcome.diversityRanked ? ' (runner-up chosen for a different look)' : ''}`);
   boLog(`[best-of] tournament of ${scoredCount}: winner ${path.basename(best.dir)} mean=${best.mean.toFixed(2)}${outcome.runnerUp ? ` (runner-up ${outcome.runnerUp.mean.toFixed(2)})` : ''}`);
   console.log(`Saved: ${best.dir}`);
 }
@@ -5001,7 +5010,8 @@ else if (cmd === 'sss-score') {
         // glm-5.3 flagship text eye — probe evidence 2026-10-08: paas/v4
         // rejects images (error 1210), anthropic wire delivers an image the
         // model cannot access. It judges the descriptor + source instead.
-        const gm = sinterCfg.providers.glm;
+        const gm = sinterCfg.providers?.glm;
+        if (!gm?.apiKey) throw new Error('GLM API key not configured');
         const ctx = await textJudgeContext();
         const res = await callJudge(eye.vendor, () => fetch('https://api.z.ai/api/anthropic/v1/messages', { method: 'POST',
           headers: { 'x-api-key': gm.apiKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
@@ -5019,7 +5029,8 @@ else if (cmd === 'sss-score') {
         if (d?.payload) acceptJudge(secondEyeVendor, judgeText(d.payload), { model: secondEye.model, status: res.status, raw: d.raw });
       } else if (eye.vendor === glmVendor) {
         // Eye C: glm-5.3-flash (vision-verified on this wire, 2026-10-08) — third opinion.
-        const gm = sinterCfg.providers.glm;
+        const gm = sinterCfg.providers?.glm;
+        if (!gm?.apiKey) throw new Error('GLM API key not configured');
         const res = await callJudge(glmVendor, () => fetch('https://api.z.ai/api/anthropic/v1/messages', { method: 'POST',
           headers: { 'x-api-key': gm.apiKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
           body: JSON.stringify({ model: 'glm-5.3-flash', max_tokens: 1500, thinking: { type: 'disabled' }, messages: [{ role: 'user', content: [
@@ -5274,10 +5285,10 @@ else if (cmd === 'gui-evolve') {
     specBrief: 'Operator instrument for a multi-model generative-art agent. Task axes: every operator verb reachable, real state visible fast, honest error states, controls findable. Not a chat app.',
   });
   const withRetry = async (op) => { try { return await op(); } catch (e) { if (!isTransientTransportError(e)) throw e; console.log(`[atelier] transport hiccup (${String(e.message).slice(0, 90)}), retrying…`); await new Promise(r => setTimeout(r, 15000)); return await op(); } };
+  const cyclesDirPath = path.join(process.cwd(), '.omx', 'atelier', 'cycles');
+  const baseCycle = fs.existsSync(cyclesDirPath) ? fs.readdirSync(cyclesDirPath).length : 0;
   for (let i = 0; i < n; i += 1) {
-    const cyclesDirSeen = fs.existsSync(path.join(process.cwd(), '.omx', 'atelier', 'cycles'))
-      ? fs.readdirSync(path.join(process.cwd(), '.omx', 'atelier', 'cycles')).length : 0;
-    const nextCycle = cyclesDirSeen + i + 1;
+    const nextCycle = baseCycle + i + 1;
     console.log(`[atelier] cycle ${nextCycle} starting`);
     const report = await withRetry(() => driver.runCycle(nextCycle));
     console.log(`[atelier] cycle ${report.cycle}: ${report.decision?.accepted ? 'ADMITTED' : 'rejected'} (${report.decision?.reason}) coverage=${report.metrics?.coverage?.toFixed(2)} findability=${report.metrics?.findability?.toFixed(2)} bonus=${report.bonusObservations}`);

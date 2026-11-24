@@ -92,7 +92,10 @@ export class LivingSiteDaemon {
 		Logger.info("LivingSiteDaemon", "Generators registered");
 	}
 
-	generatorAttemptLimit(): number {
+	generatorAttemptLimit(slotId?: string): number {
+		if (slotId) {
+			return this.slotManager.getSlot(slotId) ? MAX_CHALLENGER_ITERATIONS : 0;
+		}
 		return this.slotManager.getAllSlots().length * MAX_CHALLENGER_ITERATIONS;
 	}
 
@@ -100,13 +103,18 @@ export class LivingSiteDaemon {
 	 * Run a single evolution cycle.
 	 * For each slot: evaluate challengers → promote → generate new challengers.
 	 */
-	async runCycle(dryRun = false): Promise<void> {
+	async runCycle(dryRun = false, slotId?: string): Promise<void> {
 		if (!this.posthog.isConfigured()) {
 			Logger.info("LivingSiteDaemon", "PostHog not configured, skipping cycle");
 			return;
 		}
 
-		const slots = this.slotManager.getAllSlots();
+		const allSlots = this.slotManager.getAllSlots();
+		const slots = slotId ? allSlots.filter((s) => s.id === slotId) : allSlots;
+		if (slotId && slots.length === 0) {
+			Logger.warn("LivingSiteDaemon", `Requested slot "${slotId}" not found, skipping cycle`);
+			return;
+		}
 
 		for (const slot of slots) {
 			// 1. Evaluate challenger if one exists

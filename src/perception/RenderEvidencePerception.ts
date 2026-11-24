@@ -6,10 +6,16 @@ import {
   evaluateVisualPerception,
 } from './HumanPerceptionGuardrails.js';
 import type { PerceptionCheckResult } from './types.js';
-import { analyzeScreenshotBase64, decodeImagePixels, type PixelVisibilityAnalysis } from '../render/DecodedImageVisibility.js';
+import {
+  analyzeScreenshotBase64,
+  decodeImagePixels,
+  type DecodedImagePixels,
+  type PixelVisibilityAnalysis,
+} from '../render/DecodedImageVisibility.js';
 import { measureValueStructure } from '../render/ValueStructure.js';
 import { measureGlitchLiveness } from '../render/GlitchLiveness.js';
-import { verdictFromMeasure } from '../render/LuminanceVerdict.js';
+import { measureFrameCoverage } from '../render/FrameCoverage.js';
+import { NEAR_FLAT_MAX_STD, verdictFromMeasure } from '../render/LuminanceVerdict.js';
 
 const screenshotAnalysisCache = new WeakMap<RenderEvidence, {
   dataBase64: string;
@@ -79,22 +85,32 @@ export async function measureRenderEvidence(evidence: RenderEvidence): Promise<R
         lateMeasure.temporalDecay = true;
       }
       return cacheRenderMeasure(evidence, await withGlitchLiveness(
-        await withValueStructure(lateMeasure, evidence.lateScreenshot.dataBase64),
+        await withFrameDiagnostics(lateMeasure, evidence.lateScreenshot.dataBase64),
         evidence.screenshot.dataBase64,
         evidence.lateScreenshot.dataBase64,
       ));
     }
   }
-  return cacheRenderMeasure(evidence, await withValueStructure(measure, evidence.screenshot.dataBase64));
+  return cacheRenderMeasure(evidence, await withFrameDiagnostics(measure, evidence.screenshot.dataBase64));
 }
 
-async function withValueStructure(measure: RenderMeasure, dataBase64: string): Promise<RenderMeasure> {
+async function withFrameDiagnostics(measure: RenderMeasure, dataBase64: string): Promise<RenderMeasure> {
   try {
-    const valueStructure = measureValueStructure(await decodeImagePixels(Buffer.from(dataBase64, 'base64')));
-    return valueStructure ? { ...measure, valueStructure } : measure;
+    const decoded = await decodeImagePixels(Buffer.from(dataBase64, 'base64'));
+    return withFrameCoverage(withValueStructure(measure, decoded), decoded);
   } catch {
     return measure;
   }
+}
+
+function withValueStructure(measure: RenderMeasure, decoded: DecodedImagePixels): RenderMeasure {
+  const valueStructure = measureValueStructure(decoded);
+  return valueStructure ? { ...measure, valueStructure } : measure;
+}
+
+function withFrameCoverage(measure: RenderMeasure, decoded: DecodedImagePixels): RenderMeasure {
+  const frameCoverage = measureFrameCoverage(decoded);
+  return frameCoverage ? { ...measure, frameCoverage } : measure;
 }
 
 /** Alive-glitch evidence needs both frames: motion between them is what separates alive from frozen. */
@@ -177,17 +193,48 @@ export async function evaluateRenderEvidencePerception(
     kind: 'visual',
     hasVisibleContent: await hasVisibleScreenshot(evidence),
   });
-  if (measure?.verdict !== 'highlight-clipped') return visual;
-  return {
-    ...visual,
-    passed: false,
-    issues: [...visual.issues, {
+  const issues = [...visual.issues];
+  if (measure?.verdict === 'highlight-clipped') {
+    issues.push({
       id: 'visual.highlight-clipped',
       message: 'Concentrated clipped highlights erase visible structure in a darker frame.',
       severity: 'error',
       domain: 'visual',
       metric: 'clippedHighlightFraction',
       value: measure.clippedHighlightFraction ?? 0,
-    }],
+    });
+  }
+  if (measure?.verdict === 'too-dark' && !issues.some(issue => issue.id === 'visual.no-visible-content')) {
+    issues.push({
+      id: 'visual.too-dark',
+      message: 'Rendered frame is near-black / too dark to perceive visible structure.',
+      severity: 'error',
+      domain: 'visual',
+      metric: 'meanLuminance',
+      value: measure.meanLuminance,
+    });
+  }
+  const hasScreenshot = Boolean(evidence.screenshot || evidence.lateScreenshot);
+  if (
+    hasScreenshot
+    && measure?.brightnessStd !== undefined
+    && Number.isFinite(measure.brightnessStd)
+    && measure.brightnessStd < NEAR_FLAT_MAX_STD
+    && !issues.some(issue => issue.id === 'visual.no-visible-content' || issue.id === 'visual.too-dark')
+  ) {
+    issues.push({
+      id: 'visual.near-flat',
+      message: `Rendered frame is blank or near-flat (brightnessStd=${measure.brightnessStd.toFixed(2)} < ${NEAR_FLAT_MAX_STD}).`,
+      severity: 'error',
+      domain: 'visual',
+      metric: 'brightnessStd',
+      value: measure.brightnessStd,
+    });
+  }
+  if (issues.length === visual.issues.length) return visual;
+  return {
+    ...visual,
+    passed: false,
+    issues,
   };
 }

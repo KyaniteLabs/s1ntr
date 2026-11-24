@@ -13,6 +13,13 @@
  */
 
 import { evaluatorCall } from '../../core/EvaluatorScope.js';
+import {
+  applyBriefCoveragePenalty,
+  extractBriefElements,
+  formatBriefCoveragePrompt,
+  parseBriefCoverage,
+  type BriefCoverageReport,
+} from '../../evaluation/BriefCoverage.js';
 import { JUDGE_PASSING_THRESHOLD } from '../qualityFloor.js';
 import type { AestheticReport, AestheticViolation, DesignConstraints } from '../types.js';
 import type { ProviderImageInput } from '../../llm/ProviderTypes.js';
@@ -33,6 +40,8 @@ export interface LLMJudgeConfig {
   includeReasoning: boolean;
   /** Which dimensions to evaluate */
   dimensions: JudgeDimension[];
+  /** Optional creative brief whose named visual elements must be checked */
+  brief?: string;
 }
 
 export type JudgeDimension = 'color' | 'layout' | 'typography' | 'sound' | 'overall' | 'creativity' | 'coherence';
@@ -42,6 +51,8 @@ export interface LLMJudgeResult extends AestheticReport {
   reasoning?: string;
   /** Per-dimension scores */
   dimensionScores?: Record<string, number>;
+  /** Brief element coverage report when a brief was supplied */
+  briefCoverage?: BriefCoverageReport;
   /** Whether the LLM call succeeded */
   usedLLM: boolean;
 }
@@ -208,7 +219,7 @@ function parseJudgeResponse(response: string): {
   }
 
   // Parse REASONING
-  const reasonMatch = response.match(/REASONING:\s*(.+?)(?:\nVIOLATIONS:|$)/is);
+  const reasonMatch = response.match(/REASONING:\s*(.+?)(?:\n(?:VIOLATIONS|BRIEF_COVERAGE):|$)/is);
   if (reasonMatch) {
     reasoning = reasonMatch[1].trim();
   }
@@ -260,8 +271,13 @@ export async function analyzeWithLLMJudge(
   }
 
   try {
+    const briefElements = fullConfig.brief ? extractBriefElements(fullConfig.brief) : [];
+    const briefChecklist = briefElements.length > 0
+      ? `\n\n${formatBriefCoveragePrompt(briefElements)}`
+      : '';
     const prompt = buildJudgePrompt(code, domain, constraints)
-      + (imageInputs && imageInputs.length > 0 ? buildImageNote(imageInputs) : '');
+      + (imageInputs && imageInputs.length > 0 ? buildImageNote(imageInputs) : '')
+      + briefChecklist;
     const llmConfig = llm.getConfig?.();
     const provider = llmConfig?.provider
       ?? (llmConfig?.baseUrl ? detectProviderFromUrl(llmConfig.baseUrl) : undefined);
@@ -281,18 +297,38 @@ export async function analyzeWithLLMJudge(
     }
 
     const parsed = parseJudgeResponse(result.code);
-    const passed = parsed.score >= fullConfig.passingThreshold
-      && parsed.violations.filter(v => v.severity === 'error').length === 0;
+    let finalScore = parsed.score;
+    const violations = [...parsed.violations];
+    let briefCoverage: BriefCoverageReport | undefined;
 
-    Logger.info('LLMJudgeCritic', `LLM judge score: ${parsed.score.toFixed(3)} for ${domain} (passed=${passed})`);
+    if (briefElements.length > 0) {
+      briefCoverage = parseBriefCoverage(result.code, briefElements);
+      if (briefCoverage.parsedFromResponse && briefCoverage.missingElements.length > 0) {
+        const penalized = applyBriefCoveragePenalty(finalScore, briefCoverage);
+        finalScore = penalized.score;
+        for (const missing of penalized.missingElements) {
+          violations.push({
+            rule: 'brief-coverage',
+            severity: 'warning',
+            message: `Missing brief element: ${missing}`,
+          });
+        }
+      }
+    }
+
+    const passed = finalScore >= fullConfig.passingThreshold
+      && violations.filter(v => v.severity === 'error').length === 0;
+
+    Logger.info('LLMJudgeCritic', `LLM judge score: ${finalScore.toFixed(3)} for ${domain} (passed=${passed})`);
 
     return {
-      score: Math.round(parsed.score * 1000) / 1000,
-      violations: parsed.violations,
+      score: Math.round(finalScore * 1000) / 1000,
+      violations,
       passed,
       timestamp: Date.now(),
       reasoning: parsed.reasoning,
       dimensionScores: parsed.dimensionScores,
+      ...(briefCoverage ? { briefCoverage } : {}),
       usedLLM: true,
     };
   } catch (error) {

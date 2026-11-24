@@ -99,3 +99,34 @@ describe('AestheticCritic.critiqueWithLLM — image forwarding', () => {
     expect(typeof report.score).toBe('number');
   });
 });
+
+describe('AestheticCritic.critiqueWithLLM — brief coverage (#1853)', () => {
+  const judgeWith = (code: string) => {
+    const generate = vi.fn(async () => ({ code, success: true }));
+    const critic = new AestheticCritic();
+    critic.setLLMClient({ generate, getConfig: () => ({ model: 'glm-5v', provider: 'glm', baseUrl: '' }) });
+    return { critic, generate };
+  };
+
+  it('puts every element the brief names into the judge prompt and turns a missing one into a warning', async () => {
+    const { critic, generate } = judgeWith(`${JUDGE_RESPONSE}\nBRIEF_COVERAGE: VHS=absent, feedback tunnel=present, scanlines=absent`);
+    const report = await critic.critiqueWithLLM('function setup() {}', 'p5', undefined, [IMAGE],
+      'VHS feedback tunnel with scanlines');
+    const prompt = String(generate.mock.calls[0]?.[1]);
+    expect(prompt).toContain('Brief coverage checklist');
+    expect(prompt).toContain('1. VHS');
+    expect(prompt).toContain('scanlines');
+    const briefWarnings = report.violations.filter(v => v.rule === 'brief-coverage').map(v => v.message);
+    expect(briefWarnings).toEqual(['Missing brief element: VHS', 'Missing brief element: scanlines']);
+  });
+
+  it('sends the same prompt as before when no brief is given', async () => {
+    const withNone = judgeWith(JUDGE_RESPONSE);
+    const withBlank = judgeWith(JUDGE_RESPONSE);
+    await withNone.critic.critiqueWithLLM('function setup() {}', 'p5', undefined, [IMAGE]);
+    await withBlank.critic.critiqueWithLLM('function setup() {}', 'p5', undefined, [IMAGE], '   ');
+    const prompt = String(withNone.generate.mock.calls[0]?.[1]);
+    expect(prompt.includes('Brief coverage checklist')).toBe(false);
+    expect(String(withBlank.generate.mock.calls[0]?.[1])).toBe(prompt);
+  });
+});

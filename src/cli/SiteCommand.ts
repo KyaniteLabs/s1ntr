@@ -157,13 +157,17 @@ export function startSiteEvolveLoop(
  * One evolution cycle under a journal-reserved, receipted generator grant (same governed path as
  * `sinter fix`). Unique key per cycle: a later cycle must run again, not replay.
  */
-async function runGovernedCycle(daemon: LivingSiteDaemon, dryRun: boolean | undefined): Promise<void> {
+async function runGovernedCycle(
+	daemon: LivingSiteDaemon,
+	dryRun: boolean | undefined,
+	slotId?: string,
+): Promise<void> {
   const { runProductionCliCycleEffect } = await import("./LiminalProductionProviderEffect.js");
   await runProductionCliCycleEffect({
     idempotencyKey: `production-site-evolve:${randomUUID()}`,
-    binding: { surface: "site-evolve", dryRun: dryRun === true },
-    maxGeneratorAttempts: daemon.generatorAttemptLimit(),
-    effect: async () => { await daemon.runCycle(dryRun); return { completed: true }; },
+    binding: { surface: "site-evolve", dryRun: dryRun === true, ...(slotId ? { slot: slotId } : {}) },
+    maxGeneratorAttempts: daemon.generatorAttemptLimit(slotId),
+    effect: async () => { await daemon.runCycle(dryRun, slotId); return { completed: true }; },
   });
 }
 
@@ -189,7 +193,7 @@ export async function runSiteEvolve(
 
 	if (options.once) {
 		Logger.info("SiteCommand", "Running single evolution cycle");
-		await runGovernedCycle(daemon, options.dryRun);
+		await runGovernedCycle(daemon, options.dryRun, options.slot);
 		await posthog.shutdown();
 		return;
 	}
@@ -202,7 +206,7 @@ export async function runSiteEvolve(
 
 	const run = async () => {
 		try {
-			await runGovernedCycle(daemon, options.dryRun);
+			await runGovernedCycle(daemon, options.dryRun, options.slot);
 		} catch (err) {
 			Logger.error("SiteCommand", "Cycle failed:", err);
 		}
@@ -215,13 +219,21 @@ export async function runSiteEvolve(
 	// cannot stack overlapping ticks.
 	const loop = startSiteEvolveLoop(run, config.cycleIntervalMs);
 
-	// Graceful shutdown
-	const shutdown = () => {
-		Logger.info("SiteCommand", "Shutting down...");
-		loop.stop();
-		void posthog.shutdown().then(() => process.exit(0));
-	};
+	// Keep the daemon alive until SIGINT/SIGTERM so callers (including bin/sinter)
+	// do not exit after the first cycle.
+	await new Promise<void>((resolve) => {
+		let shuttingDown = false;
+		const shutdown = () => {
+			if (shuttingDown) return;
+			shuttingDown = true;
+			process.off("SIGINT", shutdown);
+			process.off("SIGTERM", shutdown);
+			Logger.info("SiteCommand", "Shutting down...");
+			loop.stop();
+			void posthog.shutdown().finally(() => resolve());
+		};
 
-	process.on("SIGINT", shutdown);
-	process.on("SIGTERM", shutdown);
+		process.on("SIGINT", shutdown);
+		process.on("SIGTERM", shutdown);
+	});
 }

@@ -85,4 +85,31 @@ describe('Anthropic wire: thinking never eats the answer budget (#1652)', () => 
     await drain().catch(() => undefined);
     expect(sentBody().max_tokens).toBe(131_072);
   });
+
+  // t_86865e92: api.z.ai/api/anthropic rejects max_tokens outside [1, 131072] or
+  // non-integer values with HTTP 400 code 1210, and rejects vendor-prefixed model
+  // ids like glm/glm-5.3 with code 1211.
+  it.each(['glm-5.1', 'glm-5.2', 'glm-5.3'])('%s: clamps wire max_tokens to integer [1, 131072] to prevent Z.ai 400 code 1210', async (model) => {
+    await new AnthropicProvider({ ...glm(model), baseUrl: 'https://api.z.ai/api/anthropic', maxTokens: 131_072 })
+      .generate({ systemPrompt: '', userPrompt: 'draw', maxTokens: 131_072, thinking: { enabled: true, budgetTokens: 16_000 } } as ProviderRequest);
+    const body = sentBody();
+    expect(Number.isInteger(body.max_tokens)).toBe(true);
+    expect(body.max_tokens).toBe(131_072);
+  });
+
+  it('normalizes fractional or non-positive max_tokens and strips glm/ prefix on api.z.ai', async () => {
+    await new AnthropicProvider({ ...glm('glm/glm-5.2'), baseUrl: 'https://api.z.ai/api/anthropic', temperature: Number.NaN })
+      .generate({ systemPrompt: '', userPrompt: 'draw', maxTokens: 0, thinking: { enabled: false } } as ProviderRequest);
+    const body = sentBody() as Record<string, unknown>;
+    expect(body.model).toBe('glm-5.2');
+    expect(body.max_tokens).toBe(4096);
+    expect(body.temperature).toBeUndefined();
+
+    fetchSpy.mockClear();
+    await new AnthropicProvider({ ...glm('glm-5.1'), baseUrl: 'https://api.z.ai/api/anthropic' })
+      .generate({ systemPrompt: '', userPrompt: 'draw', maxTokens: 4096.7, thinking: { enabled: true, budgetTokens: 8000.9 } } as ProviderRequest);
+    const second = sentBody();
+    expect(second.max_tokens).toBe(12_096);
+    expect(second.thinking?.budget_tokens).toBe(8000);
+  });
 });

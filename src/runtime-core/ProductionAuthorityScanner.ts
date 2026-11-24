@@ -69,11 +69,20 @@ function runtimeImports(source: string): string {
 function isGovernedSafeExport(source: string, specifier: string, resolved: string): boolean {
   if (resolved !== 'src/core/ScoringEngine.ts') return false;
   const escaped = specifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const match = source.match(new RegExp(
-    `import\\s*\\{([^}]+)\\}\\s*from\\s*['"]${escaped}['"]`, 'm'));
-  if (!match) return false;
-  const names = match[1]!.split(',').map(name => name.trim().split(/\s+as\s+/)[0]);
-  return names.length === 1 && names[0] === 'scoreRenderedEvidence';
+  // Every import/export referencing this specifier must be a named import of
+  // `scoreRenderedEvidence` only (no default, namespace, dynamic, or extra named imports).
+  const allRefs = [...source.matchAll(new RegExp(
+    `(?:import|export)[^;\\n]*['"]${escaped}['"]|(?:import|require)\\s*\\(\\s*['"]${escaped}['"]\\s*\\)`, 'gm',
+  ))];
+  if (allRefs.length === 0) return false;
+  const namedOnly = new RegExp(`^\\s*import\\s*\\{([^}]+)\\}\\s*from\\s*['"]${escaped}['"]\\s*$`);
+  return allRefs.every((ref) => {
+    const m = ref[0].match(namedOnly);
+    if (!m) return false;
+    const names = m[1]!.split(',').map(name => name.trim()).filter(Boolean)
+      .map(name => name.split(/\s+as\s+/)[0]);
+    return names.length === 1 && names[0] === 'scoreRenderedEvidence';
+  });
 }
 
 async function resolveImport(
@@ -131,21 +140,24 @@ async function locatorsForFiles(
   root: string, files: readonly string[],
   readSource = (file: string) => readFile(path.join(root, file), 'utf8'),
 ): Promise<string[]> {
-  const locators: string[] = [];
+  const locators = new Set<string>();
   for (const file of files) {
     const source = executableSource(await readSource(file));
     for (const marker of SENSITIVE_PATTERNS) {
-      if (marker.pattern.test(source)) locators.push(`${file}:${marker.kind}`);
+      if (marker.pattern.test(source)) locators.add(`${file}:${marker.kind}`);
     }
   }
-  return locators;
+  return [...locators];
 }
 
 /** Discover production-reachable effect construction; unknown additions fail registry sealing. */
 export async function scanProductionAuthorityLocators(root: string): Promise<readonly string[]> {
   const roots = ['src', 'bin', 'scripts'];
   const files = (await Promise.all(roots.map(async relative => {
-    try { return await filesBelow(root, relative); } catch { return []; }
+    try { return await filesBelow(root, relative); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    }
   }))).flat().filter(file => /\.(?:ts|js|mjs)$/.test(file) || file === 'bin/sinter');
   const locators = await locatorsForFiles(root, files);
   try {

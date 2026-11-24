@@ -33,6 +33,11 @@ export interface ModelCapabilities extends ProviderCapabilities {
    *  rejects anything but 1). Call-site and role temperatures are overridden. */
   temperatureFixed?: number;
   /**
+   * Hard output token ceiling accepted by the model/wire (e.g. z.ai GLM-5.x
+   * rejects max_tokens outside [1, 131072] with HTTP 400 code 1210).
+   */
+  maxOutputTokens?: number;
+  /**
    * On the Anthropic wire this model thinks even when the request does not ask,
    * and ignores `budget_tokens`, so only max_tokens bounds its thinking. The
    * value is the model's output ceiling; the provider sends it as max_tokens so
@@ -132,14 +137,17 @@ const MODEL_CAPABILITIES: Record<string, Partial<ModelCapabilities>> = {
   'deepseek-chat*':     { thinking: false, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 128000, thinkingStyle: 'none', streamingStyle: 'sse' },
 
   // ZhipuAI GLM (International Coding Plan — api.z.ai)
-  // GLM-5.x: 205K context, flagship reasoning models rivaling Claude Opus
+  // GLM-5.x: 205K context, 131072 hard max_tokens ceiling on api.z.ai (probe 2026-11-23: >131072 or <=0 returns HTTP 400 code 1210)
   // GLM-5-Turbo: optimized for agent/coding workflows, 200K context
-  'glm-5v-turbo*':      { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 200000, thinkingStyle: 'reasoning_content', streamingStyle: 'sse' },
-  'glm-5.1*':           { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 205000, thinkingStyle: 'reasoning_content', streamingStyle: 'sse' },
-  'glm-5-turbo*':       { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 200000, thinkingStyle: 'reasoning_content', streamingStyle: 'sse' },
-  // glm-5.3 / glm-5.3-flash on z.ai think by default and ignore budget_tokens (see uncappedThinkingMaxOutput).
-  'glm-5.3*':           { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 205000, thinkingStyle: 'reasoning_content', streamingStyle: 'sse', uncappedThinkingMaxOutput: 131_072 },
-  'glm-5*':             { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 205000, thinkingStyle: 'reasoning_content', streamingStyle: 'sse' },
+  'glm-5v-turbo*':      { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 200000, maxOutputTokens: 131_072, thinkingStyle: 'reasoning_content', streamingStyle: 'sse' },
+  'glm-5.1*':           { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 205000, maxOutputTokens: 131_072, thinkingStyle: 'reasoning_content', streamingStyle: 'sse' },
+  'glm-5.2*':           { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 205000, maxOutputTokens: 131_072, thinkingStyle: 'reasoning_content', streamingStyle: 'sse' },
+  'glm-5-turbo*':       { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 200000, maxOutputTokens: 131_072, thinkingStyle: 'reasoning_content', streamingStyle: 'sse' },
+  // glm-5.3 / glm-5.3-flash / glm-5.4 on z.ai think by default and ignore budget_tokens (see uncappedThinkingMaxOutput).
+  // Live probe 2026-11-23: glm-5.4 is text-only on api.z.ai/api/anthropic (returned "White" on solid red PNG); keep out of VISION_MODEL_PATTERNS.
+  'glm-5.4*':           { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 205000, maxOutputTokens: 131_072, thinkingStyle: 'reasoning_content', streamingStyle: 'sse', uncappedThinkingMaxOutput: 131_072 },
+  'glm-5.3*':           { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 205000, maxOutputTokens: 131_072, thinkingStyle: 'reasoning_content', streamingStyle: 'sse', uncappedThinkingMaxOutput: 131_072 },
+  'glm-5*':             { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 205000, maxOutputTokens: 131_072, thinkingStyle: 'reasoning_content', streamingStyle: 'sse' },
   'glm-4.7*':           { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 200000, thinkingStyle: 'reasoning_content', streamingStyle: 'sse' },
   'glm-4.5*':           { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 128000, thinkingStyle: 'reasoning_content', streamingStyle: 'sse' },
   'glm-4-plus*':        { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 128000, thinkingStyle: 'reasoning_content', streamingStyle: 'sse' },
@@ -174,6 +182,9 @@ const MODEL_CAPABILITIES: Record<string, Partial<ModelCapabilities>> = {
   'gpt-6*':                 { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 1050000, thinkingStyle: 'effort_level', streamingStyle: 'sse', temperatureFixed: 1 },
   'gpt-5.6-luna*':          { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 1050000, thinkingStyle: 'effort_level', streamingStyle: 'sse' },
   'openai/gpt-5.6-luna*':   { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 1050000, thinkingStyle: 'effort_level', streamingStyle: 'sse' },
+  // Gemini 4.x (Neon, Hydrogen, Carbon, Argon) — multimodal + effort_level high reasoning, 1M context (live probe 2026-11-23).
+  'gemini-4*':              { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 1048576, thinkingStyle: 'effort_level', streamingStyle: 'sse' },
+  'google/gemini-4*':       { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 1048576, thinkingStyle: 'effort_level', streamingStyle: 'sse' },
   // Gemini 3.x via OpenAI-compatible proxy (cliproxy / AGY; effort-level thinking)
   'gemini-3.6-flash-high*': { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 1048576, thinkingStyle: 'effort_level', streamingStyle: 'sse' },
   'gemini-3.1-pro-low*':    { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 1048576, thinkingStyle: 'effort_level', streamingStyle: 'sse' },

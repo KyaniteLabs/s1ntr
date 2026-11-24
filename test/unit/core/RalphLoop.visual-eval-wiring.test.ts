@@ -522,8 +522,10 @@ describe('RalphLoop — visual evaluation wiring (#376)', () => {
     });
 
     expect(mockCritiqueWithLLM).toHaveBeenCalledTimes(1);
-    const [code, domain, , imageInputs] = mockCritiqueWithLLM.mock.calls[0]!;
+    const [code, domain, , imageInputs, brief] = mockCritiqueWithLLM.mock.calls[0]!;
     expect(code).toBe('function setup() {} function draw() {}');
+    // #1853: the user's prompt reaches the judge as the brief to check element by element.
+    expect(brief).toBe('create a sketch');
     expect(domain).toBe('p5');
     expect(imageInputs).toEqual([{
       mimeType: 'image/png',

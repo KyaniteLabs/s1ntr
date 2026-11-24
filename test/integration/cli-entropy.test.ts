@@ -35,14 +35,14 @@ describe('sinter entropy', () => {
 });
 
 describe('best-of uses the harvested phrase', () => {
-  it('appends it to every variant prompt, and omits it when none is given', () => {
+  it('appends it to every variant prompt, and omits it when none is given', async () => {
     const seen: string[] = [];
     const deps = { runChild: (p: string) => { seen.push(p); return { status: 3, stdout: '' }; }, score: () => null, rejectDir: path.join(tmpdir(), 'x'), log: () => {} };
-    runTournament('a prompt', 2, { ...deps, entropyPhrase: 'ash ember loom' });
+    await runTournament('a prompt', 2, { ...deps, entropyPhrase: 'ash ember loom' });
     expect(seen).toHaveLength(2);
     for (const p of seen) expect(p).toContain('— entropy: ash ember loom');
     seen.length = 0;
-    runTournament('a prompt', 2, deps);
+    await runTournament('a prompt', 2, deps);
     for (const p of seen) expect(p).not.toContain('entropy:');
   });
 });

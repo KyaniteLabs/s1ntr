@@ -1,6 +1,7 @@
 import type { LuminanceMeasure, LuminanceVerdict } from '../../render/LuminanceVerdict.js';
 import type { ValueStructureMeasure } from '../../render/ValueStructure.js';
 import type { GlitchLivenessMeasure } from '../../render/GlitchLiveness.js';
+import type { FrameCoverageMeasure } from '../../render/FrameCoverage.js';
 
 export type RenderMeasure = LuminanceMeasure & {
   verdict: LuminanceVerdict;
@@ -11,6 +12,8 @@ export type RenderMeasure = LuminanceMeasure & {
   valueStructure?: ValueStructureMeasure;
   /** Early/late frame evidence that a saturated, structured, moving frame is alive glitch, not broken. */
   glitchLiveness?: GlitchLivenessMeasure;
+  /** Frame-coverage check (#1746); flags tiny isolated subjects floating in an empty canvas. */
+  frameCoverage?: FrameCoverageMeasure;
 };
 
 export interface RenderEvidence {

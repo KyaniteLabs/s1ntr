@@ -266,6 +266,22 @@ export function isAllowedRenderRequestUrl(rawUrl: string,
 export const RENDER_ORIGIN = 'http://sinter-render.invalid';
 
 /**
+ * An engine page (`<html data-sinter-engine="...">`) does its warm-up steps while it loads, so an engine that never
+ * gets ready can hold back DOMContentLoaded past the load timeout. Without this, that surfaced as a raw
+ * "page.setContent: Timeout" instead of ENGINE_NOT_READY:<engine> (engine-render.test.ts, red on main 2026-11-23).
+ * Returns the mapped error for a load timeout on an engine page; otherwise undefined (rethrow the original).
+ */
+export function engineLoadTimeoutError(html: string, err: unknown, timeoutMs: number): Error | undefined {
+  const engine = html.match(/<html\b[^>]*\bdata-sinter-engine="([A-Za-z0-9_-]+)"/)?.[1];
+  if (!engine) return undefined;
+  const e = err as { name?: unknown; message?: unknown } | null;
+  const message = typeof e?.message === 'string' ? e.message : String(err);
+  const timedOut = e?.name === 'TimeoutError' || /Timeout \d+ms exceeded/.test(message);
+  if (!timedOut) return undefined;
+  return new Error(`ENGINE_NOT_READY:${engine}: page did not finish loading within ${timeoutMs} ms (${message.split('\n')[0]})`);
+}
+
+/**
  * Browser-side audio-domain page init (tone/strudel). Executed by PREPENDING
  * the compiled function (types erased by tsc) to the wrapped HTML — Playwright
  * addInitScript does not run for setContent pages, which silently disabled
@@ -966,7 +982,11 @@ export class HeadlessRenderer {
       // Load the HTML
       signal.throwIfAborted();
       hold.candidateStarted = true;
-      await page.setContent(renderHtml, { waitUntil: 'domcontentloaded', timeout: opts.timeout });
+      try {
+        await page.setContent(renderHtml, { waitUntil: 'domcontentloaded', timeout: opts.timeout });
+      } catch (err) {
+        throw engineLoadTimeoutError(renderHtml, err, opts.timeout) ?? err;
+      }
 
       // Canvas-backed domains must be ready before capture.
       if (domainRequiresCanvas(domain)) {

@@ -1,6 +1,6 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { mkdir, readFile, rm, stat, utimes } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, stat, utimes } from 'node:fs/promises';
 import path from 'node:path';
 import { writeFileAtomic } from '../utils/atomicWrite.js';
 import {
@@ -36,7 +36,15 @@ export class FileCampaignLedgerPersistence implements CampaignLedgerPersistence 
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
         try {
           const lock = await stat(lockPath);
-          if (Date.now() - lock.mtimeMs > 60_000) await rm(lockPath, { recursive: true, force: true });
+          if (Date.now() - lock.mtimeMs > 60_000) {
+            const stalePath = `${lockPath}.stale-${process.pid}-${randomUUID()}`;
+            try {
+              await rename(lockPath, stalePath);
+              await rm(stalePath, { recursive: true, force: true });
+            } catch (reclaimError) {
+              if ((reclaimError as NodeJS.ErrnoException).code !== 'ENOENT') throw reclaimError;
+            }
+          }
         } catch (statError) {
           if ((statError as NodeJS.ErrnoException).code !== 'ENOENT') throw statError;
         }
@@ -46,6 +54,7 @@ export class FileCampaignLedgerPersistence implements CampaignLedgerPersistence 
     const heartbeat = setInterval(() => {
       void utimes(lockPath, new Date(), new Date()).catch(() => undefined);
     }, 20_000);
+    heartbeat.unref?.();
     return async () => {
       clearInterval(heartbeat);
       await rm(lockPath, { recursive: true, force: true });

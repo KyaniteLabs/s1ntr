@@ -35,6 +35,9 @@ export const CLIPPED_SOLID_PANEL_MIN_FILL = 0.9;
 // separates true washouts (<= 9.5) from good high-key art (>= 18.5).
 export const WASHOUT_MAX_STD = 15;
 export const DARK_MAX_STD = 5;
+// Near-flat frames (luma stddev < 4 on the 0..255 scale) carry no perceivable
+// structure and are gated before spending a judge call (#1744).
+export const NEAR_FLAT_MAX_STD = 4;
 // Fog shape (2026-06-11 addendum): a structureless frame where EVERY pixel is
 // "bright" evades the mean-luminance bar (live hydra probe: lum 0.731). On the
 // 39-measurement set + probe this catches 5 fogs/blanks (all q0.65) with zero

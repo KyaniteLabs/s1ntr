@@ -168,20 +168,30 @@ export class TuiBridgeServer {
         // Primary first so that port 0 yields a single ephemeral port; the
         // secondary then binds the SAME actual port on the other family.
         const secondary = createServer((req, res) => { void this.handleRequest(req, res); });
-        this.server.once('error', (err: Error) => reject(err));
-        this.server.once('listening', () => {
+        const onPrimaryError = (err: Error) => {
+          this.server.off('listening', onPrimaryListening);
+          reject(err);
+        };
+        const onPrimaryListening = () => {
+          this.server.off('error', onPrimaryError);
           const actual = this.server.address();
           const actualPort = actual && typeof actual === 'object' ? actual.port : this.port;
-          secondary.once('error', (err: Error) => {
+          const onSecondaryError = (err: Error) => {
+            secondary.off('listening', onSecondaryListening);
             this.server.close();
             reject(err);
-          });
-          secondary.once('listening', () => {
+          };
+          const onSecondaryListening = () => {
+            secondary.off('error', onSecondaryError);
             this.loopbackSecondary = secondary;
             resolve();
-          });
+          };
+          secondary.once('error', onSecondaryError);
+          secondary.once('listening', onSecondaryListening);
           secondary.listen(actualPort, '::1');
-        });
+        };
+        this.server.once('error', onPrimaryError);
+        this.server.once('listening', onPrimaryListening);
         this.server.listen(this.port, '127.0.0.1');
         return;
       }
@@ -243,6 +253,16 @@ export class TuiBridgeServer {
    */
   get previewEndpoints(): PreviewEndpoints {
     return this.preview;
+  }
+
+  private decodeParam(raw: string): string {
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      const err = new Error('Malformed URI path parameter') as Error & { statusCode?: number };
+      err.statusCode = 400;
+      throw err;
+    }
   }
 
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -309,7 +329,7 @@ export class TuiBridgeServer {
       // GET /api/tui/session/:id/status
       const statusMatch = path.match(/^\/api\/tui\/session\/([^/]+)\/status$/);
       if (req.method === 'GET' && statusMatch) {
-        const sessionId = statusMatch[1];
+        const sessionId = this.decodeParam(statusMatch[1]);
         const status = this.bridge.getStatus(sessionId);
         this.json(res, 200, status);
         return;
@@ -317,7 +337,7 @@ export class TuiBridgeServer {
 
       const artistReviewMatch = path.match(/^\/api\/tui\/session\/([^/]+)\/artist-review$/);
       if (req.method === 'GET' && artistReviewMatch) {
-        this.json(res, 200, this.bridge.getArtistReviewState(artistReviewMatch[1]));
+        this.json(res, 200, this.bridge.getArtistReviewState(this.decodeParam(artistReviewMatch[1])));
         return;
       }
       if (req.method === 'POST' && artistReviewMatch) {
@@ -328,7 +348,7 @@ export class TuiBridgeServer {
         }
         try {
           const result = this.bridge.executeArtistReviewAction(
-            artistReviewMatch[1], body.token, bearerCredential(req),
+            this.decodeParam(artistReviewMatch[1]), body.token, bearerCredential(req),
           );
           if (!result.accepted) {
             this.json(res, 403, { error: 'Artist review action could not be verified.' });
@@ -596,7 +616,7 @@ export class TuiBridgeServer {
       // GET /api/tui/session/:id/events — SSE stream
       const eventsMatch = path.match(/^\/api\/tui\/session\/([^/]+)\/events$/);
       if (req.method === 'GET' && eventsMatch) {
-        const sessionId = eventsMatch[1];
+        const sessionId = this.decodeParam(eventsMatch[1]);
         // Validate session exists
         this.bridge.getStatus(sessionId);
         this.handleSSE(req, res, sessionId);
@@ -606,7 +626,7 @@ export class TuiBridgeServer {
       // POST /api/tui/session/:id/input
       const inputMatch = path.match(/^\/api\/tui\/session\/([^/]+)\/input$/);
       if (req.method === 'POST' && inputMatch) {
-        const sessionId = inputMatch[1];
+        const sessionId = this.decodeParam(inputMatch[1]);
         const body = await this.readBody(req);
         const input: TuiInputRequest = JSON.parse(body);
         if (this.micPreview.handleCommand(sessionId, input)) {
@@ -630,8 +650,8 @@ export class TuiBridgeServer {
       // POST /api/tui/session/:id/actions/:actionId/confirm
       const confirmMatch = path.match(/^\/api\/tui\/session\/([^/]+)\/actions\/([^/]+)\/confirm$/);
       if (req.method === 'POST' && confirmMatch) {
-        const sessionId = confirmMatch[1];
-        const actionId = confirmMatch[2];
+        const sessionId = this.decodeParam(confirmMatch[1]);
+        const actionId = this.decodeParam(confirmMatch[2]);
         this.json(res, 200, await this.controls.confirmAction(sessionId, actionId));
         return;
       }
@@ -639,8 +659,8 @@ export class TuiBridgeServer {
       // POST /api/tui/session/:id/actions/:actionId/cancel
       const cancelMatch = path.match(/^\/api\/tui\/session\/([^/]+)\/actions\/([^/]+)\/cancel$/);
       if (req.method === 'POST' && cancelMatch) {
-        const sessionId = cancelMatch[1];
-        const actionId = cancelMatch[2];
+        const sessionId = this.decodeParam(cancelMatch[1]);
+        const actionId = this.decodeParam(cancelMatch[2]);
         this.json(res, 200, this.controls.cancelAction(sessionId, actionId));
         return;
       }
@@ -648,14 +668,14 @@ export class TuiBridgeServer {
       // POST /api/tui/session/:id/cancel
       const runCancelMatch = path.match(/^\/api\/tui\/session\/([^/]+)\/cancel$/);
       if (req.method === 'POST' && runCancelMatch) {
-        const sessionId = runCancelMatch[1];
+        const sessionId = this.decodeParam(runCancelMatch[1]);
         this.json(res, 200, this.controls.cancelRun(sessionId));
         return;
       }
 
       const micPageMatch = path.match(/^\/api\/tui\/session\/([^/]+)\/mic-preview$/);
       if (req.method === 'GET' && micPageMatch) {
-        const page = this.micPreview.renderPage(micPageMatch[1]);
+        const page = this.micPreview.renderPage(this.decodeParam(micPageMatch[1]));
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(page);
         return;
@@ -663,7 +683,7 @@ export class TuiBridgeServer {
 
       const micUpdateMatch = path.match(/^\/api\/tui\/session\/([^/]+)\/mic-preview\/update$/);
       if (req.method === 'POST' && micUpdateMatch) {
-        const sessionId = micUpdateMatch[1];
+        const sessionId = this.decodeParam(micUpdateMatch[1]);
         const body = await this.readBody(req);
         this.micPreview.applyUpdate(sessionId, JSON.parse(body));
         this.json(res, 200, { ok: true });
@@ -711,23 +731,36 @@ export class TuiBridgeServer {
     }
 
     // Subscribe to new events
+    let cleanedUp = false;
     const unsubscribe = replay.subscribeStored(sessionId, (stored) => {
       const payload = `id: ${stored.id}
 data: ${JSON.stringify(stored.event)}
 
 `;
-      writeSse(res, payload);
+      if (!writeSse(res, payload)) {
+        cleanup();
+      }
     });
 
     const heartbeat = setInterval(() => {
-      writeSse(res, ': ping\n\n');
+      if (!writeSse(res, ': ping\n\n')) {
+        cleanup();
+      }
     }, 15000);
+    heartbeat.unref?.();
 
-    // Clean up on client disconnect
-    req.on('close', () => {
+    const cleanup = () => {
+      if (cleanedUp) return;
+      cleanedUp = true;
       clearInterval(heartbeat);
       unsubscribe();
-    });
+      req.off('close', cleanup);
+      res.off('close', cleanup);
+    };
+
+    // Clean up on client disconnect
+    req.on('close', cleanup);
+    res.on('close', cleanup);
   }
 
   private providerLabel(baseUrl: string, model = ''): string {
@@ -1043,6 +1076,10 @@ export class PreviewEndpoints {
    * original lifecycle (and from the bridge's process-exit path).
    */
   shutdown(): void {
+    for (const client of this.sseClients) {
+      try { client.end(); } catch { /* ignore closed socket */ }
+    }
+    this.sseClients.clear();
     this.unsubscribeEventBus();
     this.closeSinterFS();
   }
@@ -1199,8 +1236,14 @@ export class PreviewEndpoints {
         this.jsonOk(res, { iterations: [] });
         return true;
       }
+      let projectDirName: string;
       try {
-        const projectDirName = decodeURIComponent(galleryMatch[1]);
+        projectDirName = decodeURIComponent(galleryMatch[1]);
+      } catch {
+        this.jsonErr(res, 400, 'Invalid project name');
+        return true;
+      }
+      try {
         const gallery = new Gallery(this.galleryDir);
         const iterations = await gallery.loadHistoryFromDir(projectDirName);
         this.jsonOk(res, { iterations });
@@ -1214,8 +1257,9 @@ export class PreviewEndpoints {
     // /api/sinter/gallery/:project — SinterFS-backed gallery list.
     const sinterGalleryMatch = pathname.match(/^\/api\/sinter\/gallery\/([^/]+)$/);
     if (req.method === 'GET' && sinterGalleryMatch) {
-      const project = decodeURIComponent(sinterGalleryMatch[1]);
+      let project: string;
       try {
+        project = decodeURIComponent(sinterGalleryMatch[1]);
         assertSafeSegment(project, 'Project name');
       } catch {
         this.jsonErr(res, 400, 'Invalid project name');
@@ -1257,7 +1301,13 @@ export class PreviewEndpoints {
     // /api/sinter/gallery/:project/:version — SinterFS-backed single version.
     const sinterVersionMatch = pathname.match(/^\/api\/sinter\/gallery\/([^/]+)\/([^/]+)$/);
     if (req.method === 'GET' && sinterVersionMatch) {
-      const project = decodeURIComponent(sinterVersionMatch[1]);
+      let project: string;
+      try {
+        project = decodeURIComponent(sinterVersionMatch[1]);
+      } catch {
+        this.jsonErr(res, 400, 'Invalid project name');
+        return true;
+      }
       const versionParam = sinterVersionMatch[2];
       if (!/^\d+$/.test(versionParam)) {
         this.jsonErr(res, 400, 'Invalid version');

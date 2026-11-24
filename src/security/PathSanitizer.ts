@@ -49,8 +49,13 @@ export function sanitizeFilename(filename: string): string {
   // Normalize to remove path traversal attempts
   const normalized = path.normalize(filename);
   
-  // Ensure filename doesn't start with .. or /
-  if (normalized.startsWith('..') || path.isAbsolute(normalized)) {
+  // Ensure filename doesn't traverse upward or resolve as an absolute path
+  if (
+    normalized === '..'
+    || normalized.startsWith('..' + path.sep)
+    || normalized.startsWith('../')
+    || path.isAbsolute(normalized)
+  ) {
     logPathTraversalAttempt(filename, {
       details: { reason: 'path_traversal' }
     });
@@ -74,24 +79,31 @@ export function validateFilePath(
   filepath: string, 
   allowedBaseDir: string
 ): string {
-  // First sanitize the filename portion
-  const basename = path.basename(filepath);
-  sanitizeFilename(basename);
-  
-  // Resolve to absolute path
+  // Resolve to absolute path and verify containment first
   const resolved = path.resolve(filepath);
   const baseResolved = path.resolve(allowedBaseDir);
   
   // Ensure resolved path is within allowed base
   const relative = path.relative(baseResolved, resolved);
   
-  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+  if (
+    relative === '..'
+    || relative.startsWith('..' + path.sep)
+    || path.isAbsolute(relative)
+  ) {
     logPathTraversalAttempt(filepath, {
       details: { reason: 'escapes_allowed_directory', baseDir: allowedBaseDir }
     });
     throw new PathSanitizationError(
       `Path escapes allowed directory: ${filepath}`
     );
+  }
+
+  // Sanitize every relative segment (not just basename) so parent segments cannot smuggle
+  // shell metacharacters or control bytes.
+  const segments = relative ? relative.split(path.sep).filter(Boolean) : [path.basename(filepath)];
+  for (const segment of segments) {
+    sanitizeFilename(segment);
   }
   
   return resolved;
@@ -104,8 +116,8 @@ export function validateFilePath(
  * @returns Sanitized argument
  */
 export function sanitizeFFmpegArg(arg: string): string {
-  // FFmpeg args should not contain shell metacharacters
-  if (DANGEROUS_CHARS.test(arg)) {
+  // FFmpeg args should not contain shell metacharacters or control characters
+  if (DANGEROUS_CHARS.test(arg) || CONTROL_CHARS.test(arg)) {
     logPathTraversalAttempt(arg, {
       details: { reason: 'dangerous_chars_in_ffmpeg_arg' }
     });

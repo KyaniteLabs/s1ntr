@@ -379,17 +379,27 @@ export class CampaignService {
       expiresAt: new Date((this.options.now?.() ?? new Date()).getTime()
         + (this.options.reservationLifetimeMs ?? 86_400_000)).toISOString() });
     const reservation = assertHostCampaignFundingAdmission(hostAdmission);
-    this.authorityBoundary.assertReservation(reservation);
-    const admittedStages = plan.stages.filter(stage => allowedStageIds.includes(stage.id));
-    const feasibility = this.authorityBoundary.phaseOne
-      ? preflightCampaignStageBudget(manifest, admittedStages, capacityFromReservation(reservation))
-      : preflightCampaignBudget(manifest, admittedStages, capacityFromReservation(reservation));
-    if (!feasibility.passed) {
-      throw new Error(`Campaign provider reservation was not attempted: ${feasibility.failures.join(', ')}`);
+    const releaseFreshReservation = async (): Promise<void> => {
+      if (!existing) {
+        await this.fundingAuthority?.releaseUnused(reservation).catch(() => undefined);
+      }
+    };
+    try {
+      this.authorityBoundary.assertReservation(reservation);
+      const admittedStages = plan.stages.filter(stage => allowedStageIds.includes(stage.id));
+      const feasibility = this.authorityBoundary.phaseOne
+        ? preflightCampaignStageBudget(manifest, admittedStages, capacityFromReservation(reservation))
+        : preflightCampaignBudget(manifest, admittedStages, capacityFromReservation(reservation));
+      if (!feasibility.passed) {
+        throw new Error(`Campaign provider reservation was not attempted: ${feasibility.failures.join(', ')}`);
+      }
+      return await this.coordinator.startCampaignPlan(
+        { ...request, requestKey }, manifest, plan, feasibility, hostAdmission,
+      );
+    } catch (error) {
+      await releaseFreshReservation();
+      throw error;
     }
-    return this.coordinator.startCampaignPlan(
-      { ...request, requestKey }, manifest, plan, feasibility, hostAdmission,
-    );
   }
 
   /** Supply one exact frozen allocation; LLMClient itself burns it before network. */
@@ -497,6 +507,19 @@ export class CampaignService {
     this.assertAdmissionOwnerReviewBinding(admission, input);
   }
 
+  private assertAdmissionManifest(
+    admission: CampaignRunAdmission,
+    manifest: CampaignManifest,
+  ): void {
+    if (
+      !manifestIsCurrent(manifest)
+      || manifest.manifestDigest !== admission.manifestDigest
+      || manifest.campaignRunId !== admission.creativeRun.requestKey
+    ) {
+      throw new Error('CAMPAIGN_CLOSURE_MANIFEST_ADMISSION_MISMATCH');
+    }
+  }
+
   /**
    * The only service route that seals terminal owner evidence. The public
    * Artist Review witness is first resolved by this exact coordinator, so a
@@ -508,6 +531,7 @@ export class CampaignService {
     input: CampaignOwnerDecisionSealInput,
   ): Promise<CampaignOwnerDecisionEvidence> {
     this.assertAdmission(admission);
+    this.assertAdmissionManifest(admission, manifest);
     if (!manifest.briefs.some((brief) => brief.id === input.briefId)) {
       throw new Error(`CAMPAIGN_CLOSURE_BRIEF_OUTSIDE_MANIFEST:${input.briefId}`);
     }
@@ -564,6 +588,7 @@ export class CampaignService {
     readonly blindPreference: import('./AttributableRevision.js').IndependentBlindTreatmentPreference;
   }>> {
     this.assertAdmission(admission);
+    this.assertAdmissionManifest(admission, manifest);
     if (!manifest.briefs.some((brief) => brief.id === input.briefId)
       || !this.closureEvidenceAuthority) {
       throw new Error('CAMPAIGN_CLOSURE_REVISION_DECISION_CONTEXT_INVALID');
@@ -590,6 +615,7 @@ export class CampaignService {
     input: CampaignRevisionEvidenceSealInput,
   ): Promise<CampaignRevisionEvidence> {
     this.assertAdmission(admission);
+    this.assertAdmissionManifest(admission, manifest);
     if (!manifest.briefs.some((brief) => brief.id === input.briefId)
       || !this.closureEvidenceAuthority) {
       throw new Error('CAMPAIGN_CLOSURE_REVISION_DECISION_CONTEXT_INVALID');

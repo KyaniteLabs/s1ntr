@@ -828,8 +828,9 @@ export class LLMClient {
       grokSubscriptionSeat: this.config.grokSubscriptionSeat
         || roleSeat.grokSubscriptionSeat
         || roleSeat.keySource === 'grok-oidc',
-      glmCodingPlanSeat: this.config.glmCodingPlanSeat
-        || roleSeat.glmCodingPlanSeat,
+      glmCodingPlanSeat: (this.config.glmCodingPlanSeat || roleSeat.glmCodingPlanSeat === true)
+        ? LLMClient.codingPlanDeclarationVerified(roleConfig.model)
+        : false,
       minimaxTokenPlanSeat: this.config.minimaxTokenPlanSeat
         || roleSeat.minimaxTokenPlanSeat,
       keySource: this.config.keySource ?? roleSeat.keySource,
@@ -917,7 +918,9 @@ export class LLMClient {
         // The fallback entry carries its own logical family and seat
         // declarations — the primary role's must not shadow them (A005/Sol).
         logicalProvider: cfg.provider,
-        glmCodingPlanSeat: cfg.glmCodingPlanSeat === true,
+        glmCodingPlanSeat: cfg.glmCodingPlanSeat === true
+          ? LLMClient.codingPlanDeclarationVerified(cfg.model)
+          : false,
         minimaxTokenPlanSeat: cfg.minimaxTokenPlanSeat === true,
         // Fallback configs may omit apiKey — resolve it endpoint-aware from
         // the environment (KILO_API_KEY for kilo.ai, GLM_API_KEY for z.ai).
@@ -929,6 +932,7 @@ export class LLMClient {
       };
       Logger.info('LLMClient.fallback', `Registered fallback provider: ${cfg.model} @ ${cfg.baseUrl}`);
       const created = createProvider(providerCfg);
+      this.fallbackUrls.set(created, cfg.baseUrl);
       if (cfg.thinking) this.fallbackThinking.set(created, cfg.thinking);
       return created;
     });
@@ -939,6 +943,9 @@ export class LLMClient {
 
   /** G09: each fallback seat's own thinking setting (ProviderConfig has no thinking field). */
   private readonly fallbackThinking = new WeakMap<object, NonNullable<ProviderRequest['thinking']>>();
+  /** SSRF validation state for real fallback providers created by getFallbackProviders(). */
+  private readonly fallbackUrls = new WeakMap<object, string>();
+  private readonly fallbackValidated = new WeakSet<object>();
 
   /**
    * G09: a fallback request carries the fallback seat's own temperature / maxTokens / thinking, not the primary's.
@@ -1007,7 +1014,7 @@ export class LLMClient {
   }
 
   private classifySurface(provider: string, baseUrl: string,
-    fallbackSeatOverride?: boolean, minimaxTokenPlanSeat?: boolean) {
+    fallbackSeatOverride?: boolean, minimaxTokenPlanSeat?: boolean, model?: string) {
     return classifyProviderSurface(provider, baseUrl, {
       grokSubscriptionSeat: this.config.grokSubscriptionSeat === true
         || this.config.keySource === 'grok-oidc',
@@ -1015,7 +1022,7 @@ export class LLMClient {
       // Per attempt: a fallback on the same host with a pay-per-token key
       // must not inherit the primary's subscription declaration.
       minimaxTokenPlanSeat: (minimaxTokenPlanSeat ?? this.config.minimaxTokenPlanSeat) === true,
-      model: this.config.model,
+      model: model ?? this.config.model,
     });
   }
 
@@ -1156,9 +1163,9 @@ export class LLMClient {
       ],
       surface: this.classifySurface(providerFamily, attemptProviderCfg.baseUrl,
         this.glmCodingPlanEndpointFlag(attemptProviderCfg.baseUrl,
-          attemptProviderCfg.glmCodingPlanSeat === true)
-          || undefined,
-        attemptProviderCfg.minimaxTokenPlanSeat === true),
+          attemptProviderCfg.glmCodingPlanSeat === true),
+        attemptProviderCfg.minimaxTokenPlanSeat === true,
+        provider.getModel()),
       seatDigest: sha256Hex(attemptProviderCfg.apiKey ?? routeDigest),
     };
     const authority = this.currentHarnessAuthority();
@@ -1319,6 +1326,11 @@ export class LLMClient {
     retryOrdinal = 0,
     collector?: ExecutorAttestationRef[],
   ): Promise<ProviderResponse> {
+    const fallbackUrl = this.fallbackUrls.get(provider);
+    if (fallbackUrl && !this.fallbackValidated.has(provider)) {
+      await this.assertProviderUrlAllowed(fallbackUrl);
+      this.fallbackValidated.add(provider);
+    }
     const attempt = await this.beginHarnessAttempt(provider, req, phase, fallbackOrdinal, retryOrdinal);
     if (!attempt && hasCurrentCampaignFundingContext()) {
       throw new Error('CAMPAIGN_FUNDING_REQUIRES_CANONICAL_MODEL_ROLE');
@@ -1399,6 +1411,11 @@ export class LLMClient {
     retryOrdinal = 0,
     collector?: ExecutorAttestationRef[],
   ): AsyncGenerator<StreamEvent> {
+    const fallbackUrl = this.fallbackUrls.get(provider);
+    if (fallbackUrl && !this.fallbackValidated.has(provider)) {
+      await this.assertProviderUrlAllowed(fallbackUrl);
+      this.fallbackValidated.add(provider);
+    }
     const attempt = await this.beginHarnessAttempt(provider, req, phase, fallbackOrdinal, retryOrdinal);
     if (!attempt && hasCurrentCampaignFundingContext()) {
       throw new Error('CAMPAIGN_FUNDING_REQUIRES_CANONICAL_MODEL_ROLE');
@@ -1570,6 +1587,32 @@ export class LLMClient {
 
   // ── Provider delegation ──
 
+  private async assertProviderUrlAllowed(baseUrl: string): Promise<void> {
+    // SSRF validation on base URL before creating/calling an HTTP provider.
+    // Local LLM providers are explicit first-class provider endpoints; keep
+    // arbitrary private IPs gated, but do not make LM Studio/Ollama require
+    // an extra env escape hatch for normal localhost use.
+    const allowLocalhost = process.env.LIMINAL_ALLOW_LOCALHOST_LLM === 'true' || this.isKnownLocalLlmEndpoint(baseUrl);
+    const allowPrivateIPs = process.env.LIMINAL_ALLOW_PRIVATE_IP_LLM === 'true';
+    const allowedHosts = getAllowedHostsFromEnv();
+
+    // These allowlisted endpoints invoke local subscription CLIs, not HTTP.
+    // Rotation may append the OpenAI-compatible path to the CLI address.
+    const localCli = /^cli:\/\/(?:codex|agy|command-code|claude|grok)$/.test(
+      canonicalCliSeatUrl(baseUrl).replace(/^(cli:\/\/grok)\/chat\/completions$/, '$1')
+    ) || parseHermesSeat(baseUrl) !== null;
+    if (!localCli && !baseUrl.startsWith('grok-cli:')) {
+      try {
+        await validateUrl(baseUrl, { allowedHosts, allowPrivateIPs, allowLocalhost });
+      } catch (err) {
+        if (err instanceof SSRFError) {
+          throw new LLMError(`SSRF Protection: ${err.message}`, 'llm', undefined, false);
+        }
+        throw err;
+      }
+    }
+  }
+
   /** Get or create the provider instance (async for DNS-based SSRF validation) */
   private async getProvider(providerTimeoutMs?: number, preferMiniMaxOpenAI = false): Promise<BaseProvider> {
     const configuredUrl = this.config.baseUrl;
@@ -1579,29 +1622,7 @@ export class LLMClient {
     const timeoutMs = this.config.timeout ?? TIMEOUT_DEFAULT_MS;
     const useCachedProvider = baseUrl === configuredUrl && (providerTimeoutMs === undefined || providerTimeoutMs === timeoutMs);
     if (!this.provider || !useCachedProvider) {
-      // SSRF validation on base URL before creating provider.
-      // Local LLM providers are explicit first-class provider endpoints; keep
-      // arbitrary private IPs gated, but do not make LM Studio/Ollama require
-      // an extra env escape hatch for normal localhost use.
-      const allowLocalhost = process.env.LIMINAL_ALLOW_LOCALHOST_LLM === 'true' || this.isKnownLocalLlmEndpoint();
-      const allowPrivateIPs = process.env.LIMINAL_ALLOW_PRIVATE_IP_LLM === 'true';
-      const allowedHosts = getAllowedHostsFromEnv();
-
-      // These allowlisted endpoints invoke local subscription CLIs, not HTTP.
-      // Rotation may append the OpenAI-compatible path to the CLI address.
-      const localCli = /^cli:\/\/(?:codex|agy|command-code|claude|grok)$/.test(
-        canonicalCliSeatUrl(baseUrl).replace(/^(cli:\/\/grok)\/chat\/completions$/, '$1')
-      ) || parseHermesSeat(baseUrl) !== null;
-      if (!localCli && !baseUrl.startsWith('grok-cli:')) {
-        try {
-          await validateUrl(baseUrl, { allowedHosts, allowPrivateIPs, allowLocalhost });
-        } catch (err) {
-          if (err instanceof SSRFError) {
-            throw new LLMError(`SSRF Protection: ${err.message}`, 'llm', undefined, false);
-          }
-          throw err;
-        }
-      }
+      await this.assertProviderUrlAllowed(baseUrl);
 
       const provider = createProvider({
         baseUrl,
@@ -1620,11 +1641,11 @@ export class LLMClient {
     return this.provider;
   }
 
-  private isKnownLocalLlmEndpoint(): boolean {
+  private isKnownLocalLlmEndpoint(baseUrl = this.config.baseUrl): boolean {
     let hostname = '';
     let port = '';
     try {
-      const u = new URL(this.config.baseUrl);
+      const u = new URL(baseUrl);
       hostname = u.hostname.toLowerCase();
       port = u.port || (u.protocol === 'https:' ? '443' : '80');
     } catch {
@@ -2357,7 +2378,7 @@ export class LLMClient {
       const failedAttemptUsage: TokenUsage[] = [];
       let primaryAttemptOrdinal = 0;
       let providerPromise: Promise<BaseProvider> | undefined;
-      const result = await RetryManager.executeWithRetry(async () => {
+      const result = await this.generateWithBreaker(this.detectProvider(), () => RetryManager.executeWithRetry(async () => {
         const provider = await (providerPromise ??= this.getProvider(options.providerTimeoutMs, options.preferMiniMaxOpenAI));
         const req: ProviderRequest = {
           systemPrompt,
@@ -2399,7 +2420,7 @@ export class LLMClient {
           provenance: this.requestProvenanceForProvider(provider),
           usage: response.usage,
         };
-      }, { signal }).catch(async (primaryError: unknown) => {
+      }, { signal })).catch(async (primaryError: unknown) => {
         if (!this.isFallbackableError(primaryError)) {
           throw primaryError;
         }
@@ -2455,6 +2476,10 @@ export class LLMClient {
               };
             }
             if (fbResponse.usage) failedAttemptUsage.push(fbResponse.usage);
+            fallbackFailures.push(this.formatFallbackFailure(
+              fallback.getModel(),
+              fbResponse.error || this.describeUnsuccessfulResponse(undefined, fallback.name),
+            ));
           } catch (err) {
             fallbackFailures.push(this.formatFallbackFailure(fallback.getModel(), err));
             Logger.debug('LLMClient', 'Fallback provider failed in complete():', err);
@@ -2936,7 +2961,10 @@ export class LLMClient {
       fallbackOrdinal: number,
       refs: ExecutorAttestationRef[],
     ): AsyncGenerator<StreamEvent> {
-      const gen = self.executeProviderStreamAttempt(transport, req, phase, fallbackOrdinal, 0, refs);
+      const effectiveReq = phase === 'pre-fallback-transport'
+        ? self.requestForFallback(transport, req)
+        : req;
+      const gen = self.executeProviderStreamAttempt(transport, effectiveReq, phase, fallbackOrdinal, 0, refs);
       for await (const event of gen) {
         if (event.type === 'error') throw new LLMError(event.error, transport.name, undefined, false);
         yield event;
@@ -2945,31 +2973,32 @@ export class LLMClient {
 
     await emit('request');
     try {
+      let primaryPayloadByteLength = 0;
       try {
         activeRefs = [];
-        let payloadByteLength = 0;
         for await (const event of consume(this, provider, 'pre-primary-transport', 0, activeRefs)) {
           if (event.type === 'content' || event.type === 'thinking') {
-            payloadByteLength += Buffer.byteLength(event.content, 'utf8');
+            primaryPayloadByteLength += Buffer.byteLength(event.content, 'utf8');
           }
           yieldingToConsumer = true;
           yield event;
           yieldingToConsumer = false;
         }
-        await emit('assistant_payload', activeRefs, { payloadByteLength }, true);
+        await emit('assistant_payload', activeRefs, { payloadByteLength: primaryPayloadByteLength }, true);
         await emit('terminal', activeRefs, { recoveryDecision: 'no_recovery' });
         completed = true;
         return;
       } catch (primaryError) {
         await emit('failure_class', activeRefs, { failureReason: failureReason(primaryError) }, true);
-        if (!this.isFallbackableError(primaryError)) throw primaryError;
+        // Never silently splice a fallback stream onto a primary stream that already yielded tokens.
+        if (primaryPayloadByteLength > 0 || !this.isFallbackableError(primaryError)) throw primaryError;
         const fallbacks = this.getFallbackProviders();
         if (fallbacks.length === 0) throw primaryError;
         const failures: string[] = [];
         for (const [index, fallback] of fallbacks.entries()) {
           activeRefs = [];
+          let payloadByteLength = 0;
           try {
-            let payloadByteLength = 0;
             for await (const event of consume(this, fallback, 'pre-fallback-transport', index + 1, activeRefs)) {
               if (event.type === 'content' || event.type === 'thinking') {
                 payloadByteLength += Buffer.byteLength(event.content, 'utf8');
@@ -2984,6 +3013,7 @@ export class LLMClient {
             return;
           } catch (error) {
             await emit('failure_class', activeRefs, { failureReason: failureReason(error) }, true);
+            if (payloadByteLength > 0) throw error;
             failures.push(this.formatFallbackFailure(fallback.getModel(), error));
           }
         }
@@ -2997,7 +3027,7 @@ export class LLMClient {
   }
 
   async *stream(
-    systemPrompt: string,
+    systemPromptRaw: string,
     userPrompt: string,
     signal?: AbortSignal,
     attemptTelemetry?: GenerationAttemptTelemetryContext,
@@ -3005,9 +3035,11 @@ export class LLMClient {
     await this.resolveRoleConfigForRequest();
     this.startExecutorAttemptSequence();
     this.assertHarnessAuthorityBeforeResolution();
+    const systemPrompt = normalizeSystemPrompt(systemPromptRaw);
     // Auto-detect model on first use
     const resolvedModel = await this.resolveModel();
     this.syncResolvedModel(resolvedModel);
+    assertGenerativeModel(resolvedModel);
 
     const provider = await this.getProvider();
     const req: ProviderRequest = {
@@ -3031,7 +3063,7 @@ export class LLMClient {
    * Yields tagged events so callers can distinguish thinking from content
    */
   async *streamWithThinking(
-    systemPrompt: string,
+    systemPromptRaw: string,
     userPrompt: string,
     signal?: AbortSignal,
     maxTokens?: number,
@@ -3040,9 +3072,11 @@ export class LLMClient {
     await this.resolveRoleConfigForRequest();
     this.startExecutorAttemptSequence();
     this.assertHarnessAuthorityBeforeResolution();
+    const systemPrompt = normalizeSystemPrompt(systemPromptRaw);
     // Auto-detect model on first use
     const resolvedModel = await this.resolveModel();
     this.syncResolvedModel(resolvedModel);
+    assertGenerativeModel(resolvedModel);
 
     const startTime = Date.now();
 

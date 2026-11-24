@@ -196,19 +196,34 @@ it('the CLI exits nonzero after a kill and its printed command retries only the 
   const args = ['compose', '--loops', '3', '--max-provider-calls', '1', '-o', 'run', '--prompt', "a field's light"];
   const preload = path.resolve('test/helpers/killedComposePreload.mjs');
   const bin = path.resolve('bin/sinter');
+  // The CLI resolves its production source refs from refs/remotes/origin/main, or on a CI runner from the Forgejo
+  // Actions event. The CI checkout has no origin/main (one --depth=1 fetch of the commit), so pass the CI event
+  // variables through; without them every loop failed LIMINAL_PRODUCTION_SOURCE_REFS_UNRESOLVED (run 3965).
+  const ciEnv = Object.fromEntries(['FORGEJO_ACTIONS', 'GITHUB_ACTIONS', 'GITHUB_EVENT_NAME', 'GITHUB_EVENT_PATH', 'GITHUB_SHA',
+    'GITHUB_REF', 'GITHUB_HEAD_REF', 'GITHUB_BASE_REF'].flatMap((k) => process.env[k] === undefined ? [] : [[k, process.env[k]]]));
   const cli = (argv: string[]) => spawnSync(process.execPath, ['--import', preload, bin, ...argv], {
-    cwd: out, encoding: 'utf8', timeout: 60_000, env: { PATH: process.env.PATH, HOME: out, NODE_ENV: 'test' } });
+    cwd: out, encoding: 'utf8', timeout: 60_000, env: { PATH: process.env.PATH, HOME: out, NODE_ENV: 'test', ...ciEnv } });
+  // On failure, say why: the CLI's stderr only names the outcome, the per-loop errors live in the manifest
+  // (CI run 3965 showed just "No loop produced a piece" with signal null, and the manifest died with the container).
+  const why = (r: ReturnType<typeof cli>) => {
+    let manifest: string;
+    try { manifest = readFileSync(path.join(out, 'run', 'loops-manifest.json'), 'utf8'); } catch (e) { manifest = `(no manifest: ${String(e)})`; }
+    let dispatches: string;
+    try { dispatches = readFileSync(path.join(out, 'dispatches'), 'utf8'); } catch { dispatches = '(none)'; }
+    return [`status=${r.status} signal=${r.signal} error=${r.error?.message ?? '-'}`, `stderr:\n${r.stderr}`,
+      `stdout:\n${r.stdout}`, `dispatches: ${dispatches}`, `loops-manifest.json:\n${manifest}`].join('\n');
+  };
   const killed = cli(args);
-  expect(killed.signal, killed.stderr).toBe('SIGKILL');
+  expect(killed.signal, why(killed)).toBe('SIGKILL');
   const sent = () => readFileSync(path.join(out, 'dispatches'), 'utf8');
   expect(sent()).toBe('xx');
   const resume = cli(args);
-  expect(resume.status, resume.stderr).toBe(1);
+  expect(resume.status, why(resume)).toBe(1);
   expect(sent()).toBe('xx');
   expect(resume.stderr).toContain('Loop 2/3');
   expect(resume.stderr).toContain("sinter compose --loops 3 --max-provider-calls 1 -o run --prompt 'a field'\\''s light' --retry-unknown=2");
   const retry = cli([...args, '--retry-unknown=2']);
-  expect(retry.status, retry.stderr).toBe(0);
+  expect(retry.status, why(retry)).toBe(0);
   expect(sent()).toBe('xxx');
   const manifest = read(path.join(out, 'run', 'loops-manifest.json'));
   expect(manifest.records.map((r: { status: string }) => r.status)).toEqual(['resumed', 'ok']);

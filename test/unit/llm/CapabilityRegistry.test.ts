@@ -84,6 +84,21 @@ describe('CapabilityRegistry', () => {
     expect(CapabilityRegistry.getCapabilities('gpt-4o').temperatureFixed).toBeUndefined();
   });
 
+  it('registers gemini-4-neon (vision + effort_level thinking) and glm-5.4 (text-only + 131072 output ceiling)', () => {
+    const neon = CapabilityRegistry.getCapabilities('google/gemini-4-neon');
+    expect(neon.thinking).toBe(true);
+    expect(neon.thinkingStyle).toBe('effort_level');
+    expect(neon.maxContextTokens).toBe(1_048_576);
+    expect(CapabilityRegistry.supportsVision('google/gemini-4-neon')).toBe(true);
+    expect(CapabilityRegistry.supportsVision('gemini-4-neon')).toBe(true);
+
+    const glm54 = CapabilityRegistry.getCapabilities('glm-5.4');
+    expect(glm54.thinking).toBe(true);
+    expect(glm54.maxOutputTokens).toBe(131_072);
+    expect(glm54.uncappedThinkingMaxOutput).toBe(131_072);
+    expect(CapabilityRegistry.supportsVision('glm-5.4')).toBe(false);
+  });
+
   describe('glob pattern matching', () => {
     it('claude-sonnet-4-* matches claude-sonnet-4-20250514', () => {
       const caps = CapabilityRegistry.getCapabilities('claude-sonnet-4-20250514');

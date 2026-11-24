@@ -239,8 +239,9 @@ function sha256(value: unknown): string {
     if (item === null || typeof item !== 'object') return JSON.stringify(item);
     if (Array.isArray(item)) return `[${item.map(stable).join(',')}]`;
     const record = item as Record<string, unknown>;
-    return `{${Object.keys(record).sort().map(key =>
-      `${JSON.stringify(key)}:${stable(record[key])}`).join(',')}}`;
+    return `{${Object.keys(record).sort()
+      .filter(key => record[key] !== undefined)
+      .map(key => `${JSON.stringify(key)}:${stable(record[key])}`).join(',')}}`;
   };
   return createHash('sha256').update(stable(value)).digest('hex');
 }
