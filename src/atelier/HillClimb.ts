@@ -136,9 +136,13 @@ export function calibrateAcceptance(
   }) ?? null;
   // A reject threshold also needs enough samples at or below it to bound the
   // share of wrong rejects; with fewer, the drift alarm on that side could never fire.
-  const rejectAt = REJECT_GRID.find(t =>
-    samples.filter(s => s.p <= t).length >= MIN_REJECT_SAMPLES
-    && passes(improvements.filter(s => s.p <= t).length, improvements.length, alphaMiss)) ?? null;
+  const rejectAt = REJECT_GRID.find(t => {
+    const rejected = samples.filter(s => s.p <= t);
+    if (rejected.length < MIN_REJECT_SAMPLES) return false;
+    if (!passes(improvements.filter(s => s.p <= t).length, improvements.length, alphaMiss)) return false;
+    // Reject threshold is only usable when upperBound < 1 (parseCalibration requires < 1).
+    return upperBound(rejected.filter(s => s.gold).length, rejected.length, delta) < 1;
+  }) ?? null;
   let rejectErrorCeiling: number | null = null;
   if (rejectAt !== null) {
     const rejected = samples.filter(s => s.p <= rejectAt);

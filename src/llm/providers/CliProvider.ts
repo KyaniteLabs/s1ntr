@@ -543,10 +543,12 @@ export class CliProvider extends BaseProvider {
   protected async *streamImpl(req: ProviderRequest): AsyncGenerator<StreamEvent> {
     // CLI lanes are request/response; fake a single content event.
     const result = await this.generateImpl(req);
-    if (result.isOk()) {
-      yield { type: 'content', content: result.value.content };
+    if (result.isErr()) {
+      yield { type: 'error', error: result.error.message };
+      return;
     }
-    yield { type: 'done' };
+    yield { type: 'content', content: result.value.content };
+    yield { type: 'done', usage: result.value.usage };
   }
 }
 

@@ -191,6 +191,7 @@ export function rateLimitEnvMax(envVar: string, defaultMax: number): number {
  * `retryAfter`) when the window is exceeded.
  */
 export class IpRateLimiter {
+  private static readonly MAX_TRACKED_KEYS = 10_000;
   private readonly states = new Map<string, IpRateState>();
   private readonly label: string;
   private readonly config: IpRateConfig;
@@ -198,12 +199,34 @@ export class IpRateLimiter {
     this.label = label;
     this.config = config;
   }
+  private pruneStale(cutoff: number): void {
+    for (const [k, s] of this.states) {
+      if (s.hits.length === 0 || s.hits[s.hits.length - 1] <= cutoff) {
+        this.states.delete(k);
+      }
+    }
+    while (this.states.size >= IpRateLimiter.MAX_TRACKED_KEYS) {
+      const oldestKey = this.states.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.states.delete(oldestKey);
+    }
+  }
   consume(req: IncomingMessage, res: ServerResponse): boolean {
     const key = (req.socket?.remoteAddress ?? 'unknown') + ':' + this.label;
     const now = Date.now();
     const cutoff = now - this.config.windowMs;
     let state = this.states.get(key);
-    if (!state) { state = { hits: [] }; this.states.set(key, state); }
+    if (!state) {
+      if (this.states.size >= IpRateLimiter.MAX_TRACKED_KEYS) {
+        this.pruneStale(cutoff);
+      }
+      state = { hits: [] };
+      this.states.set(key, state);
+    } else {
+      // Refresh recency for LRU eviction.
+      this.states.delete(key);
+      this.states.set(key, state);
+    }
     state.hits = state.hits.filter((t) => t > cutoff);
     const remainingAfter = Math.max(0, this.config.max - state.hits.length - 1);
     // Sliding window: the limit frees up when the oldest hit in the window

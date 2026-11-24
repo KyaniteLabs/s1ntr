@@ -142,7 +142,11 @@ export function mountSandboxFrame(container: HTMLElement, opts: SandboxFrameOpti
     }
     if (data.tag !== SANDBOX_MESSAGE_TAG) return;
     if (data.state && typeof data.state === 'object' && !Array.isArray(data.state)) {
-      Object.assign(state, data.state as Record<string, unknown>);
+      const incoming = data.state as Record<string, unknown>;
+      for (const [k, v] of Object.entries(incoming)) {
+        if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue;
+        state[k] = v;
+      }
       if (!ready) {
         ready = true;
         settle(error === null);
@@ -174,6 +178,7 @@ export function mountSandboxFrame(container: HTMLElement, opts: SandboxFrameOpti
     destroy(): void {
       if (timer !== null) { clearTimeout(timer); timer = null; }
       window.removeEventListener('message', onMessage);
+      settle(false);
       iframe.remove();
     },
   };
@@ -232,7 +237,7 @@ export function mountGuardedFrame(
   opts: SandboxFrameOptions,
 ): SandboxedInstance {
   if (violations.length > 0) {
-    return { iframe: null, state: {}, ready: false, error: null, whenSettled() {}, blocked: violations, send() {}, destroy() {} };
+    return { iframe: null, state: {}, ready: false, error: null, whenSettled(cb) { cb(false); }, blocked: violations, send() {}, destroy() {} };
   }
   const frame = mountSandboxFrame(container, opts);
   return {

@@ -21,7 +21,7 @@ function getFfmpegArgs(platform: string): string[] {
  * Each Int16 sample maps to [-1.0, 1.0].
  */
 function pcmToFloat32(pcmBuffer: Buffer): Float32Array {
-  const samples = pcmBuffer.length / 2;
+  const samples = Math.floor(pcmBuffer.length / 2);
   const float32 = new Float32Array(samples);
   for (let i = 0; i < samples; i++) {
     // Read little-endian Int16 and normalise to [-1, 1]
@@ -76,13 +76,14 @@ export async function captureMicAudio(): Promise<Float32Array> {
   });
 
   return new Promise<Float32Array>((resolve, reject) => {
-    const clearTimer = () => clearTimeout(timeoutId);
-
-    // 60-second recording timeout
-    const timeoutId = setTimeout(() => {
-      ffmpegProcess.kill('SIGTERM');
-      reject(new Error('Microphone recording timed out after 60 seconds'));
-    }, 60_000);
+    let stoppedByUser = false;
+    let killTimer: NodeJS.Timeout | undefined;
+    const cleanup = () => {
+      clearTimeout(timeoutId);
+      if (killTimer) clearTimeout(killTimer);
+      process.stdin.removeListener('data', onEnter);
+      if (typeof process.stdin.pause === 'function') process.stdin.pause();
+    };
 
     // 5-second grace period before SIGKILL
     const killWithSigkill = () => {
@@ -93,32 +94,38 @@ export async function captureMicAudio(): Promise<Float32Array> {
       }
     };
 
+    // 60-second recording timeout
+    const timeoutId = setTimeout(() => {
+      cleanup();
+      ffmpegProcess.kill('SIGTERM');
+      killTimer = setTimeout(killWithSigkill, GRACE_PERIOD_MS);
+      killTimer.unref?.();
+      reject(new Error('Microphone recording timed out after 60 seconds'));
+    }, 60_000);
+
     // Resolve on Enter keypress
     const onEnter = (data: Buffer) => {
       const str = data.toString();
       if (str.includes('\n') || str.includes('\r')) {
+        stoppedByUser = true;
         process.stdin.removeListener('data', onEnter);
         ffmpegProcess.kill('SIGTERM');
         // SIGKILL fallback after 5s if ffmpeg doesn't exit cleanly
-        setTimeout(killWithSigkill, GRACE_PERIOD_MS);
+        killTimer = setTimeout(killWithSigkill, GRACE_PERIOD_MS);
+        killTimer.unref?.();
       }
     };
 
     process.stdin.on('data', onEnter);
 
     ffmpegProcess.on('close', (code: number | null) => {
-      process.stdin.removeListener('data', onEnter);
-      clearTimer();
-      if (code === null) {
-        // Signal kill path — code is null when process was killed
-        const audio = pcmToFloat32(Buffer.concat(chunks));
-        resolve(audio);
-        return;
-      }
-      if (code === 0) {
-        const audio = pcmToFloat32(Buffer.concat(chunks));
-        resolve(audio);
-      } else {
+      cleanup();
+      try {
+        if (code === null || code === 0 || (stoppedByUser && code === 255)) {
+          const audio = pcmToFloat32(Buffer.concat(chunks));
+          resolve(audio);
+          return;
+        }
         const stderrLine = Buffer.concat(stderrChunks).toString('utf8').split('\n')[0] ?? '';
         const stderrSuffix = stderrLine ? ` ${stderrLine}.` : '';
         reject(
@@ -126,12 +133,13 @@ export async function captureMicAudio(): Promise<Float32Array> {
             `ffmpeg exited with code ${code}.${stderrSuffix} Check that your microphone is connected and accessible.`
           )
         );
+      } catch (err) {
+        reject(err instanceof Error ? err : new Error(String(err)));
       }
     });
 
     ffmpegProcess.on('error', (err: Error) => {
-      process.stdin.removeListener('data', onEnter);
-      clearTimer();
+      cleanup();
       reject(err);
     });
   });

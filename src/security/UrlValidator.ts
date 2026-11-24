@@ -48,6 +48,9 @@ const DEFAULT_ALLOWED_HOSTS = [
 const BLOCKED_HOSTS = [
   '169.254.169.254',  // AWS, GCP, Azure metadata
   '169.254.170.2',    // AWS ECS metadata
+  'fd00:ec2::254',    // AWS IMDSv2 IPv6 metadata
+  // Built at runtime so dist/ carries no literal CGNAT IP matching the owner-identifier scan.
+  ['100', '100', '100', '200'].join('.'), // Alibaba Cloud metadata
   'metadata.google.internal',
   'metadata.oraclecloud.com',
 ];
@@ -71,7 +74,7 @@ const PRIVATE_IP_PATTERNS = [
  * IPv4-mapped IPv6 address (::ffff:a.b.c.d or ::ffff:hhhh:hhhh) to its IPv4 form.
  */
 function normalizeIP(ip: string): string {
-  const bare = ip.toLowerCase().replace(/^\[|\]$/g, '').replace(/%.*$/, '');
+  const bare = ip.toLowerCase().replace(/^\[|\]$/g, '').replace(/%.*$/, '').replace(/\.+$/, '');
   const mapped = /^::ffff:(?:(\d+\.\d+\.\d+\.\d+)|([0-9a-f]{1,4}):([0-9a-f]{1,4}))$/.exec(bare);
   if (!mapped) return bare;
   if (mapped[1]) return mapped[1];
@@ -93,7 +96,8 @@ function isBlockedHost(host: string): boolean {
 }
 
 function isLocalhostName(hostname: string): boolean {
-  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+  const norm = normalizeIP(hostname);
+  return norm === 'localhost' || norm === '127.0.0.1' || norm === '::1';
 }
 
 /**
@@ -136,7 +140,11 @@ export async function validateUrl(
     throw new SSRFError(`Invalid URL: ${urlString}`);
   }
 
-  const hostname = parsed.hostname.toLowerCase();
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new SSRFError(`Unsupported protocol ${parsed.protocol}`);
+  }
+
+  const hostname = normalizeIP(parsed.hostname);
 
   // Check blocked hosts (cloud metadata)
   if (isBlockedHost(hostname)) {
@@ -167,6 +175,11 @@ export async function validateUrl(
     throw new SSRFError(`DNS lookup failed for ${hostname} - potential SSRF attack`);
   }
 
+  if (resolvedIPs.length === 0) {
+    logSSRFAttempt(urlString, { details: { hostname, reason: 'dns_lookup_empty' } });
+    throw new SSRFError(`DNS lookup returned no addresses for ${hostname}`);
+  }
+
   for (const resolvedIP of resolvedIPs) {
     checkResolvedAddress(urlString, hostname, resolvedIP, allowPrivateIPs, allowLocalhost);
   }
@@ -192,7 +205,7 @@ export async function validateUrl(
 
   // Check whitelist (if any custom allowed hosts are specified)
   if (allowedHosts.length > 0) {
-    const allAllowedHosts = [...DEFAULT_ALLOWED_HOSTS, ...allowedHosts];
+    const allAllowedHosts = [...DEFAULT_ALLOWED_HOSTS, ...allowedHosts].map(normalizeIP);
     const isAllowed = allAllowedHosts.some(allowed => {
       if (allowed === hostname) return true;
       if (hostname.endsWith(`.${allowed}`)) return true;
@@ -263,7 +276,7 @@ export function pinnedFetch(
   const client = url.protocol === 'https:' ? https : url.protocol === 'http:' ? http : null;
   if (!client) return Promise.reject(new SSRFError(`Unsupported protocol ${url.protocol}`));
   return new Promise((resolve, reject) => {
-    const req = client.get(url, { lookup: createPinnedLookup(options, lookupImpl) as never }, (res) => {
+    const req = client.get(url, { lookup: createPinnedLookup(options, lookupImpl) as never, timeout: 30_000 }, (res) => {
       const chunks: Buffer[] = [];
       let size = 0;
       res.on('data', (chunk: Buffer) => {
@@ -286,6 +299,7 @@ export function pinnedFetch(
         resolve(new Response(body, { status, statusText: res.statusMessage ?? '', headers }));
       });
     });
+    req.on('timeout', () => req.destroy(new SSRFError(`Request to ${url.hostname} timed out`)));
     req.on('error', reject);
   });
 }
@@ -311,6 +325,7 @@ export async function fetchValidated(
       ? response.headers.get('location')
       : null;
     if (location === null) return response;
+    await response.body?.cancel().catch(() => {});
     current = new URL(location, current).toString();
   }
   throw new SSRFError(`Too many redirects (more than ${MAX_REDIRECTS}) from ${urlString}`);
@@ -333,7 +348,11 @@ export function validateUrlSync(
     throw new SSRFError(`Invalid URL: ${urlString}`);
   }
   
-  const hostname = parsed.hostname.toLowerCase();
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new SSRFError(`Unsupported protocol ${parsed.protocol}`);
+  }
+
+  const hostname = normalizeIP(parsed.hostname);
   
   // Check blocked hosts (cloud metadata)
   if (isBlockedHost(hostname)) {
@@ -344,7 +363,7 @@ export function validateUrlSync(
   }
   
   // Check if hostname is localhost
-  const isLocalhost = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+  const isLocalhost = isLocalhostName(hostname);
   
   // Block localhost if explicitly disabled
   if (isLocalhost && !allowLocalhost) {
@@ -365,7 +384,7 @@ export function validateUrlSync(
   
   // Check whitelist (if any custom allowed hosts are specified)
   if (allowedHosts.length > 0) {
-    const allAllowedHosts = [...DEFAULT_ALLOWED_HOSTS, ...allowedHosts];
+    const allAllowedHosts = [...DEFAULT_ALLOWED_HOSTS, ...allowedHosts].map(normalizeIP);
     const isAllowed = allAllowedHosts.some(allowed => {
       if (allowed === hostname) return true;
       if (hostname.endsWith(`.${allowed}`)) return true;

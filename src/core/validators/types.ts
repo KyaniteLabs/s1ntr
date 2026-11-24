@@ -132,8 +132,7 @@ export function stripReasoningText(code: string, domain?: string): string {
 }
 
 export function isAlreadyWrapped(code: string): boolean {
-  const trimmed = code.trim();
-  return trimmed.startsWith('<!DOCTYPE') || trimmed.startsWith('<html');
+  return /^(?:<!doctype\b|<html\b)/i.test(code.trim());
 }
 
 export function detectContamination(code: string): string[] {

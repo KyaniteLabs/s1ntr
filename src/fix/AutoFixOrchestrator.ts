@@ -204,21 +204,26 @@ export class AutoFixOrchestrator {
 
     if (session.status === Status.SUCCESS) {
       buildPassed = this.verifyBuild();
-      testsPassed = this.verifyTests();
+      testsPassed = buildPassed ? this.verifyTests() : false;
 
       if (!buildPassed) {
         Logger.warn('AutoFixOrchestrator', `Build failed after fix — reporting failure`);
+      } else if (!testsPassed) {
+        Logger.warn('AutoFixOrchestrator', `Tests failed after fix — reporting failure`);
       }
     }
 
+    const verified = session.status === Status.SUCCESS && buildPassed && testsPassed;
     const result: FixResult = {
-      success: session.status === Status.SUCCESS && buildPassed,
+      success: verified,
       taskId,
       changes,
       buildPassed,
       testsPassed,
       rolledBack,
-      error: this.getSessionError(session.status, session.stepCount) ?? (!buildPassed ? 'Fix applied but build verification failed' : undefined),
+      error: this.getSessionError(session.status, session.stepCount)
+        ?? (!buildPassed ? 'Fix applied but build verification failed'
+          : !testsPassed ? 'Fix applied but test verification failed' : undefined),
     };
 
     Logger.info('AutoFixOrchestrator', `Fix task ${taskId} completed`, {
@@ -358,17 +363,20 @@ export class AutoFixOrchestrator {
 
     if (session.status === Status.SUCCESS) {
       buildPassed = this.verifyBuild();
-      testsPassed = this.verifyTests();
+      testsPassed = buildPassed ? this.verifyTests() : false;
     }
 
+    const verified = session.status === Status.SUCCESS && buildPassed && testsPassed;
     const result: FixResult = {
-      success: session.status === Status.SUCCESS && buildPassed,
+      success: verified,
       taskId,
       changes,
       buildPassed,
       testsPassed,
       rolledBack,
-      error: this.getSessionError(session.status, session.stepCount) ?? (!buildPassed ? 'Fix applied but build verification failed' : undefined),
+      error: this.getSessionError(session.status, session.stepCount)
+        ?? (!buildPassed ? 'Fix applied but build verification failed'
+          : !testsPassed ? 'Fix applied but test verification failed' : undefined),
     };
 
     Logger.info('AutoFixOrchestrator', `Fix task ${taskId} completed`, {

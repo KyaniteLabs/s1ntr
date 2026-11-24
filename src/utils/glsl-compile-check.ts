@@ -79,41 +79,42 @@ const PAGE_TIMEOUT_MS = 15_000;
  * Lazily acquire a reusable headless browser instance.
  * Exported for use in shutdown hooks; call browserShutdown() to release.
  */
+let browserShutdownGen = 0;
+
 export async function getOrCreateBrowser(): Promise<import('puppeteer').Browser | null> {
-  if (browserInstance !== null) return browserInstance;
+  if (browserInstance !== null) {
+    if (browserInstance.connected !== false) return browserInstance;
+    browserInstance = null;
+  }
   if (browserInitPromise !== null) return browserInitPromise;
 
   const disableSandbox = process.env.LIMINAL_DISABLE_SANDBOX === 'true';
-
-  const chromePaths = [
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-    '/Applications/Chromium.app/Contents/MacOS/Chromium',
-    '/usr/bin/google-chrome',
-    '/usr/bin/chromium-browser',
-    '/usr/bin/chromium',
-    process.platform === 'win32' ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' : null,
-    process.platform === 'win32' ? 'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe' : null,
-  ].filter(Boolean) as string[];
-
-  let chromeExecutablePath: string | undefined;
-  for (const path of chromePaths) {
-    try {
-      const fs = await import('node:fs');
-      if (fs.existsSync(path)) {
-        chromeExecutablePath = path;
-        break;
-      }
-    } catch {
-      // Continue checking other paths
-    }
-  }
+  const gen = browserShutdownGen;
 
   browserInitPromise = (async () => {
     try {
+      const fs = await import('node:fs');
+      const chromePaths = [
+        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+        '/Applications/Chromium.app/Contents/MacOS/Chromium',
+        '/usr/bin/google-chrome',
+        '/usr/bin/chromium-browser',
+        '/usr/bin/chromium',
+        process.platform === 'win32' ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' : null,
+        process.platform === 'win32' ? 'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe' : null,
+      ].filter(Boolean) as string[];
+      let chromeExecutablePath: string | undefined;
+      for (const p of chromePaths) {
+        if (fs.existsSync(p)) {
+          chromeExecutablePath = p;
+          break;
+        }
+      }
+
       const puppeteer = await import('puppeteer');
       const { getChromeArgs } = await import('../security/SandboxConfig.js');
       prepareBrowserScratch();   // profile dir off the data volume + free-space check
-      browserInstance = await puppeteer.launch({
+      const launched = await puppeteer.launch({
         headless: true,
         executablePath: chromeExecutablePath,
         timeout: LAUNCH_TIMEOUT_MS,
@@ -126,6 +127,19 @@ export async function getOrCreateBrowser(): Promise<import('puppeteer').Browser 
           '--ignore-gpu-blocklist',
         ],
       });
+      if (gen !== browserShutdownGen) {
+        await launched.close().catch(() => undefined);
+        return null;
+      }
+      if (typeof launched.on === 'function') {
+        launched.on('disconnected', () => {
+          if (browserInstance === launched) {
+            browserInstance = null;
+            browserInitPromise = null;
+          }
+        });
+      }
+      browserInstance = launched;
       return browserInstance;
     } catch {
       browserInstance = null;
@@ -141,6 +155,7 @@ export async function getOrCreateBrowser(): Promise<import('puppeteer').Browser 
  * Release the shared browser instance. Call during process shutdown.
  */
 export async function browserShutdown(): Promise<void> {
+  browserShutdownGen += 1;
   const browser = browserInstance;
   browserInstance = null;
   browserInitPromise = null;

@@ -94,16 +94,14 @@ export function chromiumLaunchOptions(
 // --- process-once state (resettable in tests) ---
 
 let envApplied = false;
-let installAttempted = false;
-let lastInstallResult: BrowserInstallResult | null = null;
+const installAttemptResults = new Map<BrowserInstallKind, BrowserInstallResult>();
 let diskChecked = false;
 let lastDiskFinding: DiskPressureFinding | null = null;
 
 /** Test-only: reset once-per-process flags. */
 export function __resetBrowserPreflightForTests(): void {
   envApplied = false;
-  installAttempted = false;
-  lastInstallResult = null;
+  installAttemptResults.clear();
   diskChecked = false;
   lastDiskFinding = null;
 }
@@ -377,14 +375,10 @@ export function attemptBrowserInstallOnce(
   kind: BrowserInstallKind,
   options: BrowserPreflightOptions = {},
 ): BrowserInstallResult {
-  if (installAttempted && !options.forceInstallAttempt) {
-    return lastInstallResult ?? {
-      ok: false,
-      message: 'Install already attempted this process',
-      kind,
-    };
+  const existing = installAttemptResults.get(kind);
+  if (existing && !options.forceInstallAttempt) {
+    return existing;
   }
-  installAttempted = true;
 
   const write = options.stderrWrite ?? ((c: string) => {
     process.stderr.write(c.endsWith('\n') ? c : `${c}\n`);
@@ -399,7 +393,7 @@ export function attemptBrowserInstallOnce(
         'or set LIMINAL_ALLOW_BROWSER_INSTALL=1 for a real install.',
       kind,
     };
-    lastInstallResult = result;
+    installAttemptResults.set(kind, result);
     write(`[browser-preflight] ${result.message}`);
     return result;
   }
@@ -411,7 +405,7 @@ export function attemptBrowserInstallOnce(
 
   const installer = options.installer ?? defaultBrowserInstaller;
   const result = installer(kind);
-  lastInstallResult = result;
+  installAttemptResults.set(kind, result);
 
   if (result.ok) {
     write(`[browser-preflight] Install succeeded (${kind}).`);

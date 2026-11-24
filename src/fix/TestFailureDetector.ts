@@ -124,7 +124,7 @@ export class TestFailureDetector {
 
   constructor(config: DetectorConfig = {}) {
     this._config = {
-      testCommand: config.testCommand ?? 'pnpm test',
+      testCommand: config.testCommand ?? 'pnpm test --run',
       timeout: config.timeout ?? 300_000,
       includeRawOutput: config.includeRawOutput ?? false,
       testFilePattern: config.testFilePattern ?? /\.(test|spec)\.(ts|js|tsx|jsx)$/,
@@ -137,18 +137,20 @@ export class TestFailureDetector {
    *
    * @returns DetectionResult with failures and metadata
    */
-  detect(): DetectionResult {
+  detect(commandOverride?: string): DetectionResult {
+    const command = commandOverride ?? this._config.testCommand;
     Logger.info('TestFailureDetector', 'Running tests to detect failures...', {
-      command: this._config.testCommand,
+      command,
       timeout: this._config.timeout,
     });
 
     try {
       // Run tests, capturing output. Tests may "fail" (exit non-zero) which is expected.
-      const output = execSync(this._config.testCommand, {
+      const output = execSync(command, {
         encoding: 'utf-8',
         timeout: this._config.timeout,
         stdio: ['pipe', 'pipe', 'pipe'],
+        env: { ...process.env, CI: 'true', NO_COLOR: '1' },
         // Don't throw on non-zero exit - test failures are expected
         maxBuffer: 50 * 1024 * 1024, // 50MB buffer for large test output
       });
@@ -178,8 +180,23 @@ export class TestFailureDetector {
         };
       }
 
+      // Strip ANSI escapes before parsing so colorized CI output matches reliably
+      // eslint-disable-next-line no-control-regex
+      const cleanOutput = output.replace(/\x1b\[[0-9;]*m/g, '');
       // Parse the test output for failures
-      const failures = this.parseTestOutput(output);
+      const failures = this.parseTestOutput(cleanOutput);
+      if (failures.length === 0) {
+        const msg = error instanceof Error ? error.message : String(error);
+        Logger.error('TestFailureDetector', `Test command failed with no parsed failures: ${msg}`);
+        return {
+          success: false,
+          failures: [],
+          failingFileCount: 0,
+          totalFailedTests: 0,
+          error: `Test execution failed with unparseable output: ${msg}`,
+          rawOutput: this._config.includeRawOutput ? output : undefined,
+        };
+      }
 
       Logger.info('TestFailureDetector', `Detected ${failures.length} failing test files`, {
         totalFailedTests: failures.reduce((sum, f) => sum + f.failedCount, 0),
@@ -202,14 +219,16 @@ export class TestFailureDetector {
    * @returns DetectionResult with failures
    */
   detectPattern(testPattern: string): DetectionResult {
-    const originalCommand = this._config.testCommand;
-    this._config.testCommand = `${originalCommand} ${testPattern}`;
-
-    try {
-      return this.detect();
-    } finally {
-      this._config.testCommand = originalCommand;
+    if (!/^[A-Za-z0-9_./*@-]+$/.test(testPattern)) {
+      return {
+        success: false,
+        failures: [],
+        failingFileCount: 0,
+        totalFailedTests: 0,
+        error: `Invalid test pattern: ${testPattern}`,
+      };
     }
+    return this.detect(`${this._config.testCommand} ${testPattern}`);
   }
 
   /**
@@ -248,7 +267,8 @@ export class TestFailureDetector {
       const execError = error as { stdout?: string | Buffer; stderr?: string | Buffer };
       const stdout = this.bufferToString(execError.stdout);
       const stderr = this.bufferToString(execError.stderr);
-      return stdout || stderr || undefined;
+      const combined = [stdout, stderr].filter(Boolean).join('\n');
+      return combined || undefined;
     }
     return undefined;
   }

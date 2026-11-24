@@ -44,6 +44,49 @@ describe('audio feature cards (deterministic, no LLM)', () => {
     expect(f.barEnergy[0]).toBeLessThan(f.barEnergy[3]);
   });
 
+  // 20 s mono 8 kHz excerpt of music/renders/01_tone_16234db84e.wav (48 kHz render, song
+  // code sets 126 BPM). Its dotted-quarter accents make autocorrelation alone read 84 BPM.
+  it('reads song C: 126 BPM within +-2 on a real render whose accents pull toward 84', async () => {
+    const f = (await ingestReference(fx('song-c-126bpm.wav'))).features as Record<string, any>;
+    expect(Math.abs(f.bpm - 126)).toBeLessThanOrEqual(2);
+  });
+
+  it('reads a synthetic 126 BPM click with eighth-note subdivisions within +-2', async () => {
+    // Quarter clicks at 1.0, offbeat eighths at 0.55: the tatum is an eighth, the beat a quarter.
+    const rate = 22050;
+    const beat = 60 / 126;
+    const n = Math.floor(rate * 24);
+    const samples = new Int16Array(n);
+    const clickLen = Math.floor(rate * 0.02);
+    for (let i = 0; i * beat / 2 < 24; i++) {
+      const amp = i % 2 === 0 ? 1.0 : 0.55; // even eighth = quarter
+      const start = Math.round((i * beat) / 2 * rate);
+      for (let j = 0; j < clickLen && start + j < n; j++) {
+        const v = Math.round(amp * Math.sin((Math.PI * j) / clickLen) * 32767);
+        if (v > samples[start + j]) samples[start + j] = v;
+      }
+    }
+    const data = Buffer.from(samples.buffer);
+    const head = Buffer.alloc(44);
+    head.write('RIFF', 0, 'ascii');
+    head.writeUInt32LE(36 + data.length, 4);
+    head.write('WAVE', 8, 'ascii');
+    head.write('fmt ', 12, 'ascii');
+    head.writeUInt32LE(16, 16);
+    head.writeUInt16LE(1, 20);
+    head.writeUInt16LE(1, 22);
+    head.writeUInt32LE(rate, 24);
+    head.writeUInt32LE(rate * 2, 28);
+    head.writeUInt16LE(2, 32);
+    head.writeUInt16LE(16, 34);
+    head.write('data', 36, 'ascii');
+    head.writeUInt32LE(data.length, 40);
+    const p = path.join(tmp, 'click-126.wav');
+    writeFileSync(p, Buffer.concat([head, data]));
+    const f = (await ingestReference(p)).features as Record<string, any>;
+    expect(Math.abs(f.bpm - 126)).toBeLessThanOrEqual(2);
+  });
+
   it('fails loudly on a corrupt wav, naming the file', async () => {
     const bad = path.join(tmp, 'broken.wav');
     writeFileSync(bad, Buffer.from('RIFF0000WAVEjunk'));

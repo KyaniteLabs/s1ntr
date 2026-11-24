@@ -29,7 +29,7 @@ export type GrokCliRunner = (
 ) => Promise<{ readonly stdout: string }>;
 
 const runHeadless: GrokCliRunner = (args, options) => new Promise((resolve, reject) => {
-  execFile('grok', [...args], {
+  const child = execFile('grok', [...args], {
     cwd: options.cwd,
     encoding: 'utf8',
     signal: options.signal,
@@ -39,6 +39,7 @@ const runHeadless: GrokCliRunner = (args, options) => new Promise((resolve, reje
     if (error) reject(error);
     else resolve({ stdout });
   });
+  child.stdin?.end();
 });
 
 const runAcp: GrokCliRunner = (_args, options) => new Promise((resolve, reject) => {
@@ -157,10 +158,21 @@ const runAcp: GrokCliRunner = (_args, options) => new Promise((resolve, reject) 
 
 const PROMPT_ARG_SAFE_BYTES = 32 * 1024;
 
+export function sanitizeGrokErrorDetail(detail: string): string {
+  // Node's execFile error includes the full command line; strip raw prompt/system payloads
+  // so multi-megabyte base64 frames or prompts never leak into logs or error ledgers.
+  const redacted = detail
+    .replace(/--prompt-json\s+[\s\S]*?(?=\s--(?:json-schema|output-format|max-turns)\b|$)/g, '--prompt-json <redacted>')
+    .replace(/--system-prompt-override\s+[\s\S]*?(?=\s--prompt-json\b|$)/g, '--system-prompt-override <redacted>');
+  return redacted.length > 2000 ? `${redacted.slice(0, 2000)}…` : redacted;
+}
+
 const defaultRunner: GrokCliRunner = (args, options) => {
   const promptIndex = args.indexOf('--prompt-json');
   const promptBytes = promptIndex < 0 ? 0 : Buffer.byteLength(args[promptIndex + 1] ?? '');
-  return options.promptBlocks && promptBytes > PROMPT_ARG_SAFE_BYTES
+  const systemIndex = args.indexOf('--system-prompt-override');
+  const systemBytes = systemIndex < 0 ? 0 : Buffer.byteLength(args[systemIndex + 1] ?? '');
+  return options.promptBlocks && (promptBytes > PROMPT_ARG_SAFE_BYTES || systemBytes > PROMPT_ARG_SAFE_BYTES || (promptBytes + systemBytes) > PROMPT_ARG_SAFE_BYTES)
     ? runAcp(args, options)
     : runHeadless(args, options);
 };
@@ -238,7 +250,7 @@ export class GrokCliProvider extends BaseProvider {
         finishReason: 'stop',
       });
     } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
+      const detail = sanitizeGrokErrorDetail(error instanceof Error ? error.message : String(error));
       return err(new LLMError(`Grok CLI failed: ${detail}`, this.name));
     }
   }

@@ -262,7 +262,7 @@ export class RevideoRenderer implements VideoRenderer {
     );
 
     try {
-      execSync('npm install --loglevel=error', {
+      execSync('npm install --ignore-scripts --loglevel=error', {
         cwd: projectDir,
         stdio: 'pipe',
         timeout: 120_000,
@@ -316,19 +316,46 @@ export class RevideoRenderer implements VideoRenderer {
       await fs.writeFile(path.join(workDir, 'harness.js'), harnessJs);
       await fs.writeFile(path.join(workDir, 'index.html'), html);
 
-      const capturedFrames = await this.captureFrames(workDir, framesDir, { fps, width, height, timeoutMs: opts.timeoutMs });
+      // Start the render deadline once the browser capture phase begins so
+      // esbuild bundle time cannot preempt browser launch + SIGKILL budgeting.
+      const deadlineAt = Date.now() + opts.timeoutMs;
+      const remainingMs = (): number => {
+        const left = deadlineAt - Date.now();
+        if (left <= 0) {
+          throw new VideoRenderError('RENDER_TIMEOUT', `Revideo render exceeded timeout budget (${opts.timeoutMs}ms)`);
+        }
+        return left;
+      };
+
+      const capturedFrames = await this.captureFrames(workDir, framesDir, { fps, width, height, timeoutMs: remainingMs() });
       if (capturedFrames === 0) {
         throw new Error('Revideo canvas capture produced no frames; the scene did not render.');
       }
 
       await fs.mkdir(path.dirname(outputPath), { recursive: true });
-      await new VideoExporter().framesToVideo(framesDir, outputPath, fps);
+      const exporter = new VideoExporter({ deadlineAt });
+      await withRenderBudget(
+        'revideo ffmpeg stitch',
+        remainingMs(),
+        () => exporter.framesToVideo(framesDir, outputPath, fps),
+      );
+      let duration = capturedFrames / fps;
+      let actualWidth = width;
+      let actualHeight = height;
+      if (typeof exporter.probe === 'function') {
+        const probed = await exporter.probe(outputPath).catch(() => null);
+        if (probed && Number.isFinite(probed.durationSec) && probed.durationSec > 0) {
+          duration = probed.durationSec;
+          actualWidth = probed.width;
+          actualHeight = probed.height;
+        }
+      }
 
       return {
         outputPath,
-        duration: capturedFrames / fps,
-        width,
-        height,
+        duration,
+        width: actualWidth,
+        height: actualHeight,
         format: ext,
       };
     } finally {
@@ -726,7 +753,7 @@ export class RevideoRenderer implements VideoRenderer {
         if (systemChrome) {
           process.env.PUPPETEER_EXECUTABLE_PATH = systemChrome;
         }
-        const RENDER_TIMEOUT_MS = 300_000;
+        const RENDER_TIMEOUT_MS = opts.timeoutMs ?? 300_000;
         let renderTimeoutId: ReturnType<typeof setTimeout> | undefined;
         try {
           await Promise.race([
@@ -779,7 +806,7 @@ export class RevideoRenderer implements VideoRenderer {
       };
     } finally {
       if (projectDir) {
-        await fs.rm(projectDir, { recursive: true, force: true });
+        await fs.rm(projectDir, { recursive: true, force: true }).catch(() => {});
       }
     }
   }

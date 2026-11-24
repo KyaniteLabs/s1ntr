@@ -37,24 +37,45 @@ const DEFAULT_TIMEOUT_MS = 30_000;
  * responses from pages that can't respond. `process.kill()` sends SIGKILL
  * directly from Node.js — no CDP cooperation needed.
  */
-let wasKilled = false;
-
-function forceKillBrowser(browser: Browser): void {
+async function closeOrKillBrowser(browser: Browser, force: boolean): Promise<void> {
   const proc = browser.process();
+  if (!force) {
+    let graceTimer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        browser.close(),
+        new Promise<never>((_, reject) => {
+          graceTimer = setTimeout(() => reject(new Error('graceful close timed out')), 3_000);
+          graceTimer.unref?.();
+        }),
+      ]);
+      return;
+    } catch (err) {
+      Logger.debug('SandboxRunner', 'Graceful browser close failed; escalating to kill:', err);
+    } finally {
+      if (graceTimer) clearTimeout(graceTimer);
+    }
+  }
   if (proc?.pid) {
     try {
-      process.kill(proc.pid, 'SIGKILL');
-      wasKilled = true;
-    } catch (err) {
-      // Process may already be dead - log for debugging
-      Logger.debug('SandboxRunner', 'Failed to kill browser process:', err);
+      process.kill(-proc.pid, 'SIGKILL');
+    } catch {
+      try {
+        process.kill(proc.pid, 'SIGKILL');
+      } catch (err) {
+        Logger.debug('SandboxRunner', 'Failed to kill browser process:', err);
+      }
+    }
+    if (proc.exitCode === null && proc.signalCode === null) {
+      await new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, 1_500);
+        t.unref?.();
+        proc.once('exit', () => { clearTimeout(t); resolve(); });
+      });
     }
   } else {
-    // Fallback: try graceful close (may hang, but no PID available)
-    void browser.close().catch((err) => {
-      if (!wasKilled) {
-        Logger.debug('SandboxRunner', 'Failed to close browser:', err);
-      }
+    await browser.close().catch((err) => {
+      Logger.debug('SandboxRunner', 'Failed to close browser:', err);
     });
   }
 }
@@ -176,7 +197,7 @@ export async function runInSandbox(
   } finally {
     if (manualTimeoutHandle) clearTimeout(manualTimeoutHandle);
     if (browser) {
-      forceKillBrowser(browser);
+      await closeOrKillBrowser(browser, manualTimeoutFired);
     }
   }
 }

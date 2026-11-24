@@ -5,6 +5,7 @@
  * with ContextBuilder (the legacy loop); `analyzeVoiceFile` decodes with ffmpeg and runs AudioAnalyzer.
  */
 import { spawn } from 'node:child_process';
+import path from 'node:path';
 import { AudioAnalyzer } from './AudioAnalyzer.js';
 import type { VisualMappingParams } from './types.js';
 
@@ -41,18 +42,34 @@ const SAMPLE_RATE = 44100;
 /** Only the first seconds are analysed: enough to read pitch, tone and energy, bounded in cost. */
 const MAX_ANALYSIS_SECONDS = 10;
 const FFMPEG_TIMEOUT_MS = 30_000;
+const MAX_PCM_BYTES = SAMPLE_RATE * 2 * (MAX_ANALYSIS_SECONDS + 2);
 
-/** Decodes any audio file to mono float samples at 44.1 kHz through ffmpeg. */
+/** Decodes any local audio file to mono float samples at 44.1 kHz through ffmpeg. */
 export function decodeAudioFile(file: string, ffmpegBin = 'ffmpeg'): Promise<Float32Array> {
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(file) && !/^[a-zA-Z]:[\\/]/.test(file)) {
+    return Promise.reject(new Error(`VOICE_FILE_DECODE_FAILED: protocol URLs are forbidden (${file})`));
+  }
+  const resolved = path.resolve(file);
   return new Promise((resolve, reject) => {
-    const child = spawn(ffmpegBin, ['-v', 'quiet', '-t', String(MAX_ANALYSIS_SECONDS), '-i', file, '-f', 's16le', '-ac', '1',
+    const child = spawn(ffmpegBin, ['-v', 'error', '-protocol_whitelist', 'file', '-i', resolved, '-t', String(MAX_ANALYSIS_SECONDS), '-f', 's16le', '-ac', '1',
       '-ar', String(SAMPLE_RATE), 'pipe:1'], { stdio: ['ignore', 'pipe', 'ignore'] });
     const chunks: Buffer[] = [];
-    const timer = setTimeout(() => child.kill('SIGKILL'), FFMPEG_TIMEOUT_MS);
-    child.stdout.on('data', (c: Buffer) => chunks.push(c));
+    let totalBytes = 0;
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, FFMPEG_TIMEOUT_MS);
+    child.stdout.on('data', (c: Buffer) => {
+      if (totalBytes >= MAX_PCM_BYTES) return;
+      const slice = totalBytes + c.length > MAX_PCM_BYTES ? c.subarray(0, MAX_PCM_BYTES - totalBytes) : c;
+      chunks.push(slice);
+      totalBytes += slice.length;
+    });
     child.on('error', (e) => { clearTimeout(timer); reject(new Error(`VOICE_FILE_DECODE_FAILED: could not run ${ffmpegBin} (${e.message})`)); });
     child.on('close', (code) => {
       clearTimeout(timer);
+      if (timedOut) {
+        reject(new Error(`VOICE_FILE_DECODE_FAILED: ${file} timed out after ${FFMPEG_TIMEOUT_MS}ms`));
+        return;
+      }
       const pcm = Buffer.concat(chunks);
       if (code !== 0 || pcm.length < 4096) {
         reject(new Error(`VOICE_FILE_DECODE_FAILED: ${file} is not readable audio (ffmpeg exit ${code}, ${pcm.length} bytes)`));

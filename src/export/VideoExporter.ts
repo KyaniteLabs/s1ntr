@@ -2,10 +2,9 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
 import fs from 'fs/promises';
-import { 
-  sanitizeFilename, 
-  validateFilePath, 
-  PathSanitizationError 
+import {
+  validateFilePath,
+  PathSanitizationError
 } from '../security/PathSanitizer.js';
 import { ExportError } from '../errors/ExportError.js';
 
@@ -28,6 +27,9 @@ export class VideoExporter {
   constructor(options: VideoExporterOptions = {}) {
     this.ffmpegPath = options.ffmpegPath ?? 'ffmpeg';
     this.ffprobePath = options.ffprobePath ?? 'ffprobe';
+    if (options.deadlineAt !== undefined && !Number.isFinite(options.deadlineAt)) {
+      throw new ExportError('VideoExporter deadlineAt must be a finite epoch timestamp', { format: 'video' });
+    }
     this.deadlineAt = options.deadlineAt;
   }
 
@@ -81,18 +83,16 @@ export class VideoExporter {
 
   async extractFrames(input: string, outputDir: string, fps: number = 24): Promise<void> {
     const sanitizedInput = validateFilePath(input, process.cwd());
-    // For outputDir, validate that the directory name itself is safe
-    sanitizeFilename(path.basename(outputDir));
-    await fs.mkdir(outputDir, { recursive: true });
-    const args = this.buildExtractFramesArgs(sanitizedInput, outputDir, fps);
+    const sanitizedDir = validateFilePath(outputDir, process.cwd());
+    await fs.mkdir(sanitizedDir, { recursive: true });
+    const args = this.buildExtractFramesArgs(sanitizedInput, sanitizedDir, fps);
     await this.execFFmpeg(args);
   }
 
   async framesToVideo(framesDir: string, output: string, fps: number): Promise<void> {
-    // For framesDir, validate that the directory name itself is safe
-    sanitizeFilename(path.basename(framesDir));
+    const sanitizedDir = validateFilePath(framesDir, process.cwd());
     const sanitizedOutput = validateFilePath(output, process.cwd());
-    const args = this.buildFramesToVideoArgs(framesDir, sanitizedOutput, fps);
+    const args = this.buildFramesToVideoArgs(sanitizedDir, sanitizedOutput, fps);
     await this.execFFmpeg(args);
   }
 
@@ -103,9 +103,7 @@ export class VideoExporter {
 
     if (format === 'gif') {
       args.push(
-        '-vf', 'fps=15,scale=640:-1:flags=lanczos,split[s0][s1]',
-        '-palettegen', '[s0][palette]',
-        '-filter_complex', '[s1][palette]paletteuse',
+        '-vf', 'fps=15,scale=640:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse',
       );
     } else if (format === 'webm') {
       args.push('-c:v', 'libvpx-vp9', '-crf', '30', '-b:v', '0');
@@ -118,6 +116,9 @@ export class VideoExporter {
   }
 
   buildResizeArgs(input: string, output: string, width: number, height: number): string[] {
+    if (!Number.isInteger(width) || width < 1 || width > 8192 || !Number.isInteger(height) || height < 1 || height > 8192) {
+      throw new ExportError(`Invalid video resize dimensions: ${width}x${height}`, { format: 'video' });
+    }
     return [
       '-i', input, '-y',
       '-vf', `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`,
@@ -137,19 +138,25 @@ export class VideoExporter {
   }
 
   buildExtractFramesArgs(input: string, outputDir: string, fps: number): string[] {
+    if (!Number.isFinite(fps) || fps <= 0 || fps > 240) {
+      throw new ExportError(`Invalid fps for extractFrames: ${fps}`, { format: 'video' });
+    }
     const pattern = path.join(outputDir, 'frame_%05d.png');
     return [
-      '-i', input,
+      '-i', input, '-y',
       '-vf', `fps=${fps}`,
       pattern,
     ];
   }
 
   buildFramesToVideoArgs(framesDir: string, output: string, fps: number): string[] {
+    if (!Number.isFinite(fps) || fps <= 0 || fps > 240) {
+      throw new ExportError(`Invalid fps for framesToVideo: ${fps}`, { format: 'video' });
+    }
     const pattern = path.join(framesDir, 'frame_%05d.png');
     return [
       '-framerate', String(fps),
-      '-i', pattern,
+      '-i', pattern, '-y',
       '-c:v', 'libx264', '-crf', '18', '-pix_fmt', 'yuv420p',
       output,
     ];
@@ -159,13 +166,16 @@ export class VideoExporter {
 
   private async execFFmpeg(args: string[]): Promise<{ stdout: string; stderr: string }> {
     const left = this.deadlineAt === undefined ? Infinity : this.deadlineAt - Date.now();
+    if (!Number.isFinite(left) && this.deadlineAt !== undefined) {
+      throw new ExportError('FFmpeg not started: invalid deadline', { format: 'video' });
+    }
     if (left <= 0) {
       throw new ExportError('FFmpeg not started: the render deadline was already spent before encoding', { format: 'video' });
     }
     const timeout = Math.min(300000, left);
     try {
       // SIGKILL: ffmpeg may ignore the default SIGTERM mid-encode, and a hung encoder must not outlive the budget.
-      return await execFileAsync(this.ffmpegPath, args, { timeout, killSignal: 'SIGKILL' });
+      return await execFileAsync(this.ffmpegPath, ['-nostdin', ...args], { timeout, killSignal: 'SIGKILL' });
     } catch (error: unknown) {
       const err = error as { code?: string; message?: string; killed?: boolean };
       if (err.killed) {

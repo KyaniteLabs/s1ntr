@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { writeFileAtomicSync } from '../../utils/atomicWrite.js';
@@ -12,8 +12,9 @@ const stable = (value: unknown): string => {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;
   const record = value as Record<string, unknown>;
-  return `{${Object.keys(record).sort().map(key =>
-    `${JSON.stringify(key)}:${stable(record[key])}`).join(',')}}`;
+  return `{${Object.keys(record).sort()
+    .filter(key => record[key] !== undefined)
+    .map(key => `${JSON.stringify(key)}:${stable(record[key])}`).join(',')}}`;
 };
 const sha256 = (value: unknown): string =>
   createHash('sha256').update(stable(value)).digest('hex');
@@ -89,9 +90,17 @@ function unsignedSnapshot(snapshot: Omit<ActivatedKnowledgeSnapshot,
 export function verifyActivatedKnowledgeSnapshot(snapshot: ActivatedKnowledgeSnapshot,
   signingKey: string): boolean {
   const { snapshotDigest, signature, ...body } = snapshot;
+  if (typeof snapshotDigest !== 'string' || typeof signature !== 'string') return false;
   const expectedDigest = sha256(unsignedSnapshot(body));
   const expectedSignature = createHmac('sha256', signingKey).update(snapshotDigest).digest('hex');
-  return snapshotDigest === expectedDigest && signature === expectedSignature;
+  const digestBuf = Buffer.from(snapshotDigest, 'utf8');
+  const expectedDigestBuf = Buffer.from(expectedDigest, 'utf8');
+  const sigBuf = Buffer.from(signature, 'utf8');
+  const expectedSigBuf = Buffer.from(expectedSignature, 'utf8');
+  if (digestBuf.length !== expectedDigestBuf.length || sigBuf.length !== expectedSigBuf.length) {
+    return false;
+  }
+  return timingSafeEqual(digestBuf, expectedDigestBuf) && timingSafeEqual(sigBuf, expectedSigBuf);
 }
 
 export interface ActivatedKnowledgeStore {
@@ -466,17 +475,17 @@ export interface MatchedKnowledgeComparisonResult {
   readonly statisticallyConfirmed: boolean;
 }
 
-/** P(X >= wins) for X ~ Binomial(wins + losses, 0.5). */
+/** P(X >= wins) for X ~ Binomial(wins + losses, 0.5), computed in log-space to avoid 2**n overflow at n >= 1024. */
 function oneSidedSignTestPValue(wins: number, losses: number): number {
   const n = wins + losses;
   if (n === 0) return 1;
-  let coefficient = 1;
+  let logTerm = -n * Math.LN2;
   let tail = 0;
   for (let k = 0; k <= n; k += 1) {
-    if (k >= wins) tail += coefficient;
-    coefficient = coefficient * (n - k) / (k + 1);
+    if (k >= wins) tail += Math.exp(logTerm);
+    if (k < n) logTerm += Math.log(n - k) - Math.log(k + 1);
   }
-  return tail / 2 ** n;
+  return Math.min(1, tail);
 }
 
 export function validateMatchedKnowledgeComparison(input: MatchedKnowledgeComparison):
@@ -484,7 +493,8 @@ export function validateMatchedKnowledgeComparison(input: MatchedKnowledgeCompar
   if (!DIGEST.test(input.frozenAssignmentDigest)) {
     throw new Error('KNOWLEDGE_ASSIGNMENT_NOT_FROZEN');
   }
-  if (input.trials.length < 2 || new Set(input.trials.map(trial => trial.taskId)).size < 2) {
+  const uniqueTasks = new Set(input.trials.map(trial => trial.taskId));
+  if (input.trials.length < 2 || uniqueTasks.size < 2 || uniqueTasks.size !== input.trials.length) {
     throw new Error('KNOWLEDGE_MATCHED_MULTI_TASK_REQUIRED');
   }
   for (const trial of input.trials) {

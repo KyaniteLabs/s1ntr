@@ -113,7 +113,7 @@ export class ArchiveLearning {
     qualityScore: number,
     metadata?: Record<string, unknown>
   ) {
-    if (qualityScore < this.config.minQuality) {
+    if (!Number.isFinite(qualityScore) || qualityScore < this.config.minQuality) {
       return null;
     }
 
@@ -227,7 +227,9 @@ export class ArchiveLearning {
       return prompt;
     }
 
-    const examples = this.getExamples(domain);
+    const examples = this.archive.queryTeaching(domain, 'few-shot', {
+      minQuality: ArchiveLearning.DEFAULT_EXEMPLAR_FLOOR,
+    });
     if (examples.length === 0) {
       return prompt;
     }
@@ -244,8 +246,8 @@ export class ArchiveLearning {
       return { example: ex, score };
     });
 
-    // Sort by relevance (highest overlap first)
-    scored.sort((a, b) => b.score - a.score);
+    // Sort by relevance (highest overlap first), tie-breaking by qualityScore
+    scored.sort((a, b) => b.score - a.score || b.example.qualityScore - a.example.qualityScore);
 
     // Take top N examples, budget to 2000 chars total
     const maxChars = 2000;

@@ -21,6 +21,10 @@ interface PluginManifest { id: string; entry: string; version?: string; domains:
 
 function readPluginFile(dir: string, name: string): string {
   if (path.isAbsolute(name)) throw new Error('PLUGIN_FILE_OUTSIDE_DIRECTORY');
+  const baseReal = realpathSync(dir);
+  const candidate = path.resolve(baseReal, name);
+  if (!candidate.startsWith(baseReal + path.sep)) throw new Error('PLUGIN_FILE_OUTSIDE_DIRECTORY');
+  if (existsSync(candidate) && realpathSync(candidate) !== candidate) throw new Error('PLUGIN_FILE_LINK_REFUSED');
   const file = normalizePath(dir, name);
   if (!file.startsWith(dir + path.sep)) throw new Error('PLUGIN_FILE_OUTSIDE_DIRECTORY');
   if (realpathSync(file) !== file) throw new Error('PLUGIN_FILE_LINK_REFUSED');

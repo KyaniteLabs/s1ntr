@@ -127,12 +127,14 @@ describe('HeadlessRenderer route handler — deny-by-default', () => {
     expect(blocked.abort).toHaveBeenCalledWith('blockedbyclient');
     expect(blocked.continue).not.toHaveBeenCalled();
 
-    // jsdelivr is an allowlisted CDN that is NOT served by the local p5 fallback,
-    // so it must continue to the network rather than abort or fulfill.
-    const allowed = makeRoute('https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js');
+    // jsdelivr is an allowlisted CDN. The URL must be one no pinned vendor asset
+    // serves (three@0.160.0 now is, and gets fulfilled), so it continues to the
+    // network rather than abort or fulfill.
+    const allowed = makeRoute('https://cdn.jsdelivr.net/npm/lodash@4.17.21/lodash.min.js');
     await handler!(allowed);
     expect(allowed.continue).toHaveBeenCalledTimes(1);
     expect(allowed.abort).not.toHaveBeenCalled();
+    expect(allowed.fulfill).not.toHaveBeenCalled();
   });
 });
 

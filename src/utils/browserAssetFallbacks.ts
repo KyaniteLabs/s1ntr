@@ -1,6 +1,7 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
+import { isAbsolute, relative, resolve } from 'node:path';
 import { readVendorAsset } from './vendorAssets.js';
 import { VENDORED_LIBRARIES } from '../core/wrappers/VendoredLibraries.js';
 import {
@@ -282,8 +283,10 @@ export function resolveChromiumExecutablePathLookup(): string | undefined {
     preferredPath = undefined;
   }
   if (preferredPath && existsSync(preferredPath)) {
-    // When browsers path is pinned, only accept binaries under that root.
-    if (!explicitBrowsersPath || preferredPath.startsWith(explicitBrowsersPath)) {
+    // When browsers path is pinned, only accept binaries strictly inside that directory.
+    const rel = explicitBrowsersPath ? relative(resolve(explicitBrowsersPath), resolve(preferredPath)) : '';
+    const insidePinned = !explicitBrowsersPath || (rel !== '' && !rel.startsWith('..') && !isAbsolute(rel));
+    if (insidePinned) {
       return preferredPath;
     }
   }
@@ -305,9 +308,14 @@ export function resolveChromiumExecutablePathLookup(): string | undefined {
   const browsersPath = explicitBrowsersPath ?? '/opt/pw-browsers';
   if (existsSync(browsersPath)) {
     try {
-      const dirs = readdirSync(browsersPath);
+      const revisionOf = (name: string): number => {
+        const m = /(\d+)$/.exec(name);
+        return m ? Number.parseInt(m[1], 10) : -1;
+      };
+      const dirs = readdirSync(browsersPath)
+        .filter((d) => d.startsWith('chromium'))
+        .sort((a, b) => revisionOf(b) - revisionOf(a) || b.localeCompare(a));
       for (const dir of dirs) {
-        if (!dir.startsWith('chromium')) continue;
         for (const subPath of [
           'chrome-linux/chrome',
           'chrome-linux64/chrome',

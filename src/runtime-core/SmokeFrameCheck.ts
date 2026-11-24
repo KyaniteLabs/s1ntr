@@ -14,7 +14,7 @@ import { measureRenderEvidence } from '../perception/RenderEvidencePerception.js
 import type { RenderMeasure } from '../core/types/GenerationEvaluation.js';
 
 const FRAME_DOMAINS: ReadonlySet<string> = new Set([
-  'p5', 'three', 'shader', 'glsl', 'hydra', 'svg', 'html', 'dataviz', 'custom', 'ascii', 'kinetic', 'hyperframes', 'textgen', 'nbe',
+  'p5', 'three', 'shader', 'glsl', 'hydra', 'svg', 'html', 'dataviz', 'custom', 'meta', 'ascii', 'kinetic', 'hyperframes', 'textgen', 'nbe',
 ]);
 
 /** Pieces meant to move. Still media (svg, ascii, textgen, dataviz) may legitimately draw one frame. */

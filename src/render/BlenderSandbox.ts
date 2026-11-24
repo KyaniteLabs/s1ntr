@@ -96,10 +96,12 @@ function unavailable(detail: string): SandboxPlan {
 export function buildSandboxedCommand(platform: NodeJS.Platform, spec: SandboxSpec, deps: SandboxDeps): SandboxPlan {
   const codec = spec.readOnlyFiles !== undefined;
   if (!codec && deps.hostEnv[BLENDER_UNSANDBOXED_ENV] === '1') {
+    // Resolve bare binary names against host PATH before spawn runs with stripped PATH.
+    const resolvedCommand = deps.which(spec.command) ?? spec.command;
     return {
       ok: true,
       sandbox: 'none',
-      command: spec.command,
+      command: resolvedCommand,
       args: spec.args,
       warning:
         `${BLENDER_UNSANDBOXED_ENV}=1: running the Blender script WITHOUT an OS sandbox. `

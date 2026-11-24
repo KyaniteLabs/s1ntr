@@ -605,6 +605,9 @@ export class RalphLoop {
     const repairHistory: GenerationEvaluation[] = [];
 
     const evalMode = normalizedOptions.evalMode ?? getEvalMode();
+    const guardrails = normalizedOptions.safetyConfig
+      ? new SafetyGuardrails(normalizedOptions.safetyConfig)
+      : null;
 
     // Main loop
     try {
@@ -614,10 +617,9 @@ export class RalphLoop {
         break;
       }
 
-      // Safety guardrails check
-      if (normalizedOptions.safetyConfig) {
-        const guardrails = new SafetyGuardrails(normalizedOptions.safetyConfig);
-        if (!guardrails.checkAll(finalScore)) {
+      // Safety guardrails check (persists across iterations for circuit breaker, rate limit, budget)
+      if (guardrails) {
+        if (!guardrails.checkAll(iteration > 0 ? finalScore : undefined)) {
           reason = 'safety guardrails triggered';
           break;
         }

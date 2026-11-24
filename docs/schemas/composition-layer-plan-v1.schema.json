@@ -1,0 +1,249 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:sinter:schema:layer-plan:1.0",
+  "title": "Sinter external layer plan 1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schemaVersion", "id", "title", "canvas", "provenance", "layers"],
+  "properties": {
+    "schema": { "const": "sinter.layer-plan" },
+    "schemaVersion": { "const": "1.0" },
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+    "title": { "type": "string", "minLength": 1 },
+    "canvas": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width", "height", "backgroundColor"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 },
+        "backgroundColor": { "type": "string", "minLength": 1 }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generatedAt", "sinterVersion"],
+      "properties": {
+        "generatedAt": { "type": "string", "format": "date-time" },
+        "sinterVersion": { "type": "string", "minLength": 1 },
+        "sourceCommit": { "type": "string", "minLength": 1 },
+        "sourceFingerprint": { "type": "string", "minLength": 1 },
+        "creativeIntelligence": { "$ref": "#/$defs/creativeIntelligence" },
+        "creativeThesis": { "$ref": "#/$defs/creativeThesis" }
+      }
+    },
+    "layers": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/layer" }
+    }
+  },
+  "$defs": {
+    "creativeIntelligence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["thesisId", "principleId", "contractVersion", "projectionDigest"],
+      "properties": {
+        "thesisId": { "type": "string", "minLength": 1 },
+        "principleId": { "type": "string", "minLength": 1 },
+        "contractVersion": { "type": "integer", "minimum": 1 },
+        "projectionDigest": { "type": "string", "minLength": 1 }
+      }
+    },
+    "creativeThesis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schemaVersion", "thesisId", "briefDigest", "disposition", "exampleFree", "intendedExperienceMeaning", "perceptualEmotionalArc", "principles", "tensions", "uncertaintiesAssumptions", "nonGoals", "hardFloors", "openCreativeDimensions", "candidateSuccessEvidence", "excludedAlternatives", "citations", "unsupported"],
+      "properties": {
+        "schema": { "const": "sinter.creative-thesis" },
+        "schemaVersion": { "const": 1 },
+        "thesisId": { "type": "string", "minLength": 1 },
+        "briefDigest": { "type": "string", "minLength": 1 },
+        "disposition": { "enum": ["supported", "unsupported"] },
+        "exampleFree": { "const": true },
+        "intendedExperienceMeaning": { "type": "string", "minLength": 1 },
+        "perceptualEmotionalArc": { "$ref": "#/$defs/nonEmptyStrings" },
+        "tensions": { "$ref": "#/$defs/nonEmptyStrings" },
+        "uncertaintiesAssumptions": { "$ref": "#/$defs/nonEmptyStrings" },
+        "nonGoals": { "$ref": "#/$defs/nonEmptyStrings" },
+        "hardFloors": { "$ref": "#/$defs/nonEmptyStrings" },
+        "openCreativeDimensions": { "$ref": "#/$defs/nonEmptyStrings" },
+        "candidateSuccessEvidence": { "$ref": "#/$defs/nonEmptyStrings" },
+        "excludedAlternatives": { "$ref": "#/$defs/nonEmptyStrings" },
+        "principles": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/thesisPrinciple" } },
+        "citations": { "type": "array", "items": { "$ref": "#/$defs/thesisCitation" } },
+        "unsupported": { "type": "array", "items": { "$ref": "#/$defs/unsupportedRecord" } },
+        "formTypography": { "$ref": "#/$defs/formTypographyPlan" }
+      },
+      "description": "formTypography is optional for backward compatibility with prior-v1 theses; validators migrate absent plans from intendedExperienceMeaning."
+    },
+    "nonEmptyStrings": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "thesisPrinciple": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["principleId", "disposition", "applicabilityReason", "contractIdentity"],
+      "properties": {
+        "principleId": { "type": "string", "minLength": 1 },
+        "disposition": { "enum": ["selected", "relevant", "unsupported"] },
+        "applicabilityReason": { "type": "string", "minLength": 1 },
+        "contractIdentity": { "$ref": "#/$defs/contractIdentity" }
+      }
+    },
+    "contractIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["principleId", "contractVersion", "projectionDigest"],
+      "properties": {
+        "principleId": { "type": "string", "minLength": 1 },
+        "contractVersion": { "type": "integer", "minimum": 0 },
+        "projectionDigest": { "type": "string" }
+      }
+    },
+    "thesisCitation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["principleId", "contractVersion", "sourceId", "locator"],
+      "properties": {
+        "principleId": { "type": "string", "minLength": 1 },
+        "contractVersion": { "type": "integer", "minimum": 1 },
+        "sourceId": { "type": "string", "minLength": 1 },
+        "locator": { "type": "string", "minLength": 1 }
+      }
+    },
+    "unsupportedRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requested", "reason"],
+      "properties": {
+        "requested": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    },
+    "formTypographyPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selected", "rationale", "declaredTargets", "boundedRevision", "excluded"],
+      "properties": {
+        "selected": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/formTypographySelection" } },
+        "rationale": { "type": "string", "minLength": 1 },
+        "declaredTargets": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/formTypographyDeclaredTarget" } },
+        "boundedRevision": { "$ref": "#/$defs/formTypographyRevision" },
+        "excluded": { "type": "array", "items": { "$ref": "#/$defs/formTypographyExclusion" } }
+      }
+    },
+    "formTypographySelection": {
+      "type": "object", "additionalProperties": false,
+      "required": ["rowId", "sourceLocator", "rationale", "evidenceIds"],
+      "properties": { "rowId": { "type": "string", "minLength": 1 }, "sourceLocator": { "type": "string", "minLength": 1 }, "rationale": { "type": "string", "minLength": 1 }, "evidenceIds": { "$ref": "#/$defs/nonEmptyStrings" } }
+    },
+    "formTypographyDeclaredTarget": {
+      "type": "object", "additionalProperties": false,
+      "required": ["rowId", "metric", "target"],
+      "properties": { "rowId": { "type": "string", "minLength": 1 }, "metric": { "type": "string", "minLength": 1 }, "target": { "type": "string", "minLength": 1 } },
+      "description": "Declared design target. NOT an observed measurement — render-gate evidence is reported separately."
+    },
+    "formTypographyRevision": {
+      "type": "object", "additionalProperties": false,
+      "required": ["maxAttempts", "operator", "trigger"],
+      "properties": { "maxAttempts": { "const": 1 }, "operator": { "type": "string", "minLength": 1 }, "trigger": { "type": "string", "minLength": 1 } }
+    },
+    "formTypographyExclusion": {
+      "type": "object", "additionalProperties": false,
+      "required": ["rowId", "disposition", "reason"],
+      "properties": { "rowId": { "type": "string", "minLength": 1 }, "disposition": { "enum": ["historical", "unsupported"] }, "reason": { "type": "string", "minLength": 1 } }
+    },
+    "layer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "name", "sourceIndex", "domain", "role", "blendMode", "opacity",
+        "zIndex", "bounds", "alpha", "artifact", "generation"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+        "name": { "type": "string", "minLength": 1 },
+        "sourceIndex": { "type": "integer", "minimum": 0 },
+        "domain": {
+          "enum": [
+            "p5", "glsl", "three", "hydra", "strudel", "tone", "revideo",
+            "hyperframes", "ascii", "textgen", "instrument"
+          ]
+        },
+        "role": { "enum": ["background", "foreground", "audio"] },
+        "blendMode": { "enum": ["normal", "multiply", "screen", "overlay", "darken", "lighten", "difference", "exclusion"] },
+        "opacity": { "type": "number", "minimum": 0, "maximum": 1 },
+        "zIndex": { "type": "integer" },
+        "bounds": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["x", "y", "width", "height"],
+          "properties": {
+            "x": { "type": "number", "minimum": 0, "maximum": 1 },
+            "y": { "type": "number", "minimum": 0, "maximum": 1 },
+            "width": { "type": "number", "minimum": 0, "maximum": 1 },
+            "height": { "type": "number", "minimum": 0, "maximum": 1 }
+          }
+        },
+        "alpha": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode"],
+          "properties": {
+            "mode": { "enum": ["embedded", "matte", "opaque"] },
+            "path": { "type": "string", "pattern": "^(?!/)(?![A-Za-z][A-Za-z0-9+.-]*:)(?!.*\\.\\.).+" },
+            "channel": { "enum": ["alpha", "luminance"] },
+            "invert": { "type": "boolean" },
+            "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+          }
+        },
+        "artifact": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "mimeType", "sha256"],
+          "properties": {
+            "path": { "type": "string", "pattern": "^(?!/)(?![A-Za-z][A-Za-z0-9+.-]*:)(?!.*\\.\\.).+" },
+            "mimeType": { "type": "string", "pattern": "^[a-z0-9.+-]+/[a-z0-9.+-]+$" },
+            "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+          }
+        },
+        "generation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["prompt", "generator", "generatedAt"],
+          "properties": {
+            "prompt": { "type": "string", "minLength": 1 },
+            "generator": {
+              "enum": [
+                "p5", "three", "shader", "tone", "music", "strudel", "hydra",
+                "ascii", "video", "html", "textgen", "group"
+              ]
+            },
+            "modelProvider": { "type": "string", "minLength": 1 },
+            "modelName": { "type": "string", "minLength": 1 },
+            "generatedAt": { "type": "string", "format": "date-time" }
+          }
+        }
+      },
+      "allOf": [{
+        "if": {
+          "properties": { "alpha": { "properties": { "mode": { "const": "opaque" } } } }
+        },
+        "then": { "properties": { "role": { "const": "background" } } }
+      }, {
+        "if": {
+          "properties": { "alpha": { "properties": { "mode": { "const": "matte" } } } }
+        },
+        "then": {
+          "properties": {
+            "alpha": { "required": ["mode", "path", "channel", "sha256"] }
+          }
+        }
+      }]
+    }
+  }
+}

@@ -238,6 +238,10 @@ export function isAllowedRenderRequestUrl(rawUrl: string,
     return true;
   }
 
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    return false;
+  }
+
   if (policy === 'isolated') {
     // Strudel sample banks stay remote until they are vendored (#924
     // follow-up; the wrapper CSP declares both hosts). Vendored library
@@ -248,10 +252,6 @@ export function isAllowedRenderRequestUrl(rawUrl: string,
     // and denies everything else.
     const host = url.hostname.toLowerCase();
     return host === 'strudel.b-cdn.net' || host === 'raw.githubusercontent.com';
-  }
-
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    return false;
   }
 
   const host = url.hostname.toLowerCase();
@@ -600,6 +600,15 @@ export class HeadlessRenderer {
           executablePath,
           args: getChromeArgs({ forceDisableSandbox: disableSandbox }),
         });
+        const launched = this.browser;
+        if (typeof launched.on === 'function') {
+          launched.on('disconnected', () => {
+            if (this.browser === launched) {
+              this.browser = null;
+              this.context = null;
+            }
+          });
+        }
         const browserVersion = typeof this.browser.version === 'function'
           ? this.browser.version()
           : 'unknown';
@@ -614,6 +623,11 @@ export class HeadlessRenderer {
 
       Logger.info('HeadlessRenderer', 'Browser initialized');
     } catch (error) {
+      if (this.browser && !this.context) {
+        const orphan = this.browser;
+        this.browser = null;
+        await orphan.close().catch(() => undefined);
+      }
       Logger.error('HeadlessRenderer', 'Failed to initialize browser:', error);
       throw new Error(`Failed to initialize headless browser: ${error instanceof Error ? error.message : 'unknown error'}`,
         { cause: error instanceof Error ? error : undefined });
@@ -2007,10 +2021,18 @@ export class HeadlessRenderer {
     const { context, browser } = this;
     this.context = null;
     this.browser = null;
-    await context?.close();
-    await browser?.close();
-
-    HeadlessRenderer.instance = null;
+    try {
+      await context?.close();
+    } catch (err) {
+      Logger.debug('HeadlessRenderer', 'Context close error during shutdown:', err);
+    } finally {
+      await browser?.close().catch((err) => {
+        Logger.debug('HeadlessRenderer', 'Browser close error during shutdown:', err);
+      });
+      if (HeadlessRenderer.instance === this) {
+        HeadlessRenderer.instance = null;
+      }
+    }
     Logger.info('HeadlessRenderer', 'Browser closed');
   }
 

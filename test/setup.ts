@@ -142,6 +142,7 @@ let originalTestEnv: string | undefined;
 // in src/fs/projectRoot.ts reads SINTER_PROJECT_ROOT and falls back to cwd.
 let sinterRootDir: string | undefined;
 let savedSinterRoot: string | undefined;
+let savedEventLedgerPath: string | undefined;
 
 beforeAll(() => {
   // Always clear LLM environment variables so ordinary unit tests never see
@@ -173,6 +174,10 @@ beforeAll(() => {
   savedSinterRoot = process.env.SINTER_PROJECT_ROOT;
   sinterRootDir = mkdtempSync(join(tmpdir(), 'sinter-test-root-'));
   process.env.SINTER_PROJECT_ROOT = sinterRootDir;
+  // Telemetry events default to ~/.sinter/telemetry/events. Without this, a unit run wrote fake
+  // generation.scored rows (model test-model, score 0.92) into the operator's real ledger.
+  savedEventLedgerPath = process.env.SINTER_EVENT_LEDGER_PATH;
+  process.env.SINTER_EVENT_LEDGER_PATH = join(sinterRootDir, 'telemetry', 'events');
 });
 
 beforeEach(() => {
@@ -222,6 +227,11 @@ afterAll(() => {
     process.env.SINTER_PROJECT_ROOT = savedSinterRoot;
   } else {
     delete process.env.SINTER_PROJECT_ROOT;
+  }
+  if (savedEventLedgerPath !== undefined) {
+    process.env.SINTER_EVENT_LEDGER_PATH = savedEventLedgerPath;
+  } else {
+    delete process.env.SINTER_EVENT_LEDGER_PATH;
   }
   if (sinterRootDir) {
     rmSync(sinterRootDir, { recursive: true, force: true });

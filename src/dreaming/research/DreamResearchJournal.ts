@@ -12,8 +12,9 @@ function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
   if (value && typeof value === 'object') {
     const record = value as Record<string, unknown>;
-    return `{${Object.keys(record).sort().map(key =>
-      `${JSON.stringify(key)}:${canonical(record[key])}`).join(',')}}`;
+    return `{${Object.keys(record).sort()
+      .filter(key => record[key] !== undefined)
+      .map(key => `${JSON.stringify(key)}:${canonical(record[key])}`).join(',')}}`;
   }
   return JSON.stringify(value) ?? 'null';
 }
@@ -96,7 +97,7 @@ export class DreamResearchJournal {
         (event_digest, aggregate_id, revision) VALUES (?, ?, ?)`)
         .run(event.eventDigest, event.aggregateId, event.revision);
       return event;
-    })();
+    }).immediate();
   }
 
   events(aggregateId: string): DreamResearchEvent[] {
@@ -131,11 +132,18 @@ export class DreamResearchJournal {
   }
 
   projection(aggregateId: string): DreamResearchSnapshot {
-    const row = this.db.prepare(`SELECT snapshot_json, snapshot_digest
+    const latestRev = (this.db.prepare(`SELECT MAX(revision) AS rev
+      FROM dream_research_events WHERE aggregate_id = ?`).get(aggregateId) as { rev: number | null } | undefined)?.rev ?? 0;
+    const row = this.db.prepare(`SELECT revision, snapshot_json, snapshot_digest
       FROM dream_research_projections WHERE aggregate_id = ?`).get(aggregateId) as
-      { snapshot_json: string; snapshot_digest: string } | undefined;
-    if (row && digest(JSON.parse(row.snapshot_json)) === row.snapshot_digest) {
-      return Object.freeze(JSON.parse(row.snapshot_json) as DreamResearchSnapshot);
+      { revision: number; snapshot_json: string; snapshot_digest: string } | undefined;
+    if (row && row.revision === latestRev) {
+      try {
+        const parsed = JSON.parse(row.snapshot_json) as DreamResearchSnapshot;
+        if (digest(parsed) === row.snapshot_digest) {
+          return Object.freeze(parsed);
+        }
+      } catch { /* fall through to rebuild corrupted projection */ }
     }
     return this.rebuildProjection(aggregateId);
   }
@@ -177,7 +185,7 @@ export class DreamResearchJournal {
         commandId: input.commandId, type: 'operation-completed',
         payload: { operationId: input.operationId, responseDigest } });
       return responseDigest;
-    })();
+    }).immediate();
   }
 
   operationResult<T>(operationId: string, expectedDigest: string): T {

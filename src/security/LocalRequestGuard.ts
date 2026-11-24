@@ -30,9 +30,14 @@ export function allowedHostsFor(bindHost?: string | null): ReadonlySet<string> |
 
 /** Hostname from a Host header without port or IPv6 brackets; null when absent, '' when malformed. */
 export function hostnameOf(hostHeader: string | undefined): string | null {
-  if (typeof hostHeader !== 'string' || hostHeader === '') return null;
+  if (hostHeader === undefined) return null;
+  if (typeof hostHeader !== 'string' || hostHeader === '' || /\s/.test(hostHeader)) return '';
   try {
-    return normalize(new URL(`http://${hostHeader}`).hostname);
+    const parsed = new URL(`http://${hostHeader}`);
+    if (parsed.username !== '' || parsed.password !== '' || parsed.pathname !== '/' || parsed.search !== '' || parsed.hash !== '') {
+      return '';
+    }
+    return normalize(parsed.hostname);
   } catch {
     return '';
   }
@@ -40,7 +45,9 @@ export function hostnameOf(hostHeader: string | undefined): string | null {
 
 /** True when a browser sent this write from another site. */
 export function isCrossSiteWrite(headers: IncomingHttpHeaders, allowedHosts: ReadonlySet<string> | null): boolean {
-  if (headers['sec-fetch-site'] === 'cross-site') return true;
+  const sfs = headers['sec-fetch-site'];
+  const sfsValues = Array.isArray(sfs) ? sfs : sfs !== undefined ? [sfs] : [];
+  if (sfsValues.some((v) => v.trim().toLowerCase() === 'cross-site')) return true;
   const origin = headers.origin;
   if (origin === undefined) return false;
   if (origin === 'null') return true;

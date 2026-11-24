@@ -346,7 +346,13 @@ export async function sweepRejects(cwd: string, options: SweepOptions = {}): Pro
   const maxLlmRepairs = options.maxLlmRepairs ?? 2;
   const patternThreshold = options.patternThreshold ?? 3;
 
-  const prevWatermark = existsSync(watermarkPath) ? readFileSync(watermarkPath, 'utf8').trim() : '';
+  const prevWatermarkRaw = existsSync(watermarkPath) ? readFileSync(watermarkPath, 'utf8').trim() : '';
+  const [prevWatermarkTs, prevWatermarkFile] = prevWatermarkRaw.includes('\t')
+    ? prevWatermarkRaw.split('\t', 2)
+    : [prevWatermarkRaw, ''];
+  if (!existsSync(failuresDir)) {
+    return { scanned: 0, salvaged: [], deadCount: 0, falseKillRate: 0, stagedLessonIds: [], skipped: 0 };
+  }
   const files = readdirSync(failuresDir)
     .filter(name => name.endsWith('.json'))
     .map(name => {
@@ -358,35 +364,49 @@ export async function sweepRejects(cwd: string, options: SweepOptions = {}): Pro
       } catch { return null; }
     })
     .filter((x): x is { name: string; record: NonNullable<typeof x>['record'] } => x !== null)
-    .filter(({ record }) => (record.timestamp ?? '') > prevWatermark && (record.code ?? '').trim().length > 0)
-    .sort((a, b) => (a.record.timestamp ?? '').localeCompare(b.record.timestamp ?? ''));
+    .filter(({ name, record }) => {
+      const ts = record.timestamp ?? '';
+      if ((record.code ?? '').trim().length === 0) return false;
+      if (ts > prevWatermarkTs) return true;
+      return ts === prevWatermarkTs && prevWatermarkFile !== '' && name > prevWatermarkFile;
+    })
+    .sort((a, b) => {
+      const ta = a.record.timestamp ?? '';
+      const tb = b.record.timestamp ?? '';
+      if (ta !== tb) return ta < tb ? -1 : 1;
+      return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+    });
 
   const batch = files.slice(0, maxPerSweep);
   const skipped = files.length - batch.length;
-  const patterns: Record<string, number> = existsSync(patternsPath)
-    ? JSON.parse(readFileSync(patternsPath, 'utf8')) as Record<string, number>
-    : {};
+  const patterns: Record<string, number> = (() => {
+    if (!existsSync(patternsPath)) return {};
+    try { return JSON.parse(readFileSync(patternsPath, 'utf8')) as Record<string, number>; } catch { return {}; }
+  })();
   const stagedLessonIds: string[] = [];
   const result: SweepResult = { scanned: batch.length, salvaged: [], deadCount: 0, falseKillRate: 0, stagedLessonIds, skipped };
   if (batch.length === 0) return result;
 
   mkdirSync(poolDir, { recursive: true });
   let llmBudget = maxLlmRepairs;
-  let newest = prevWatermark;
+  let newestTs = prevWatermarkTs;
+  let newestFile = prevWatermarkFile;
 
-  for (const { record } of batch) {
-    newest = record.timestamp ?? newest;
+  for (const { name: fileName, record } of batch) {
+    if (record.timestamp !== undefined) {
+      newestTs = record.timestamp;
+      newestFile = fileName;
+    }
     const raw = record.code ?? '';
     const domain = record.domain && record.domain !== 'unknown' ? record.domain : detectRescueDomain(raw);
     const id = (record.id ?? record.timestamp ?? 'unknown').slice(0, 18);
+    const safeId = id.replace(/[^a-zA-Z0-9_-]/g, '-') || 'unknown';
+    const safeTs = (record.timestamp ?? safeId).replace(/[^a-zA-Z0-9_-]/g, '-') || 'unknown';
     const mechanical = mechanicalRecovery(raw, domain);
     let classification: SweepResult['salvaged'][number]['classification'] | null = null;
     let code = '';
     let stage = '';
 
-    if (mechanical.stage === 'raw' || mechanical.stage === 'strudel-normalize' || mechanical.stage === null) {
-      // raw = false kill; null = dead mechanically
-    }
     if (mechanical.stage !== null) {
       classification = mechanical.stage === 'raw' ? 'false-kill'
         : mechanical.stage === 'strudel-normalize' ? 'false-kill'
@@ -411,7 +431,7 @@ export async function sweepRejects(cwd: string, options: SweepOptions = {}): Pro
 
     if (classification) {
       result.salvaged.push({ id, domain, classification, stage });
-      const fileBase = `${(record.timestamp ?? id).replace(/[:.]/g, '-')}-${id}`;
+      const fileBase = `${safeTs}-${safeId}`;
       // Retain the original evidence before the rolling failure log prunes it.
       // Repair attribution is explicitly unknown; the original model is not
       // necessarily the model that produced an LLM-repaired piece.
@@ -433,6 +453,7 @@ export async function sweepRejects(cwd: string, options: SweepOptions = {}): Pro
               : [];
             if (!staging.some(l => l.id === lesson.id)) {
               staging.push(lesson);
+              mkdirSync(dirname(stagingPath), { recursive: true });
               writeFileSync(stagingPath, JSON.stringify(staging, null, 2));
               stagedLessonIds.push(lesson.id);
             }
@@ -442,9 +463,10 @@ export async function sweepRejects(cwd: string, options: SweepOptions = {}): Pro
     }
   }
 
+  mkdirSync(dirname(patternsPath), { recursive: true });
   writeFileSync(patternsPath, JSON.stringify(patterns, null, 2));
   mkdirSync(dirname(watermarkPath), { recursive: true });
-  writeFileSync(watermarkPath, newest);
+  writeFileSync(watermarkPath, newestFile ? `${newestTs}\t${newestFile}` : newestTs);
   const handled = result.salvaged.length + result.deadCount;
   result.falseKillRate = handled === 0 ? 0 : result.salvaged.length / handled;
   return result;

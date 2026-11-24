@@ -27,6 +27,7 @@ export interface StagnationCheckResult {
 export class StagnationDetector {
   private bestScore = 0;
   private iterationsSinceLastImprovement = 0;
+  private reflectionAttempted = false;
   private readonly selfReflection = new SelfReflectionEngine();
   private readonly successRateTracker: SuccessRateTracker;
 
@@ -74,6 +75,7 @@ export class StagnationDetector {
     if (evaluationScore > this.bestScore) {
       this.bestScore = evaluationScore;
       this.iterationsSinceLastImprovement = 0;
+      this.reflectionAttempted = false;
       return {
         shouldBreak: false,
         reason: '',
@@ -96,8 +98,9 @@ export class StagnationDetector {
         : null;
 
       if (improvementSpec) {
-        // Give the loop one more chance via improvement suggestion
-        if (this.iterationsSinceLastImprovement === this.stagnationThreshold) {
+        // Give the loop one more chance via improvement suggestion (at most once per plateau)
+        if (!this.reflectionAttempted && this.iterationsSinceLastImprovement === this.stagnationThreshold) {
+          this.reflectionAttempted = true;
           // B13: feed the FULL corrective spec forward, not just the one-line
           // description. buildContextForInjection reads `evaluation.issues` into
           // the next prompt but never reads `usedPrompt` from history — so the

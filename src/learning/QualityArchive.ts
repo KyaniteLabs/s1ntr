@@ -241,6 +241,9 @@ export class QualityArchive {
   }
 
   private applyAdd(entry: ArchiveEntry): true {
+    if (!Number.isFinite(entry.qualityScore)) {
+      throw new Error(`Invalid non-finite qualityScore for archive entry "${entry.id}"`);
+    }
     const domain = entry.domain;
 
     // Ensure domain exists in cache
@@ -248,7 +251,7 @@ export class QualityArchive {
       this.cache.set(domain, []);
     }
 
-    const entries = this.cache.get(domain)!;
+    const entries = this.cache.get(domain)!.filter((existing) => existing.id !== entry.id);
     entries.push(entry);
 
     // Sort by quality (descending) and keep only the best
@@ -270,10 +273,16 @@ export class QualityArchive {
    * @returns true when the entry was found and updated.
    */
   async rescoreEntry(itemId: string, freshScore: number, provenance: string): Promise<boolean> {
+    if (!Number.isFinite(freshScore)) {
+      throw new Error(`Invalid non-finite rescore value for archive entry "${itemId}"`);
+    }
     return (await this.update(() => this.applyRescore(itemId, freshScore, provenance))) === true;
   }
 
   private applyRescore(itemId: string, freshScore: number, provenance: string): true | false {
+    if (!Number.isFinite(freshScore)) {
+      throw new Error(`Invalid non-finite rescore value for archive entry "${itemId}"`);
+    }
     const clamped = Math.max(0, Math.min(1, freshScore));
     for (const [domain, entries] of this.cache.entries()) {
       const entry = entries.find((e) => e.id === itemId);
@@ -333,8 +342,9 @@ export class QualityArchive {
   /** Governed reader; ordinary query remains an exploration/history projection. */
   queryTeaching(domain: string, use: CreativeLabelUse,
     options: ArchiveQueryOptions = {}): ArchiveEntry[] {
-    return this.query(domain, options)
+    const eligible = this.query(domain, { ...options, limit: undefined })
       .filter(entry => QualityArchive.isTeachingEligible(entry, use));
+    return options.limit !== undefined ? eligible.slice(0, options.limit) : eligible;
   }
 
   /**

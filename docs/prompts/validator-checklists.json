@@ -1,0 +1,102 @@
+{
+  "$comment": "Canonical per-domain validator checklists (#1000 / rejection-rate fix #3). The generation spine injects these into the USER prompt via src/runtime-core/ValidatorChecklist.ts. The module's inline copy is the interim verbatim copy of this file; the drift-guard test (test/unit/runtime-core/validator-checklist-drift.test.ts) fails on any divergence between the two, and on any spine-supported domain missing a checklist. Source history: PE-2's validator-checklists v1 (Forgejo #988 comment 16779, 2026-09-01).",
+  "domains": {
+    "p5": [
+      "define BOTH setup() and draw()",
+      "reference p5 globals (createCanvas, background, ...) — no DOM-only code",
+      "close every brace and paren"
+    ],
+    "three": [
+      "reference THREE.* or import from \"three\" (exactly ONE THREE import)",
+      "create scene, camera, renderer; call renderer.render",
+      "an animation loop (requestAnimationFrame or setAnimationLoop)",
+      "every light intensity <= 3.0 (key 0.8-2.0, ambient 0.25-0.6) with renderer.toneMapping = THREE.ACESFilmicToneMapping",
+      "scene background / clear color is a deep mid-tone (e.g. 0x2a3a4e or lighter), never near-black"
+    ],
+    "glsl": [
+      "one complete fragment shader with void main()",
+      "declare precision (mediump/highp float)",
+      "type every uniform (vec2/vec3/float/mat)",
+      "no setup()/draw() — this is raw GLSL"
+    ],
+    "strudel": [
+      "use strudel patterns (s(\"...\"), note(), stack(), bpm())",
+      "do NOT prefix with $: (that is hydra notation)"
+    ],
+    "hydra": [
+      "use hydra sources (osc/src/noise/shape/solid/voronoi/gradient)",
+      "end the chain with .out()",
+      "no $: prefix"
+    ],
+    "tone": [
+      "use the global Tone.* (already loaded) — no import statements",
+      "connect synths to destination",
+      "schedule with Tone.now()/transport, not setInterval"
+    ],
+    "html": [
+      "balance every tag you open (the validator checks closing tags)",
+      "NO inline on*= handlers, NO javascript: URLs",
+      "no node:/fs/child_process imports — browser only"
+    ],
+    "dataviz": [
+      "MUST load D3.js (script tag or import) — a dataviz piece without D3 fails validation",
+      "balance all tags; browser-only imports"
+    ],
+    "custom": [
+      "MUST include a render mount (the element your composition attaches to)",
+      "balance all tags"
+    ],
+    "hyperframes": [
+      "window.__timelines structure with clip classes",
+      "gsap timeline/from/to calls"
+    ],
+    "svg": [
+      "root element must be <svg>",
+      "well-formed XML"
+    ],
+    "kinetic": [
+      "motion-driven animation (animate transforms over time)",
+      "an explicit loop or animation driver"
+    ],
+    "ascii": [
+      "plain ASCII art block (no code execution expected)"
+    ],
+    "music": [
+      "either strudel or hydra idioms (see those checklists)"
+    ],
+    "textgen": [
+      "return RAW TEXT (the text itself is the artwork) — NOT an HTML document",
+      "at least 3 non-empty lines",
+      "substantial output — a receipt under the minimum size fails validation",
+      "vary the line lengths — fewer than 3 distinct lengths among non-empty lines is rejected as a non-generative receipt"
+    ],
+    "blender": [
+      "a raw Python script that imports bpy (no HTML, no markdown fences)",
+      "no network, subprocess, shell, os file access or exec/eval — those constructs are rejected before Blender runs",
+      "build objects, a light and a camera, and set bpy.context.scene.camera",
+      "never call bpy.ops.render or set the output path: the host renders one capped still"
+    ],
+    "revideo": [
+      "one Revideo scene source file (TSX): export default makeScene2D(\"SceneName\", function* (view) { ... }) — no HTML, no markdown fences",
+      "import only from @revideo/2d and @revideo/core; @revideo/react, Remotion, React.FC, useCurrentFrame, p5 setup()/draw() are rejected",
+      "nothing external: no fetch, no URL images or video, no staticFile, no Audio/Video nodes — the render is offline",
+      "the scene must animate (yield* on node signals) and end: total length between 4 and 20 seconds"
+    ],
+    "nbe": [
+      "one JSON object of nbe engine settings and nothing else \u2014 no HTML, no code, no markdown",
+      "palette is 3-6 hex colours darkest first, deliberately chosen for the brief; numeric fields stay inside the stated ranges",
+      "layout, emitters, fieldScale, flow and swirl are chosen so this brief looks different from a generic default",
+      "reason is one sentence saying why these settings fit the brief"
+    ]
+  },
+  "libraryRules": {
+    "$comment": "Library legality rules enforced by src/core/validators/LibraryRulesValidator.ts (#1068) beyond the per-domain checks — carried here so prompt authors see the full contract.",
+    "rules": [
+      "max 3 DISTINCT library ids per piece",
+      "culori pieces: interpolate in oklch/lab — NEVER hand-rolled hex lerp, lerpColor, or 'rgb'-space mix",
+      "rapier2d: world.timestep must be a FIXED constant (1/60) with an accumulator — never dt/clock-driven",
+      "physics (rapier/matter-js): spawn bodies in a bounded loop, ≤128 creation sites",
+      "declaration EXACT syntax, AFTER the closing code fence: libraries: id1, id2"
+    ]
+  }
+}

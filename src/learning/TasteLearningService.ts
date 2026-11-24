@@ -123,21 +123,21 @@ export function createRenderedPreviewProvider(sinterFs: SinterFS): PreviewProvid
     (rendererModule ??= import('../render/HeadlessRenderer.js'));
 
   return async (entry): Promise<Buffer | null> => {
-    const artifact = sinterFs.readArtifact(entry.artifactRef);
-    if (!artifact) {
-      Logger.warn('TasteLearningService', `No artifact content for archive entry ${entry.id}; skipping NIMA preview`);
-      return null;
-    }
-    const code = artifact.toString('utf-8');
-
-    const { HeadlessRenderer } = await loadRenderer();
-    const domain = HeadlessRenderer.detectDomain(code);
-    if (!NIMA_VISUAL_DOMAINS.has(domain)) {
-      // Audio (strudel/tone) and other non-visual domains have no screenshot.
-      return null;
-    }
-
     try {
+      const artifact = sinterFs.readArtifact(entry.artifactRef);
+      if (!artifact) {
+        Logger.warn('TasteLearningService', `No artifact content for archive entry ${entry.id}; skipping NIMA preview`);
+        return null;
+      }
+      const code = artifact.toString('utf-8');
+
+      const { HeadlessRenderer } = await loadRenderer();
+      const domain = HeadlessRenderer.detectDomain(code);
+      if (!NIMA_VISUAL_DOMAINS.has(domain)) {
+        // Audio (strudel/tone) and other non-visual domains have no screenshot.
+        return null;
+      }
+
       const result = await HeadlessRenderer.getInstance().render(code, { domain });
       const screenshot = result.screenshot;
       if (!result.success || !screenshot || !screenshot.success || screenshot.buffer.length === 0) {
@@ -318,12 +318,32 @@ export class TasteLearningService {
     let missingPreview = 0;
     let failedScore = 0;
     for (const entry of entries) {
-      const preview = await this.previewProvider(entry);
+      let preview: Buffer | null;
+      try {
+        preview = await this.previewProvider(entry);
+      } catch (error) {
+        Logger.warn(
+          'TasteLearningService',
+          `Preview provider threw for archive entry ${entry.id}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        missingPreview++;
+        continue;
+      }
       if (!preview) {
         missingPreview++;
         continue;
       }
-      const result = await this.nima.score(preview);
+      let result: { score: number } | null;
+      try {
+        result = await this.nima.score(preview);
+      } catch (error) {
+        Logger.warn(
+          'TasteLearningService',
+          `NIMA score threw for archive entry ${entry.id}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        failedScore++;
+        continue;
+      }
       if (!result || !isValidNimaScore(result.score)) {
         failedScore++;
         continue;

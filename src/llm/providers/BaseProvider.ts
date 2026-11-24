@@ -157,6 +157,7 @@ export abstract class BaseProvider {
         assertWithinBudget(config.baseUrl, config.model);
       } catch (error) {
         completeProviderInvocation(callId, 'error');
+        callId = undefined;
         return err(new LLMError(error instanceof Error ? error.message : String(error), this.name, undefined, false, {
           model: config.model, endpoint: config.baseUrl,
         }));
@@ -164,6 +165,7 @@ export abstract class BaseProvider {
       let result = await this.#transportContext.run(config, () => this.generateImpl(req));
       let response = result.isOk() ? result.value : undefined;
       completeProviderInvocation(callId, result.isOk() && response?.success ? 'success' : 'error', response?.usage);
+      callId = undefined;
       if (response && isReasoningExhausted(response)) {
         const isRecovery = this.#recoveryRequests.has(req);
         const lower = isRecovery ? undefined : stepDownEffort(req);

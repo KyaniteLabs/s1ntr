@@ -106,17 +106,25 @@ export class MapElites {
   private place(creationId: string, behavior: number[], fitness: number,
     embedding?: number[], content?: string,
     admission?: ExplorationDecisionAdmission): boolean {
+    if (!Number.isFinite(fitness) || !Array.isArray(behavior)
+      || behavior.some(b => typeof b !== 'number' || !Number.isFinite(b))) {
+      return false;
+    }
     const coords = this.behaviorToCell(behavior);
     const key = coords.join(',');
     const existing = this.grid.get(key);
+    // An exploratory (unadmitted) insert must never evict a decision-valid admitted cell (#1275).
+    if (existing?.admission && !admission) {
+      return false;
+    }
     if (existing === undefined || fitness > existing.fitness) {
       this.grid.set(key, {
         creationId,
         fitness,
         behavior: [...behavior],
-        embedding,
+        embedding: embedding ? [...embedding] : undefined,
         content,
-        admission,
+        admission: admission ? structuredClone(admission) : undefined,
       });
       return true;
     }
@@ -234,9 +242,16 @@ export class MapElites {
       };
       this.loadState = 'ok';
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') {
         this.loadState = 'missing';
         return;
+      }
+      // Only quarantine genuinely corrupt/schema-invalid files, not transient OS I/O errors.
+      const isCorruptData = error instanceof SyntaxError
+        || (error instanceof Error && error.message.startsWith('schema-invalid archive:'));
+      if (!isCorruptData) {
+        throw error;
       }
       const quarantined = `${filePath}.corrupt.${Date.now()}`;
       await fs.rename(filePath, quarantined).catch(() => undefined);
@@ -382,18 +397,14 @@ export class MapElites {
 
       if (candidateIndices.length === 0) break;
 
-      // Mark all candidates as used for future tournaments
-      for (const idx of candidateIndices) {
-        used.add(idx);
-      }
-
-      // Select winner based on fitness + diversity bonus
-      const candidates = candidateIndices.map((i) => pool[i]);
-      // Compare blended scores only; seeding with raw fitness mixed scales (#1267).
-      let winner = candidates[0];
+      // Select winner based on fitness + diversity bonus (only winner is marked used
+      // so tournament losers remain eligible for subsequent draws).
+      let winnerIdx = candidateIndices[0];
+      let winner = pool[winnerIdx];
       let bestScore = Number.NEGATIVE_INFINITY;
 
-      for (const candidate of candidates) {
+      for (const idx of candidateIndices) {
+        const candidate = pool[idx];
         // Calculate diversity bonus based on distance from already selected
         let diversityBonus = 0;
         for (const sel of selected) {
@@ -406,10 +417,12 @@ export class MapElites {
         const score = candidate.fitness * 0.7 + diversityBonus * 0.3;
         if (score > bestScore) {
           bestScore = score;
+          winnerIdx = idx;
           winner = candidate;
         }
       }
 
+      used.add(winnerIdx);
       selected.push(winner);
     }
 

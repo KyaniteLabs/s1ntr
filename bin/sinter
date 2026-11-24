@@ -20,6 +20,8 @@ process.on('unhandledRejection', (reason) => {
 
 // Env back-compat: mirror SINTER_*/LIMINAL_* so both prefixes work whichever the
 // user set (the canonical prefix is SINTER_; LIMINAL_ stays supported).
+// Never mirror *_API_KEY or *_BASE_URL when the other prefix already binds a
+// different endpoint/key, matching src/utils/env.ts.
 (function mirrorBrandEnv() {
   for (const key of Object.keys(process.env)) {
     const base = key.startsWith('SINTER_') ? key.slice(7)
@@ -27,8 +29,21 @@ process.on('unhandledRejection', (reason) => {
     if (!base) continue;
     const value = process.env[key];
     if (value === undefined) continue;
-    if (process.env[`SINTER_${base}`] === undefined) process.env[`SINTER_${base}`] = value;
-    if (process.env[`LIMINAL_${base}`] === undefined) process.env[`LIMINAL_${base}`] = value;
+    const srcPrefix = key.startsWith('SINTER_') ? 'SINTER_' : 'LIMINAL_';
+    const dstPrefix = srcPrefix === 'SINTER_' ? 'LIMINAL_' : 'SINTER_';
+    if (process.env[`${dstPrefix}${base}`] !== undefined) continue;
+    if (base.endsWith('_API_KEY')) {
+      const urlStem = `${base.slice(0, -'_API_KEY'.length)}_BASE_URL`;
+      const dstUrl = process.env[`${dstPrefix}${urlStem}`];
+      const srcUrl = process.env[`${srcPrefix}${urlStem}`];
+      if (dstUrl && dstUrl !== srcUrl) continue;
+    } else if (base.endsWith('_BASE_URL')) {
+      const keyStem = `${base.slice(0, -'_BASE_URL'.length)}_API_KEY`;
+      const dstKey = process.env[`${dstPrefix}${keyStem}`];
+      const srcKey = process.env[`${srcPrefix}${keyStem}`];
+      if (dstKey && dstKey !== srcKey) continue;
+    }
+    process.env[`${dstPrefix}${base}`] = value;
   }
 })();
 

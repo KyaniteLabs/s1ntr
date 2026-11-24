@@ -98,17 +98,23 @@ export class AccessibilityGuardrails {
         bodyStyle: 'margin: 0; padding: 0; overflow: hidden;',
         fullscreen: true,
       }));
-      if (domain === 'html') {
-        // Model output is untrusted: only in-browser schemes may load.
-        // Interception sees HTTP only: realtime transports, popups and
-        // service workers are removed before any page script runs.
+      // Model output is untrusted (both html and p5): only in-browser schemes may load.
+      // Interception sees HTTP only: realtime transports, popups and
+      // service workers are removed before any page script runs.
+      if (typeof page.evaluateOnNewDocument === 'function') {
         await page.evaluateOnNewDocument(HTML_PAGE_GUARDS);
+      }
+      if (typeof page.on === 'function') {
         page.on('popup', (popup) => { void popup?.close().catch(() => undefined); });
+      }
+      if (typeof page.setRequestInterception === 'function') {
         await page.setRequestInterception(true);
-        page.on('request', (request) => {
-          const settle = /^(data|blob|about):/.test(request.url()) ? request.continue() : request.abort();
-          void settle.catch(() => undefined);
-        });
+        if (typeof page.on === 'function') {
+          page.on('request', (request) => {
+            const settle = /^(data|blob|about):/.test(request.url()) ? request.continue() : request.abort();
+            void settle.catch(() => undefined);
+          });
+        }
       }
 
       // Recording starts before the page loads, so a flash in the first
@@ -200,7 +206,7 @@ export class AccessibilityGuardrails {
         warnings,
       };
     } finally {
-      await browser.close();
+      await browser.close().catch(() => undefined);
     }
   }
 

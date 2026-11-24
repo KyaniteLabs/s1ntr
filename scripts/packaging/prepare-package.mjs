@@ -34,4 +34,4 @@ if (existsSync(distIndex)) {
 }
 
 console.log('[prepare] dist missing; building package artifacts');
-process.exit(run('npm', ['run', 'build']));
+process.exit(run(process.execPath, [path.join(repoRoot, 'scripts/build-atomic.mjs')]));

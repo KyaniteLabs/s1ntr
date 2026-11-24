@@ -87,10 +87,18 @@ export class CycleDriver {
     // (review critical 3a — randomUUID made checkpoint lookup dead code).
     const cycleId = `cycle-${cycle}`;
     const startedAt = (this.options.now?.() ?? new Date()).toISOString();
-    let cp: Checkpoint = this.loadCheckpoint(cycleId) ?? { cycleId, cycle, stage: 'selected', nicheKey: this.options.evolution.selectNiche() };
-    const resume = this.loadCheckpoint(cycleId) !== null;
+    const existingCp = this.loadCheckpoint(cycleId);
+    if (existingCp?.stage === 'decided') {
+      const reportPath = join(this.cyclesDir(), cycleId, 'report.json');
+      if (existsSync(reportPath)) {
+        try {
+          return JSON.parse(readFileSync(reportPath, 'utf8')) as CycleReport;
+        } catch { /* fall through if report is corrupted */ }
+      }
+    }
+    let cp: Checkpoint = existingCp ?? { cycleId, cycle, stage: 'selected', nicheKey: this.options.evolution.selectNiche() };
 
-    if (cp.stage === 'selected' || cp.stage === 'directed') {
+    if (!cp.directive) {
       const incumbent = this.options.evolution.getIncumbent();
       const directive = await this.options.brain.authorDirective({
         nicheKey: cp.nicheKey,
@@ -98,17 +106,16 @@ export class CycleDriver {
         librarySummaries: this.options.evolution.allEntries().slice(-5).map(e => e.nicheKey),
       });
       if (!directive.verifyingMetric) throw new Error('ATELIER_DIRECTIVE_INELIGIBLE: no verifying metric (A3 law)');
-      cp = { ...cp, stage: 'generated', directive };
+      cp = { ...cp, stage: 'directed', directive };
       this.saveCheckpoint(cp);
     }
-    void resume;
 
     let html: string;
-    if (cp.stage === 'generated' && cp.html) {
+    if (cp.html && (cp.stage === 'generated' || cp.stage === 'gated' || cp.stage === 'rendered' || cp.stage === 'critiqued')) {
       html = cp.html;
     } else {
       html = await this.options.generator.generateCandidate({ directive: cp.directive!, baseHtml: this.options.baseHtml });
-      cp = { ...cp, stage: 'gated', html };
+      cp = { ...cp, stage: 'generated', html };
       this.saveCheckpoint(cp);
     }
 
@@ -165,7 +172,7 @@ export class CycleDriver {
       // A critique that throws during the tie-break must not abort the cycle (#1710):
       // the incumbent stays and the report says the tie-break could not run.
       let wins: boolean | null;
-      try { wins = await this.pairwise(html, incumbent.html); } catch { wins = null; }
+      try { wins = await this.pairwise(html, incumbent.html, liveEyes); } catch { wins = null; }
       decision = wins === null
         ? { accepted: false, reason: 'pairwise-critique-failed' }
         : wins
@@ -178,8 +185,12 @@ export class CycleDriver {
     return this.finish(cp, decision, ensemble, startedAt, metrics);
   }
 
-  private async pairwise(candidateHtml: string, incumbentHtml: string): Promise<boolean> {
-    const eye = this.options.eyes[0];
+  private async pairwise(
+    candidateHtml: string,
+    incumbentHtml: string,
+    liveEyes: readonly import('./GuiSpec.js').AtelierTransport[] = [],
+  ): Promise<boolean> {
+    const eye = liveEyes[0] ?? this.options.eyes[0];
     if (!eye) return false;
     // Honest pairwise (review critical 3c): BOTH pages critiqued; fewer anchored
     // defects wins. Order still randomized so neither page benefits from
@@ -221,7 +232,7 @@ export class CycleDriver {
       telemetryAdmit: false,
       seedsFile, startedAt, completedAt: (this.options.now?.() ?? new Date()).toISOString(),
     };
-    this.saveCheckpoint({ ...cp, stage: 'decided' });
+    this.saveCheckpoint({ ...cp, stage: 'decided', ...(ensemble ? { ensemble } : {}) });
     writeFileSync(join(this.cyclesDir(), cp.cycleId, 'report.json'), JSON.stringify(report, null, 2));
     return report;
   }

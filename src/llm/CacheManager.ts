@@ -48,7 +48,7 @@ export class CacheManager {
   }
 
   get(system: string | null | undefined, user: string | null | undefined, scope = ''): string | null {
-    if (!this.options.enabled) return null;
+    if (!this.options.enabled || this.options.maxEntries <= 0) return null;
     if (system == null || user == null) return null;
 
     const key = hashKey(system, user, scope);
@@ -72,6 +72,8 @@ export class CacheManager {
   set(system: string | null | undefined, user: string | null | undefined, value: string | null | undefined, scope = ''): void {
     if (!this.options.enabled) return;
     if (system == null || user == null || value == null) return;
+
+    if (!this.options.enabled || this.options.maxEntries <= 0) return;
 
     const key = hashKey(system, user, scope);
 

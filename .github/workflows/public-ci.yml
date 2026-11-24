@@ -2,10 +2,19 @@ name: Public CI
 
 # CI for the curated public snapshot (github.com/KyaniteLabs/s1ntr), published
 # by scripts/atelier/sync-public-mirror.sh. The snapshot has no internal docs,
-# no GUI package and no agent tooling, so this runs only the gates the public
-# tree can satisfy: install, build, lint, fast tests. The full gate stays on
-# Forgejo (.forgejo/workflows/ci.yml). GitHub-hosted runners, read-only token,
-# no secrets, no pull_request_target: fork PRs run with exactly these rights.
+# no GUI package and no agent tooling. This runs everything the public tree can
+# satisfy, on free GitHub-hosted runners: build, lint and the extended checks;
+# the fast suite in 4 shards, whose merged coverage is held to a floor; the
+# slow lane (organs, browser, render, e2e) in 3.
+# Each test file runs in exactly one shard. Tests and checks that need private
+# files stay on Forgejo (.forgejo/workflows/ci.yml). Read-only token, no
+# secrets, no pull_request_target: fork PRs run with exactly these rights.
+#
+# `public-gate` is the required check: it passes only when every job passed.
+# scripts/atelier/public-gate-cmd.py reads the one-line Install, Build, Lint and
+# Fast tests steps below as the local mirror gate, so keep their names and
+# commands. The fast shard comes from LIMINAL_TEST_SHARD, which test:ci:fast
+# reads (unset = the whole suite, as the local gate runs it).
 
 on:
   push:
@@ -26,6 +35,8 @@ defaults:
 
 env:
   COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+  # Skip prepare's automatic tsc build during pnpm install; Build runs explicitly next.
+  LIMINAL_SKIP_PREPARE_BUILD: '1'
   # No provider credentials exist here; tests use recorded providers only.
   ANTHROPIC_AUTH_TOKEN: ''
   ANTHROPIC_BASE_URL: ''
@@ -39,20 +50,16 @@ env:
   LIMINAL_DISABLE_SANDBOX: 'true'
 
 jobs:
-  public-gate:
-    name: public-gate
+  build-lint:
+    name: build, lint, checks
     # Only the public snapshot repo; the private repos gate on Forgejo.
     if: github.repository == 'KyaniteLabs/s1ntr'
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-
-      # ubuntu-latest has no ffmpeg; the video export and real-render tests need ffmpeg/ffprobe.
-      - name: Install ffmpeg
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
 
       - name: Enable pnpm
         run: |
@@ -76,7 +83,175 @@ jobs:
         timeout-minutes: 10
         run: pnpm lint
 
+      # The static checks the public tree holds everything for; the rest
+      # (orphans, script targets, doc links, test quality, GUI) stay on Forgejo.
+      - name: Extended checks
+        timeout-minutes: 10
+        run: |
+          pnpm check:cli-parse
+          pnpm check:organs
+          pnpm check:examples
+
+  fast:
+    name: fast tests ${{ matrix.shard }}/4
+    if: github.repository == 'KyaniteLabs/s1ntr'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    env:
+      LIMINAL_TEST_SHARD: ${{ matrix.shard }}/4
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      # Same as the Forgejo gate: the production runtime resolves its source refs
+      # from origin/main; ffmpeg for video export and real renders.
+      - name: Gate parity
+        run: |
+          git update-ref refs/remotes/origin/main HEAD
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg >/dev/null
+          ffmpeg -version | head -1
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        timeout-minutes: 10
+        run: pnpm install --frozen-lockfile
+
+      - name: Build project
+        timeout-minutes: 10
+        run: pnpm build
+
       # GSAP is not in this tree: fetch it (sha256-pinned) into vendor/ so tests read it from disk.
       - name: Fast tests
         timeout-minutes: 25
         run: node scripts/ci/fetch-runtime-vendor.mjs && pnpm test:ci:fast
+
+      # The shard's blob report carries its test results and coverage to the
+      # coverage job, which merges all four and holds the floor.
+      - name: Upload shard report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: vitest-blob-fast-${{ matrix.shard }}
+          path: .vitest-reports/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 3
+
+  coverage:
+    name: fast coverage floor
+    needs: [fast]
+    if: github.repository == 'KyaniteLabs/s1ntr'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        timeout-minutes: 10
+        run: pnpm install --frozen-lockfile
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: vitest-blob-fast-*
+          path: .vitest-reports
+          merge-multiple: true
+
+      # Merges the four shards' results and coverage, then holds the total to
+      # PUBLIC_CI_COVERAGE_FLOORS in vitest.config.ts. Runs no tests.
+      - name: Coverage floor
+        timeout-minutes: 10
+        env:
+          LIMINAL_CI_FAST: '1'
+          LIMINAL_COVERAGE_FLOORS: public
+          LIMINAL_SKIP_DIST_BUILD: '1'
+        run: pnpm exec vitest --merge-reports=.vitest-reports --coverage
+
+  slow:
+    name: slow lane ${{ matrix.shard }}/3
+    if: github.repository == 'KyaniteLabs/s1ntr'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      # The slow lane renders with real tools: ffmpeg, glslang (shader compile
+      # fallback), bubblewrap (sandboxed runs), as on the Forgejo gate.
+      - name: Gate parity
+        run: |
+          git update-ref refs/remotes/origin/main HEAD
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg glslang-tools bubblewrap rsync >/dev/null
+          ffmpeg -version | head -1
+          glslangValidator --version | head -1
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        timeout-minutes: 10
+        run: pnpm install --frozen-lockfile
+
+      - name: Build project
+        timeout-minutes: 10
+        run: pnpm build
+
+      # Everything in vitest.config.ts SLOW_TEST_PATTERNS (organs, e2e, render,
+      # browser integration, Dream pilot), split by vitest --shard.
+      - name: Slow tests
+        timeout-minutes: 35
+        run: node scripts/ci/fetch-runtime-vendor.mjs && LIMINAL_CI_SLOW=1 pnpm exec vitest run --coverage=false --pool=forks --maxWorkers=4 --shard=${{ matrix.shard }}/3
+
+  public-gate:
+    name: public-gate
+    needs: [build-lint, fast, coverage, slow]
+    # Runs even when a job failed or was skipped, so the required check is
+    # never missing: it is green only when every job above succeeded.
+    if: always() && github.repository == 'KyaniteLabs/s1ntr'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every job green
+        env:
+          RESULTS: ${{ needs.build-lint.result }} ${{ needs.fast.result }} ${{ needs.coverage.result }} ${{ needs.slow.result }}
+        run: |
+          echo "build-lint fast coverage slow: $RESULTS"
+          for r in $RESULTS; do [ "$r" = success ] || { echo "::error::a public CI job ended '$r'"; exit 1; }; done

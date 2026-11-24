@@ -21,11 +21,15 @@ export interface HyperFramesRenderOptions extends VideoRenderOptions {
   assets?: AssetDescriptor[];
 }
 
+function escapeHtmlAttr(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 function toFileUrl(absolutePath: string): string {
   if (absolutePath.startsWith('file://') || absolutePath.startsWith('http://') || absolutePath.startsWith('https://')) {
     return absolutePath;
   }
-  return `file://${absolutePath}`;
+  return `file://${path.resolve(absolutePath)}`;
 }
 
 function buildAssetInjectionScript(assets: AssetDescriptor[]): string {
@@ -33,8 +37,8 @@ function buildAssetInjectionScript(assets: AssetDescriptor[]): string {
 
   for (let i = 0; i < assets.length; i++) {
     const asset = assets[i];
-    const src = toFileUrl(asset.path);
-    const attrs = `data-start="${asset.startAt}" data-duration="${asset.duration}" data-track-index="${i}"`;
+    const src = escapeHtmlAttr(toFileUrl(asset.path));
+    const attrs = `data-start="${Number(asset.startAt) || 0}" data-duration="${Number(asset.duration) || 0}" data-track-index="${i}"`;
 
     if (asset.type === 'video') {
       elements.push(`<video src="${src}" ${attrs} style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></video>`);
@@ -54,9 +58,9 @@ function buildAssetInjectionScript(assets: AssetDescriptor[]): string {
 
 function injectAssetsIntoHtml(html: string, assets: AssetDescriptor[]): string {
   const script = buildAssetInjectionScript(assets);
-
-  if (html.includes('</body>')) {
-    return html.replace('</body>', `${script}\n</body>`);
+  const idx = html.lastIndexOf('</body>');
+  if (idx !== -1) {
+    return `${html.slice(0, idx)}${script}\n${html.slice(idx)}`;
   }
 
   return html + '\n' + script;
@@ -113,10 +117,11 @@ export class HyperFramesRenderer implements VideoRenderer {
   ): Promise<VideoRenderResult> {
     const fps = opts.fps ?? DEFAULT_FPS;
 
-    let html = await inlineVendorAssets(code);
+    let html = code;
     if (opts.assets && opts.assets.length > 0) {
       html = injectAssetsIntoHtml(html, opts.assets);
     }
+    html = await inlineVendorAssets(html);
 
     let compDir: string | undefined;
     let stagingDir: string | undefined;

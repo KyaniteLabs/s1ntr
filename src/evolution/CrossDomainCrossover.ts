@@ -278,8 +278,8 @@ export function crossoverReasoning(
   // --- technique transfer ---------------------------------------------------
   let transferredTechniques: string[];
 
-  if (mapping) {
-    transferredTechniques = [mapping.techniqueMap[technique] ?? `${technique}_as_${target}`];
+  if (mapping && Object.hasOwn(mapping.techniqueMap, technique)) {
+    transferredTechniques = [mapping.techniqueMap[technique]];
   } else {
     // Identity fallback — no explicit mapping.
     transferredTechniques = [`${technique}_as_${target}`];
@@ -289,7 +289,7 @@ export function crossoverReasoning(
   const adaptedDecisions: Record<string, string | number> = {};
 
   for (const [dKey, dValue] of Object.entries(decisions)) {
-    if (mapping?.decisionMap[dKey]) {
+    if (mapping && Object.hasOwn(mapping.decisionMap, dKey)) {
       adaptedDecisions[dKey] = mapping.decisionMap[dKey](dValue);
     } else {
       adaptedDecisions[dKey] = dValue;

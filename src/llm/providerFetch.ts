@@ -20,14 +20,27 @@ export function dispatcherLimits(timeoutMs: number): { headersTimeout: number; b
   return { headersTimeout: limit, bodyTimeout: limit };
 }
 
+const MAX_DISPATCHERS = 32;
 const dispatchers = new Map<number, Agent>();
 
-/** One pooled Agent per distinct timeout; providers use a handful of values. */
+/** One pooled Agent per distinct timeout (bounded LRU to prevent socket/Agent leaks). */
 export function dispatcherFor(timeoutMs: number): Agent {
-  let agent = dispatchers.get(timeoutMs);
-  if (!agent) {
-    agent = new Agent(dispatcherLimits(timeoutMs));
-    dispatchers.set(timeoutMs, agent);
+  const existing = dispatchers.get(timeoutMs);
+  if (existing) {
+    // Refresh recency order.
+    dispatchers.delete(timeoutMs);
+    dispatchers.set(timeoutMs, existing);
+    return existing;
+  }
+  const agent = new Agent(dispatcherLimits(timeoutMs));
+  dispatchers.set(timeoutMs, agent);
+  if (dispatchers.size > MAX_DISPATCHERS) {
+    const oldestKey = dispatchers.keys().next().value;
+    if (oldestKey !== undefined) {
+      const oldest = dispatchers.get(oldestKey);
+      dispatchers.delete(oldestKey);
+      void oldest?.close().catch(() => {});
+    }
   }
   return agent;
 }

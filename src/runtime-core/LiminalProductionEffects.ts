@@ -748,6 +748,9 @@ export function createLiminalProductionEffects(
             source = escalatedRecovered.source;
             // eslint-disable-next-line require-atomic-updates -- source/validation are let-locals of this generate() invocation; no other task can read or write them across the await
             validation = escalatedRecovered.validation;
+            generationSuccess = true;
+            // eslint-disable-next-line require-atomic-updates -- truncatedCap is a let-local of this generate() invocation
+            truncatedCap = null;
             acceptedFrom = 'escalation';
             acceptedReplyText = declarationText(escalated);
             acceptedProvenance = escalated.provenance ?? null;
@@ -803,12 +806,14 @@ export function createLiminalProductionEffects(
             // eslint-disable-next-line require-atomic-updates -- truncatedCap is a let-local of this generate() invocation; no other task can read or write it across the await
             truncatedCap = repairOpts?.maxTokens ?? outputCap;
           }
-          if (repaired.validation.valid) {
+          if (repair.success !== false && repair.finishReason !== 'length' && repaired.validation.valid) {
             // eslint-disable-next-line require-atomic-updates -- source/validation are let-locals of this generate() invocation; no other task can read or write them across the await
             source = repaired.source;
             // eslint-disable-next-line require-atomic-updates -- source/validation are let-locals of this generate() invocation; no other task can read or write them across the await
             validation = repaired.validation;
             generationSuccess = true;
+            // eslint-disable-next-line require-atomic-updates -- truncatedCap is a let-local of this generate() invocation
+            truncatedCap = null;
             acceptedReplyText = declarationText(repair);
             acceptedFrom = 'repair';
             acceptedProvenance = repair.provenance ?? null;
@@ -968,7 +973,11 @@ export function createLiminalProductionEffects(
       }
       const evidence = scoringEvidence(input.observation);
       const perception = await evaluateRenderEvidencePerception(evidence, domain);
-      if (!options.twoStageJudge) await input.startTransport({ provider: clientIdentity(options.evaluator) });
+      let transportStarted = false;
+      if (!options.twoStageJudge) {
+        await input.startTransport({ provider: clientIdentity(options.evaluator) });
+        transportStarted = true;
+      }
       try {
         setSinterMemoryStage('create:evaluator-transport');
         const audioDomain = domain === 'tone' || domain === 'strudel';
@@ -991,6 +1000,7 @@ export function createLiminalProductionEffects(
           const judge = options.twoStageJudge;
           const staged = await withProviderAttemptGuard(async () => {
             await input.startTransport({ provider: clientIdentity(options.evaluator), judge: 'two-stage' });
+            transportStarted = true;
           }, () => judgeTwoStage({
             evidence, source: input.source ?? '', brief, domain,
             runtimeErrors: input.observation.runtimeErrors,
@@ -1039,7 +1049,7 @@ export function createLiminalProductionEffects(
           evidenceDigest: input.evidenceDigest,
         };
       } catch (error) {
-        if (!options.twoStageJudge) await input.failTransport(String(error));
+        if (transportStarted) await input.failTransport(String(error));
         throw error;
       }
     },

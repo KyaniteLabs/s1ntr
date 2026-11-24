@@ -1,5 +1,5 @@
-import { createHash } from 'node:crypto';
-import { mkdir, open, readFile, stat, unlink } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { writeFileAtomic } from '../../utils/atomicWrite.js';
 import { AsyncLock } from '../../utils/AsyncLock.js';
@@ -70,23 +70,36 @@ const LOCK_TIMEOUT_MS = 10_000;
 
 async function acquireFileLock(lockPath: string): Promise<() => Promise<void>> {
   const startedAt = Date.now();
+  const token = `${process.pid}-${randomUUID()}`;
   for (;;) {
     try {
       const handle = await open(lockPath, 'wx');
-      await handle.writeFile(`${process.pid}\n`);
-      return async () => {
-        await handle.close();
+      try {
+        await handle.writeFile(`${token}\n`);
+      } catch (writeErr) {
+        await handle.close().catch(() => undefined);
         await unlink(lockPath).catch(() => undefined);
+        throw writeErr;
+      }
+      return async () => {
+        await handle.close().catch(() => undefined);
+        try {
+          const current = (await readFile(lockPath, 'utf8')).trim();
+          if (current === token) await unlink(lockPath).catch(() => undefined);
+        } catch { /* lock already reclaimed */ }
       };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      const lockStat = await stat(lockPath).catch(() => null);
-      if (lockStat && Date.now() - lockStat.mtimeMs > LOCK_STALE_MS) {
-        await unlink(lockPath).catch(() => undefined);
-        continue;
-      }
       if (Date.now() - startedAt >= LOCK_TIMEOUT_MS) {
         throw new Error('DREAM_RESEARCH_POLICY_LOCK_TIMEOUT');
+      }
+      const lockStat = await stat(lockPath).catch(() => null);
+      if (lockStat && Date.now() - lockStat.mtimeMs > LOCK_STALE_MS) {
+        const stalePath = `${lockPath}.stale-${randomUUID()}`;
+        try {
+          await rename(lockPath, stalePath);
+          await unlink(stalePath).catch(() => undefined);
+        } catch { /* another waiter reclaimed it or permission denied */ }
       }
       await new Promise(resolve => setTimeout(resolve, 5));
     }
@@ -149,9 +162,10 @@ function canonical(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
   const record = value as Record<string, unknown>;
-  return `{${Object.keys(record).sort().map(
-    key => `${JSON.stringify(key)}:${canonical(record[key])}`,
-  ).join(',')}}`;
+  return `{${Object.keys(record).sort()
+    .filter(key => record[key] !== undefined)
+    .map(key => `${JSON.stringify(key)}:${canonical(record[key])}`)
+    .join(',')}}`;
 }
 
 function digest(value: unknown): string {
@@ -202,7 +216,9 @@ function buildPlan(evidence: readonly AdmittedCreativeEvidence[],
   budget: DreamResearchPlan['budget'], state: DreamResearchPolicyState): DreamResearchPlan {
   assertBudget(budget);
   assertEvidence(evidence);
-  const parents = evidence.filter(item => item.outcome === 'accepted');
+  const parents = evidence
+    .filter(item => item.outcome === 'accepted')
+    .sort((a, b) => a.evidenceDigest.localeCompare(b.evidenceDigest));
   if (parents.length < 1) throw new Error('DREAM_RESEARCH_ACCEPTED_PARENT_REQUIRED');
   const principle = selectPrinciple(parents);
   const domains = [...new Set(parents.map(item => item.domain))].sort();
@@ -240,6 +256,8 @@ export class DreamResearchController {
 
   private async selectLocked(evidence: readonly AdmittedCreativeEvidence[],
     budget: DreamResearchPlan['budget']): Promise<DreamResearchPlan> {
+    assertBudget(budget);
+    assertEvidence(evidence);
     const state = await this.store.read();
     const parentDigests = evidence.filter(item => item.outcome === 'accepted')
       .map(item => item.evidenceDigest).sort();

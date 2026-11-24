@@ -40,8 +40,10 @@ export class NoveltyArchive {
   private dimensions: number | undefined;
 
   constructor(capacity?: number, kNeighbors?: number) {
-    this.capacity = capacity ?? 1000;
-    this.kNeighbors = kNeighbors ?? 5;
+    const cap = capacity ?? 1000;
+    const k = kNeighbors ?? 5;
+    this.capacity = Number.isFinite(cap) && cap >= 1 ? Math.floor(cap) : 1;
+    this.kNeighbors = Number.isFinite(k) && k >= 1 ? Math.floor(k) : 1;
     this.items = [];
     this.entries = [];
   }
@@ -191,7 +193,7 @@ export class NoveltyArchive {
     referenceBehavior: number[],
     topK: number
   ): Array<{ behavior: number[]; distance: number }> {
-    if (this.items.length === 0) return [];
+    if (this.items.length === 0 || this.descriptorProblem(referenceBehavior)) return [];
 
     const scored = this.items.map((item) => ({
       behavior: [...item],

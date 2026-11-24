@@ -949,6 +949,10 @@ export class CompositionOrchestrator {
   })();
   </script>`;
 
+    const safeBackground = /^(?:#[0-9a-fA-F]{3,8}|(?:rgb|rgba|hsl|hsla)\([0-9.,%\s/+-]+\)|[a-zA-Z]{1,24})$/.test(background.trim())
+      ? background.trim()
+      : '#05070f';
+
     const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -956,7 +960,7 @@ export class CompositionOrchestrator {
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>${safeTitle}</title>
   <style>
-    html, body { margin: 0; height: 100%; background: ${background}; overflow: hidden; }
+    html, body { margin: 0; height: 100%; background: ${safeBackground}; overflow: hidden; }
     #sinter-stage { position: fixed; inset: 0; }
     a.skip { position: absolute; left: -999px; }
   </style>

@@ -42,6 +42,28 @@ const FAST_CI_COVERAGE_FLOORS = {
   lines: 86.0,
 };
 
+// Public CI (GitHub, KyaniteLabs/s1ntr) runs the fast suite in shards
+// (LIMINAL_TEST_SHARD=i/n). Each shard records coverage into its blob report
+// with no floor, since one shard sees a quarter of the suite. The merge job
+// (`vitest --merge-reports --coverage`, LIMINAL_COVERAGE_FLOORS=public) holds
+// the merged total to these floors. They are measured on the public snapshot,
+// which has fewer tests than this tree, minus a 0.5-point margin. They only go UP.
+// Measured 2026-11-23, s1ntr run 45268548300 (1325 files): 85.54 / 77.65 / 88.82 / 87.56.
+const PUBLIC_CI_COVERAGE_FLOORS = {
+  statements: 85.0,
+  branches: 77.1,
+  functions: 88.3,
+  lines: 87.0,
+};
+const testShard = process.env.LIMINAL_TEST_SHARD ?? '';
+const isFastShard = isFastCi && testShard !== '';
+
+function ciCoverageFloors() {
+  if (!isFastCi) return {};
+  if (isFastShard) return { statements: 0, branches: 0, functions: 0, lines: 0 };
+  return process.env.LIMINAL_COVERAGE_FLOORS === 'public' ? PUBLIC_CI_COVERAGE_FLOORS : FAST_CI_COVERAGE_FLOORS;
+}
+
 const baseExclude = [
   'node_modules/**',
   'dist/**',
@@ -74,13 +96,16 @@ export default defineConfig({
     // Tests that need less or more set their own cap.
     testTimeout: 30_000,
     setupFiles: ['test/setup.ts'],
+    // A public CI shard also writes a blob report (.vitest-reports/) for the merge job.
+    ...(isFastShard ? { reporters: ['default', 'blob'] } : {}),
     include: isSlowCi ? [...SLOW_TEST_PATTERNS] : ['**/test/**/*.test.(js|ts)', '**/test/**/*.e2e.test.(js|ts)'],
     exclude: isFastCi ? [...baseExclude, ...SLOW_TEST_PATTERNS] : baseExclude,
     coverage: {
-      // Coverage is opt-in (--coverage flag / test:coverage script) so that
+      // Coverage is opt-in (--coverage flag / test:coverage script; on for a
+      // public CI shard, whose blob carries it to the merge job) so that
       // focused test runs don't fail from repo-wide thresholds applied to a
       // single file. Canonical enforcement: npm run test:coverage.
-      enabled: false,
+      enabled: isFastShard,
       provider: 'v8',
       include: ['src/**/*.ts', 'src/**/*.tsx'],
       exclude: ['**/*.d.ts', '**/*.test.ts'],
@@ -122,7 +147,7 @@ export default defineConfig({
           : (newThreshold: number) => Math.floor(newThreshold * 10) / 10,
         // Keep this spread last, and the four literals above as literals:
         // autoUpdate rewrites those literals in place.
-        ...(isFastCi ? FAST_CI_COVERAGE_FLOORS : {}),
+        ...ciCoverageFloors(),
       },
     },
   },

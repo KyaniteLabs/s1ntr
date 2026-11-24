@@ -324,10 +324,11 @@ function rubricHtml(): string {
 // ━━━ Stable digest helpers (same canonical form as CampaignOrigin) ━━━━━
 
 function stable(value: unknown): string {
+  if (value instanceof Uint8Array) return JSON.stringify(Buffer.from(value.buffer, value.byteOffset, value.byteLength).toString('base64'));
   if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;
   if (value && typeof value === 'object') {
     const record = value as Record<string, unknown>;
-    return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${stable(record[key])}`).join(',')}}`;
+    return `{${Object.keys(record).filter(key => record[key] !== undefined).sort().map(key => `${JSON.stringify(key)}:${stable(record[key])}`).join(',')}}`;
   }
   return JSON.stringify(value);
 }
@@ -418,7 +419,7 @@ export function createCaptureAuthority(options: {
       requireText(input.mimeType, 'OWNER_EVIDENCE_MIME_REQUIRED');
       const bytes = typeof input.payload === 'string' ? Buffer.from(input.payload) : Buffer.from(input.payload);
       if (bytes.byteLength === 0) throw new Error(`OWNER_EVIDENCE_EMPTY:${input.evidenceClass}`);
-      const payloadDigest = digest(bytes);
+      const payloadDigest = bytesDigest(bytes);
       const payloadUri = `data:${input.mimeType};base64,${bytes.toString('base64')}`;
       const unsigned = {
         schema: OWNER_CAPTURE_SCHEMA, schemaVersion: 1 as const,
@@ -441,7 +442,7 @@ export function createCaptureAuthority(options: {
         Buffer.from(receipt.signatureBase64, 'base64')))
         return { valid: false, reason: 'capture-signature-invalid' };
       const bytes = decodePayload(receipt.payloadUri);
-      if (!bytes || digest(bytes) !== receipt.digest || bytes.byteLength !== receipt.byteLength)
+      if (!bytes || bytesDigest(bytes) !== receipt.digest || bytes.byteLength !== receipt.byteLength)
         return { valid: false, reason: 'capture-payload-digest-mismatch' };
       return { valid: true };
     },

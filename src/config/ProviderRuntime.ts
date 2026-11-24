@@ -258,32 +258,50 @@ export function sameProviderEndpoint(left?: string, right?: string): boolean {
   }
 }
 
-function endpointHost(baseUrl: string): string {
+function endpointUrl(baseUrl: string): URL | null {
   try {
-    return new URL(baseUrl.toLowerCase()).hostname;
+    return new URL(baseUrl);
   } catch {
-    return '';
+    return null;
   }
 }
 
+function endpointHost(baseUrl: string): string {
+  const url = endpointUrl(baseUrl);
+  return url ? url.hostname.toLowerCase().replace(/^\[|\]$/g, '') : '';
+}
+
+function endpointPort(baseUrl: string): string {
+  return endpointUrl(baseUrl)?.port ?? '';
+}
+
+function hostMatches(host: string, domain: string): boolean {
+  return host === domain || host.endsWith(`.${domain}`);
+}
+
+function isLoopbackHost(host: string): boolean {
+  const bare = host.toLowerCase().replace(/^\[|\]$/g, '');
+  return bare === 'localhost' || bare === '127.0.0.1' || bare === '::1';
+}
+
 export function detectProviderLabel(baseUrl: string, model = ''): ProviderStatusLabel {
-  const lowerUrl = baseUrl.toLowerCase();
   const lowerModel = model.toLowerCase();
   const host = endpointHost(baseUrl);
+  const port = endpointPort(baseUrl);
   if (host === 'api.anthropic.com') return 'anthropic';
   if (host === 'api.openai.com') return 'openai';
-  if (lowerUrl.includes('z.ai') || lowerUrl.includes('bigmodel') || lowerUrl.includes('glm') || lowerModel.includes('glm')) return 'glm';
-  if (lowerUrl.includes('minimax') || lowerUrl.includes('minimaxi')) return 'minimax';
-  if (lowerUrl.includes('openrouter')) return 'openrouter';
-  if (lowerUrl.includes('kilo.ai')) return 'kilo';
-  if (lowerUrl.includes('moonshot')) return 'moonshot';
-  if (lowerUrl.includes('kimi')) return 'kimi';
-  if (lowerUrl.includes(':11434') || lowerUrl.includes('ollama')) return 'ollama';
+  if (hostMatches(host, 'z.ai') || hostMatches(host, 'bigmodel.cn') || host.includes('glm') || lowerModel.includes('glm')) return 'glm';
+  if (hostMatches(host, 'minimax.io') || hostMatches(host, 'minimaxi.com') || hostMatches(host, 'minimaxi.chat') || host.includes('minimax')) return 'minimax';
+  if (hostMatches(host, 'openrouter.ai') || host.includes('openrouter')) return 'openrouter';
+  if (hostMatches(host, 'kilo.ai')) return 'kilo';
+  if (hostMatches(host, 'moonshot.ai') || hostMatches(host, 'moonshot.cn') || host.includes('moonshot')) return 'moonshot';
+  if (hostMatches(host, 'kimi.com') || host.includes('kimi')) return 'kimi';
+  if (port === '11434' || host.includes('ollama')) return 'ollama';
   // Cliproxy / local OpenAI-compatible proxies (e.g. :8317) are not LM Studio.
-  if (lowerUrl.includes(':8317') || lowerUrl.includes('cliproxy')) return 'custom';
-  if (lowerUrl.includes('localhost:1234') || lowerUrl.includes('127.0.0.1:1234')) return 'lmstudio';
+  if (port === '8317' || host.includes('cliproxy')) return 'custom';
+  if (isLoopbackHost(host) && port === '1234') return 'lmstudio';
   // Other loopback ports: generic llm label — only 1234 is LM Studio by convention.
-  if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return 'llm';
+  if (isLoopbackHost(host)) return 'llm';
   return baseUrl ? 'llm' : 'unknown';
 }
 
@@ -297,50 +315,53 @@ export function detectProviderLabel(baseUrl: string, model = ''): ProviderStatus
  * adapters via ProviderFactory.createProvider().
  */
 export function detectRuntimeProviderFromUrl(baseUrl: string, model = ''): RuntimeProviderKey {
-  const lowerUrl = baseUrl.toLowerCase();
   const host = endpointHost(baseUrl);
+  const port = endpointPort(baseUrl);
   const lowerModel = model.toLowerCase();
-  if (lowerUrl.includes('minimax') || lowerUrl.includes('minimaxi')) return 'minimax';
-  if (lowerUrl.includes('openrouter')) return 'openrouter';
-  if (lowerUrl.includes('kilo.ai')) return 'kilo';
+  if (hostMatches(host, 'minimax.io') || hostMatches(host, 'minimaxi.com') || hostMatches(host, 'minimaxi.chat') || host.includes('minimax')) return 'minimax';
+  if (hostMatches(host, 'openrouter.ai') || host.includes('openrouter')) return 'openrouter';
+  if (hostMatches(host, 'kilo.ai')) return 'kilo';
   if (host === 'api.anthropic.com') return 'anthropic';
   if (host === 'api.openai.com') return 'openai';
-  if (lowerUrl.includes('z.ai') || lowerUrl.includes('bigmodel') || lowerUrl.includes('glm') || lowerModel.includes('glm')) return 'glm';
-  if (lowerUrl.includes('api.kimi.com') || lowerUrl.includes('kimi.com')) return 'kimi';
-  if (lowerUrl.includes('moonshot')) return 'moonshot';
-  if (lowerUrl.includes(':11434') || lowerUrl.includes('ollama')) return 'ollama';
-  if (lowerUrl.includes('localhost:1234') || lowerUrl.includes('127.0.0.1:1234')) return 'lmstudio';
+  if (hostMatches(host, 'z.ai') || hostMatches(host, 'bigmodel.cn') || host.includes('glm') || lowerModel.includes('glm')) return 'glm';
+  if (hostMatches(host, 'kimi.com')) return 'kimi';
+  if (hostMatches(host, 'moonshot.ai') || hostMatches(host, 'moonshot.cn') || host.includes('moonshot')) return 'moonshot';
+  if (port === '11434' || host.includes('ollama')) return 'ollama';
+  if (isLoopbackHost(host) && port === '1234') return 'lmstudio';
   return 'custom';
 }
 
 export function detectProviderAdapter(config: { baseUrl: string; model: string }): ProviderAdapterName {
   const baseUrl = config.baseUrl.toLowerCase();
   const model = config.model.toLowerCase();
+  const parsed = endpointUrl(config.baseUrl);
+  const host = endpointHost(config.baseUrl);
+  const port = parsed?.port ?? '';
+  const pathname = parsed?.pathname.toLowerCase() ?? '';
 
   if (baseUrl.startsWith('grok-cli:')) return 'grok-cli';
   // Subscription CLI lanes (command-code, agy, codex) — no HTTP endpoint.
   if (baseUrl.startsWith('cli://')) return 'cli';
-  if (baseUrl.includes('openrouter')) return 'openrouter';
-  if (baseUrl.includes('kilo.ai')) return 'kilo';
-  if (baseUrl.includes('minimax') || baseUrl.includes('minimaxi')) return 'minimax';
-  if (baseUrl.includes('anthropic') || baseUrl.includes('api.anthropic')) return 'anthropic';
-  if (baseUrl.includes('generativelanguage') || baseUrl.includes('googleapis')) return 'google';
+  if (hostMatches(host, 'openrouter.ai') || host.includes('openrouter')) return 'openrouter';
+  if (hostMatches(host, 'kilo.ai')) return 'kilo';
+  if (hostMatches(host, 'minimax.io') || hostMatches(host, 'minimaxi.com') || hostMatches(host, 'minimaxi.chat') || host.includes('minimax')) return 'minimax';
+  if (hostMatches(host, 'anthropic.com') || pathname.includes('/anthropic')) return 'anthropic';
+  if (hostMatches(host, 'googleapis.com') || host.includes('generativelanguage') || (isLoopbackHost(host) && pathname.includes('/generativelanguage'))) return 'google';
   // Ollama Cloud (ollama.com) is OpenAI-compatible with bearer auth — use the
   // OpenAI adapter so OLLAMA_API_KEY is sent. Local Ollama stays on 'ollama'.
-  if (baseUrl.includes('ollama.com')) return 'openai';
-  if (baseUrl.includes(':11434') || baseUrl.includes('ollama')) return 'ollama';
-  if (baseUrl.includes('z.ai')) return 'anthropic';
-  if (baseUrl.includes('bigmodel.cn')) return 'openai';
-  if (baseUrl.includes('moonshot.ai') || baseUrl.includes('moonshot.cn')) return 'openai';
-  if (baseUrl.includes('kimi.com')) return 'openai';
-  if (endpointHost(baseUrl) === 'api.openai.com') return 'openai';
+  if (hostMatches(host, 'ollama.com')) return 'openai';
+  if (port === '11434' || host.includes('ollama')) return 'ollama';
+  if (hostMatches(host, 'z.ai')) return 'anthropic';
+  if (hostMatches(host, 'bigmodel.cn')) return 'openai';
+  if (hostMatches(host, 'moonshot.ai') || hostMatches(host, 'moonshot.cn')) return 'openai';
+  if (hostMatches(host, 'kimi.com')) return 'openai';
+  if (host === 'api.openai.com') return 'openai';
   // Local / private OpenAI-compatible proxies (Codex proxy :8317, LM Studio, etc.)
   // must stay on the openai adapter even when the model id is gemini*/claude*.
   // Model-name heuristics below only apply when the endpoint itself is unknown
   // or already vendor-native — otherwise gemini* was wrongly routed to
   // generativelanguage.googleapis.com despite an explicit localhost proxy URL.
-  const host = endpointHost(baseUrl);
-  if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || baseUrl.includes(':8317')) {
+  if (isLoopbackHost(host) || port === '8317') {
     return 'openai';
   }
   if (model.startsWith('claude')) return 'anthropic';
@@ -354,13 +375,16 @@ export function detectRoleProviderType(baseUrl: string, model = ''): ProviderAda
 }
 
 export function apiStyleForEndpoint(baseUrl: string, provider?: RuntimeProviderKey): ProviderApiStyle {
-  const lowerUrl = baseUrl.toLowerCase();
+  const parsed = endpointUrl(baseUrl);
+  const host = endpointHost(baseUrl);
+  const port = parsed?.port ?? '';
+  const pathname = parsed?.pathname.toLowerCase() ?? '';
   // Ollama Cloud is OpenAI-compatible; only local Ollama uses the native style.
-  if (lowerUrl.includes('ollama.com')) return 'openai';
-  if (lowerUrl.includes(':11434') || lowerUrl.includes('ollama')) return 'ollama';
+  if (hostMatches(host, 'ollama.com')) return 'openai';
+  if (port === '11434' || host.includes('ollama')) return 'ollama';
   if (
-    lowerUrl.includes('/anthropic')
-    || lowerUrl.includes('api.anthropic')
+    pathname.includes('/anthropic')
+    || hostMatches(host, 'anthropic.com')
   ) {
     return 'anthropic';
   }
@@ -392,7 +416,7 @@ export function apiKeyEnvNamesForEndpoint(baseUrl: string, _model = ''): string[
     const configuredProxy = process.env.CODEX_PROXY_BASE_URL
       || process.env.SINTER_CODEX_PROXY_BASE_URL || process.env.LIMINAL_CODEX_PROXY_BASE_URL;
     if (sameProviderEndpoint(baseUrl, configuredProxy)
-      || ((endpoint.hostname === 'localhost' || endpoint.hostname === '127.0.0.1')
+      || (isLoopbackHost(endpoint.hostname)
         && endpoint.port === '8317' && endpoint.protocol === 'http:')) return ['CODEX_PROXY_API_KEY'];
     if (endpoint.protocol !== 'https:' || endpoint.port) return [];
     switch (endpoint.hostname) {

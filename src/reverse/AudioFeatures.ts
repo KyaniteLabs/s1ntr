@@ -131,6 +131,83 @@ function pickBpm(onset: Float64Array, hopSec: number): number {
   return 60 / ((best + shift) * hopSec);
 }
 
+/** Mean onset strength captured per beat by the best-phase beat grid at `bpm` (any phase). */
+function gridMean(onset: Float64Array, hopSec: number, bpm: number): number {
+  const period = 60 / bpm / hopSec; // frames per beat
+  if (period < 2 || onset.length < period * 2) return -1;
+  const w = Math.max(1, Math.round(0.025 / hopSec)); // +-25 ms tolerance
+  let best = 0;
+  for (let ph = 0; ph < 24; ph++) {
+    const phase = (ph * period) / 24;
+    const nBeats = Math.floor((onset.length - 1 - phase) / period) + 1;
+    if (nBeats < 2) continue;
+    let s = 0;
+    for (let k = 0; k < nBeats; k++) {
+      const gi = Math.round(phase + k * period);
+      let m = 0;
+      for (let f = Math.max(0, gi - w); f < Math.min(onset.length, gi + w + 1); f++) {
+        if (onset[f] > m) m = onset[f];
+      }
+      s += m;
+    }
+    const mean = s / nBeats;
+    if (mean > best) best = mean;
+  }
+  return best;
+}
+
+/** Fraction of total onset energy that lies within +-25 ms of the best-phase beat grid at `bpm`. */
+function gridCoverage(onset: Float64Array, hopSec: number, bpm: number): number {
+  const period = 60 / bpm / hopSec;
+  if (period < 2 || onset.length < period * 2) return -1;
+  let total = 0;
+  for (let i = 0; i < onset.length; i++) total += onset[i];
+  if (total <= 0) return 0;
+  const tol = 0.025 / hopSec; // frames
+  let best = 0;
+  for (let ph = 0; ph < 24; ph++) {
+    const phase = (ph * period) / 24;
+    let cap = 0;
+    for (let f = 0; f < onset.length; f++) {
+      let g = (f - phase) % period;
+      if (g < 0) g += period;
+      g = Math.min(g, period - g); // distance to the nearest grid point
+      if (g <= tol) cap += onset[f];
+    }
+    if (cap > best) best = cap;
+  }
+  return best / total;
+}
+
+/**
+ * Rescore the autocorrelation tempo against x1, x3/2, x2, x1/2 candidates by
+ * beat-grid alignment (mean captured strength per beat x fraction of onset
+ * energy covered). A dotted-quarter accent pattern makes raw autocorrelation
+ * lock onto the 2/3 subharmonic (a 126 BPM song reads as 84 BPM); the quarter
+ * grid covers every second eighth where the dotted grid covers every third, so
+ * alignment separates them. A candidate must beat the estimate by 15% to win;
+ * unambiguous inputs keep their autocorrelation tempo.
+ */
+function refineTempo(onset: Float64Array, hopSec: number, bpm: number): number {
+  let baseScore = -1;
+  let bestBpm = bpm;
+  let bestScore = -1;
+  for (const r of [1, 1.5, 2, 0.5]) {
+    const c = bpm * r;
+    if (c < 70 || c > 180) continue; // pickBpm only searches this window
+    const mean = gridMean(onset, hopSec, c);
+    const coverage = gridCoverage(onset, hopSec, c);
+    if (mean < 0 || coverage < 0) continue;
+    const score = mean * coverage;
+    if (r === 1) baseScore = score;
+    if (score > bestScore) {
+      bestScore = score;
+      bestBpm = c;
+    }
+  }
+  return baseScore > 0 && bestScore > baseScore * 1.15 ? bestBpm : bpm;
+}
+
 export function analyzeAudio(audio: DecodedAudio): AudioFeatures {
   const { samples, sampleRate } = audio;
   const durationSec = samples.length / sampleRate;
@@ -150,7 +227,7 @@ export function analyzeAudio(audio: DecodedAudio): AudioFeatures {
   const onset = new Float64Array(frames);
   for (let f = 1; f < frames; f++) onset[f] = Math.max(0, rms[f] - rms[f - 1]);
 
-  const bpm = round(pickBpm(onset, hopSec), 1);
+  const bpm = round(refineTempo(onset, hopSec, pickBpm(onset, hopSec)), 1);
 
   // Onset density: peaks above 15% of the strongest, at least 150 ms apart.
   const maxOnset = onset.reduce((m, v) => Math.max(m, v), 0);

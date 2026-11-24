@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, rm, stat, utimes } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, stat, utimes } from 'node:fs/promises';
 import { mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { writeFileAtomic, writeFileAtomicSync } from '../utils/atomicWrite.js';
@@ -311,8 +311,9 @@ function stable(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;
   if (value && typeof value === 'object') {
     const record = value as Record<string, unknown>;
-    return `{${Object.keys(record).sort().map((key) =>
-      `${JSON.stringify(key)}:${stable(record[key])}`).join(',')}}`;
+    return `{${Object.keys(record).sort()
+      .filter((key) => record[key] !== undefined)
+      .map((key) => `${JSON.stringify(key)}:${stable(record[key])}`).join(',')}}`;
   }
   return JSON.stringify(value);
 }
@@ -597,7 +598,15 @@ export class FileCreativeRunPersistence implements CreativeRunPersistence {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
         try {
           const lock = await stat(lockPath);
-          if (Date.now() - lock.mtimeMs > LOCK_STALE_MS) await rm(lockPath, { recursive: true, force: true });
+          if (Date.now() - lock.mtimeMs > LOCK_STALE_MS) {
+            const stalePath = `${lockPath}.stale-${process.pid}-${randomUUID()}`;
+            try {
+              await rename(lockPath, stalePath);
+              await rm(stalePath, { recursive: true, force: true });
+            } catch (reclaimError) {
+              if ((reclaimError as NodeJS.ErrnoException).code !== 'ENOENT') throw reclaimError;
+            }
+          }
         } catch (statError) {
           if ((statError as NodeJS.ErrnoException).code !== 'ENOENT') throw statError;
         }
@@ -607,6 +616,7 @@ export class FileCreativeRunPersistence implements CreativeRunPersistence {
     const heartbeat = setInterval(() => {
       void utimes(lockPath, new Date(), new Date()).catch(() => undefined);
     }, Math.floor(LOCK_STALE_MS / 3));
+    heartbeat.unref?.();
     return async () => {
       clearInterval(heartbeat);
       await rm(lockPath, { recursive: true, force: true });

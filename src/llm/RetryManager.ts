@@ -43,7 +43,13 @@ export class RetryManager {
     fn: () => Promise<T>,
     options?: RetryOptions
   ): Promise<T> {
-    const opts = { ...resolveDefaultOptions(), ...options };
+    const defaults = resolveDefaultOptions();
+    const opts = {
+      maxRetries: options?.maxRetries ?? defaults.maxRetries,
+      baseDelayMs: options?.baseDelayMs ?? defaults.baseDelayMs,
+      maxDelayMs: options?.maxDelayMs ?? defaults.maxDelayMs,
+      signal: options?.signal,
+    };
     let lastError: Error | undefined;
 
     for (let attempt = 0; attempt <= opts.maxRetries; attempt++) {
@@ -141,7 +147,8 @@ export class RetryManager {
       }
     }
 
-    const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => worker());
+    const limit = Number.isFinite(concurrency) && concurrency >= 1 ? Math.floor(concurrency) : 1;
+    const workers = Array.from({ length: Math.min(limit, items.length) }, () => worker());
     await Promise.all(workers);
     return results;
   }

@@ -781,7 +781,10 @@ export class LLMClient {
     if (!this.role || this.explicitEndpointConfig) return;
 
     if (!this.roleConfigResolutionPromise) {
-      this.roleConfigResolutionPromise = this.doResolveRoleConfigForRequest();
+      this.roleConfigResolutionPromise = this.doResolveRoleConfigForRequest().catch((error) => {
+        this.roleConfigResolutionPromise = null;
+        throw error;
+      });
     }
 
     return this.roleConfigResolutionPromise;
@@ -1731,8 +1734,7 @@ export class LLMClient {
 
   /** Clear the LLM response cache */
   clearCache(): void {
-    this.cache = new CacheManager({ enabled: false });
-    this.enableCache();
+    this.cache.clear();
   }
 
   /** Disable caching entirely */
@@ -1781,7 +1783,10 @@ export class LLMClient {
 
     // Race-safe lazy initialization: only first caller creates the promise
     if (!this.resolveModelPromise) {
-      this.resolveModelPromise = this.doResolveModel();
+      this.resolveModelPromise = this.doResolveModel().catch((error) => {
+        this.resolveModelPromise = null;
+        throw error;
+      });
     }
 
     return this.resolveModelPromise;
@@ -1801,9 +1806,15 @@ export class LLMClient {
   private async doResolveModel(): Promise<string> {
     await this.resolveRoleConfigForRequest();
 
-    // Only auto-detect for local endpoints (LM Studio, etc.)
+    // Only auto-detect for local loopback endpoints (LM Studio, Ollama, etc.)
     const baseUrl = this.config.baseUrl;
-    const isLocal = baseUrl.includes('localhost') || baseUrl.includes('127.0.0.1');
+    let isLocal = false;
+    try {
+      const host = new URL(baseUrl).hostname.toLowerCase().replace(/^\[|\]$/g, '');
+      isLocal = host === 'localhost' || host === '127.0.0.1' || host === '::1';
+    } catch {
+      isLocal = false;
+    }
     const shouldAutoDetectLocalModel = this.shouldAutoDetectLocalModel(baseUrl, this.config.model);
 
     if (!isLocal) {
@@ -2408,6 +2419,7 @@ export class LLMClient {
           maxTokens,
           thinking: this.config.thinking,
           signal,
+          jsonMode,
           imageInputs: effectiveImageInputs,
         };
 

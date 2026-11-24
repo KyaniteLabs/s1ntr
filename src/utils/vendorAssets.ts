@@ -100,6 +100,9 @@ export const RUNTIME_FETCHED_ASSETS: Readonly<Record<string, { url: string; sha2
   },
 });
 
+const RUNTIME_FETCH_TIMEOUT_MS = 30_000;
+const RUNTIME_FETCH_MAX_BYTES = 10 * 1024 * 1024;
+
 /** Fetch a RUNTIME_FETCHED_ASSETS entry from its CDN; rejects unless the bytes match the pin. */
 export async function fetchPinnedRuntimeAsset(
   urlPath: string,
@@ -107,9 +110,16 @@ export async function fetchPinnedRuntimeAsset(
 ): Promise<string> {
   const pin = RUNTIME_FETCHED_ASSETS[urlPath];
   if (!pin) throw new Error(`vendorAssets: no runtime source for ${urlPath}`);
-  const res = await fetchImpl(pin.url);
+  const res = await fetchImpl(pin.url, { signal: AbortSignal.timeout(RUNTIME_FETCH_TIMEOUT_MS) });
   if (!res.ok) throw new Error(`vendorAssets: ${pin.url} answered HTTP ${res.status}`);
+  const lenHeader = res.headers?.get?.('content-length');
+  if (lenHeader && Number(lenHeader) > RUNTIME_FETCH_MAX_BYTES) {
+    throw new Error(`vendorAssets: ${pin.url} content-length ${lenHeader} exceeds ${RUNTIME_FETCH_MAX_BYTES} bytes`);
+  }
   const bytes = Buffer.from(await res.arrayBuffer());
+  if (bytes.byteLength > RUNTIME_FETCH_MAX_BYTES) {
+    throw new Error(`vendorAssets: ${pin.url} body ${bytes.byteLength} exceeds ${RUNTIME_FETCH_MAX_BYTES} bytes`);
+  }
   const digest = createHash('sha256').update(bytes).digest('hex');
   if (digest !== pin.sha256) {
     throw new Error(`vendorAssets: ${pin.url} sha256 ${digest} does not match the pin ${pin.sha256}`);
@@ -133,19 +143,25 @@ export function readVendorAsset(urlPath: string): Promise<string> {
   let cached = assetCache.get(urlPath);
   if (!cached) {
     const rel = urlPath.slice(VENDOR_BASE_PATH.length + 1);
-    cached = readFile(`${vendorRoot()}${rel}`, 'utf8').catch((err: unknown) => {
-      if (RUNTIME_FETCHED_ASSETS[urlPath] && (err as NodeJS.ErrnoException)?.code === 'ENOENT') {
-        // A failed fetch is not cached: the next render retries the CDN.
-        return fetchPinnedRuntimeAsset(urlPath).catch((fetchErr: unknown) => {
-          assetCache.delete(urlPath);
-          throw fetchErr;
-        });
+    const pin = RUNTIME_FETCHED_ASSETS[urlPath];
+    cached = readFile(`${vendorRoot()}${rel}`, 'utf8').then((content) => {
+      if (pin) {
+        const digest = createHash('sha256').update(content, 'utf8').digest('hex');
+        if (digest !== pin.sha256) return fetchPinnedRuntimeAsset(urlPath);
+      }
+      return content;
+    }).catch((err: unknown) => {
+      if (pin && (err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+        return fetchPinnedRuntimeAsset(urlPath);
       }
       const message = err instanceof Error ? err.message : String(err);
       throw new Error(
         `vendorAssets: vendored asset missing on disk: ${urlPath} (${message}). ` +
         'Artifacts must not fall back to CDNs — restore the vendor/ file.',
       );
+    }).catch((err: unknown) => {
+      assetCache.delete(urlPath);
+      throw err;
     });
     assetCache.set(urlPath, cached);
   }
@@ -207,7 +223,7 @@ export async function inlineVendorAssets(
   for (const frame of frames) {
     const source = frame[1].replace(/&(amp|quot|#39|lt|gt);/g,
       (_entity, name: string) => entities[name]);
-    const body = await inlineVendorAssets(source, onInlineAsset);
+    const body = await inlineVendorAssets(source, onInlineAsset, options);
     const escaped = body.replace(/&/g, '&amp;').replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     embedded = embedded.replace(frame[0], () => frame[0].replace(

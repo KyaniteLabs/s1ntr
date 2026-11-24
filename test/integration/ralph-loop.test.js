@@ -232,8 +232,11 @@ describe('RalphLoop Integration Tests', () => {
       const result = await RalphLoop.run(prompt, null);
 
       expect(result.code).toContain('function draw()');
-      expect(result.iterations).toBe(20);
-      expect(result.reason).toMatch(/^max iterations reached \(20\)/);
+      // Default stagnationThreshold (7) with at most one reflection reset halts a
+      // cycling non-improving run before default maxIterations (20).
+      expect(result.iterations).toBeGreaterThanOrEqual(7);
+      expect(result.iterations).toBeLessThanOrEqual(20);
+      expect(result.reason).toMatch(/^(?:stagnation detected|max iterations reached \(20\))/);
     });
 
     test('should handle generator errors gracefully', async () => {

@@ -256,11 +256,8 @@ export class Gallery {
 
     // Also save the final output as the latest version
     if (validatedFinalOutput) {
-      const history = await this.loadHistory(project).catch((err) => {
-        Logger.debug('Gallery', 'Failed to load history:', err);
-        return [];
-      });
-      const nextVersion = history.length + 1;
+      const history = await this.loadHistory(project);
+      const nextVersion = (history.at(-1)?.version ?? 0) + 1;
       await this.saveIteration(project, nextVersion, validatedFinalOutput);
     }
   }
@@ -400,11 +397,11 @@ export class Gallery {
     assertSafeSegment(project.trim(), 'Project name');
 
     try {
-      // Find all date-based directories for this project (not just today's)
+      // Find all date-based directories for this project (exact project name after YYYY-MM-DD--)
       const allDirs = await this.listProjectDirs();
-      const projectSuffix = `--${project.trim()}`;
+      const targetProject = project.trim();
       const matchingDirs = allDirs
-        .filter(d => d.endsWith(projectSuffix))
+        .filter(d => d.replace(/^\d{4}-\d{2}-\d{2}--/, '') === targetProject)
         .sort(); // oldest first by name (YYYY-MM-DD)
 
       if (matchingDirs.length === 0) return [];
@@ -555,11 +552,11 @@ export class Gallery {
    */
   async cleanupOldProjects(maxProjects = 100, maxAgeDays = 90): Promise<number> {
     const dirs = await this.listProjectDirs();
-    if (dirs.length <= maxProjects) return 0;
+    if (dirs.length === 0) return 0;
 
     const now = Date.now();
     const maxAgeMs = maxAgeDays * 24 * 60 * 60 * 1000;
-    const toArchive: string[] = [];
+    const toArchiveSet = new Set<string>();
 
     for (const dirName of dirs) {
       // Extract date from directory name (YYYY-MM-DD--project)
@@ -574,20 +571,23 @@ export class Gallery {
         continue;
       }
 
-      // Archive if too old or beyond maxProjects limit
+      // Archive if directory date or mtime exceeds maxAgeDays
       if (now - dirDate > maxAgeMs || now - stat.mtimeMs > maxAgeMs) {
-        toArchive.push(dirName);
+        toArchiveSet.add(dirName);
       }
     }
 
     // If still too many, archive oldest beyond limit
-    if (dirs.length - toArchive.length > maxProjects) {
-      const remaining = dirs.filter(d => !toArchive.includes(d)).sort(); // oldest first
+    if (dirs.length - toArchiveSet.size > maxProjects) {
+      const remaining = dirs.filter(d => !toArchiveSet.has(d)).sort(); // oldest first
       const excess = remaining.length - maxProjects;
       for (let i = 0; i < excess; i++) {
-        toArchive.push(remaining[i]);
+        toArchiveSet.add(remaining[i]);
       }
     }
+
+    if (toArchiveSet.size === 0) return 0;
+    const toArchive = Array.from(toArchiveSet);
 
     // Create archive directory
     const archiveDir = normalizePath(this.galleryDir, '_archived');

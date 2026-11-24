@@ -293,28 +293,31 @@ export async function loadProjectConfig(configDirOrPath?: string): Promise<Resul
         retryable: false,
       }));
     }
-    // Fallback: try legacy project-config filenames (liminal.json, atelier.json) in order.
+    // Fallback: try legacy project-config filenames (liminal.json, atelier.json) in order,
+    // only when looking for the default sinter.json filename (not an explicit custom path).
     let lastError: unknown = readError;
-    for (const legacyName of LEGACY_PROJECT_CONFIG_FILENAMES) {
-      const legacyPath = projectConfigPath.replace(/[^/\\]+$/, legacyName);
-      if (legacyPath === projectConfigPath) continue;
-      try {
-        const content = await fs.readFile(legacyPath, 'utf-8');
-        const parsed: unknown = JSON.parse(content);
-        if (!isValidProjectConfig(parsed)) {
-          Logger.warn('ConfigLoader', `Invalid legacy project config structure at ${legacyPath}`);
-          return reject(new PersistenceError('Invalid legacy project config structure', { retryable: false }));
+    if (path.basename(projectConfigPath) === PROJECT_CONFIG_FILENAME) {
+      for (const legacyName of LEGACY_PROJECT_CONFIG_FILENAMES) {
+        const legacyPath = path.join(path.dirname(projectConfigPath), legacyName);
+        if (legacyPath === projectConfigPath) continue;
+        try {
+          const content = await fs.readFile(legacyPath, 'utf-8');
+          const parsed: unknown = JSON.parse(content);
+          if (!isValidProjectConfig(parsed)) {
+            Logger.warn('ConfigLoader', `Invalid legacy project config structure at ${legacyPath}`);
+            return reject(new PersistenceError('Invalid legacy project config structure', { retryable: false }));
+          }
+          return ok(parsed);
+        } catch (error) {
+          if (!isEnoent(error)) {
+            Logger.warn('ConfigLoader', `Failed to load legacy config ${legacyPath}:`, error);
+            return reject(new PersistenceError('Failed to load project config', {
+              cause: error instanceof Error ? error : new Error(String(error)),
+              retryable: false,
+            }));
+          }
+          lastError = error;
         }
-        return ok(parsed);
-      } catch (error) {
-        if (!isEnoent(error)) {
-          Logger.warn('ConfigLoader', `Failed to load legacy config ${legacyPath}:`, error);
-          return reject(new PersistenceError('Failed to load project config', {
-            cause: error instanceof Error ? error : new Error(String(error)),
-            retryable: false,
-          }));
-        }
-        lastError = error;
       }
     }
     Logger.debug('ConfigLoader', `No project config found at ${projectConfigPath} or legacy names — using defaults`);
@@ -391,7 +394,11 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * (including unknown forward-compatible ones) are preserved.
  */
 function deepMergeConfig(base: Record<string, unknown>, update: Record<string, unknown>): Record<string, unknown> {
-  const merged: Record<string, unknown> = { ...base };
+  const merged: Record<string, unknown> = {};
+  for (const key of Object.keys(base)) {
+    if (UNSAFE_CONFIG_KEYS.has(key)) continue;
+    merged[key] = base[key];
+  }
   for (const key of Object.keys(update)) {
     if (UNSAFE_CONFIG_KEYS.has(key)) continue;
     const incoming = update[key];
@@ -508,7 +515,12 @@ export async function getEffectiveConfig(configPath?: string, projectConfigPath?
   const runtimeProvider = runtimeProviderForEffective(provider);
   const hasProviderSignal = Boolean(env('LLM_PROVIDER') || projectProvider || usableFileProviderName || keyedProvider);
 
-  const rawFileProviderConfigForProvider = fileConfig?.providers?.[rawProviderName] || fileConfig?.providers?.[provider] || {};
+  const providersMap = fileConfig?.providers;
+  const rawFileProviderConfigForProvider = (
+    (providersMap && Object.hasOwn(providersMap, rawProviderName) ? providersMap[rawProviderName] : undefined)
+    || (providersMap && Object.hasOwn(providersMap, provider) ? providersMap[provider] : undefined)
+    || {}
+  );
   const fileProviderConfig = isPlaceholderProviderConfig(rawProviderName, rawFileProviderConfigForProvider)
     ? {}
     : rawFileProviderConfigForProvider;

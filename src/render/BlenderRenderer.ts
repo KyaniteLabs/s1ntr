@@ -152,7 +152,11 @@ scene = bpy.context.scene
 scene.render.engine = "CYCLES"
 try:
     scene.cycles.device = "CPU"
-    scene.cycles.samples = min(int(scene.cycles.samples), _MAX_SAMPLES)
+except Exception:
+    pass
+try:
+    scene.cycles.samples = max(1, min(int(scene.cycles.samples), _MAX_SAMPLES))
+    scene.cycles.preview_samples = max(1, min(int(scene.cycles.preview_samples), _MAX_SAMPLES))
 except Exception:
     pass
 longest = max(scene.render.resolution_x, scene.render.resolution_y, 1)
@@ -178,7 +182,8 @@ function pngSize(buffer: Buffer): { width: number; height: number } | null {
 function killTree(pid: number): void {
   try {
     if (process.platform === 'win32') {
-      spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
+      const killer = spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
+      killer.on('error', () => {});
     } else {
       process.kill(-pid, 'SIGKILL');
     }
@@ -385,7 +390,9 @@ export async function renderBlender(script: string, options: BlenderRenderOption
       ...(run.sandbox ? { sandbox: run.sandbox } : {}),
     };
   } finally {
-    rmSync(inputDir, { recursive: true, force: true });
-    if (!keepOutput) rmSync(outDir, { recursive: true, force: true });
+    try { rmSync(inputDir, { recursive: true, force: true }); } catch { /* ignore cleanup errors */ }
+    if (!keepOutput) {
+      try { rmSync(outDir, { recursive: true, force: true }); } catch { /* ignore cleanup errors */ }
+    }
   }
 }

@@ -111,7 +111,7 @@ export class MetabolicEntropyEngine {
   }
 
   private fallback(quality: 'emergency', source: 'fallback'): EntropyResult {
-    const seed = Number(Date.now() ^ (process.pid || 1));
+    const seed = ((Date.now() ^ (process.pid || 1)) >>> 0);
     return {
       seed,
       phrase: 'ash dust null void',

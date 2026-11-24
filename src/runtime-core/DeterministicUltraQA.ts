@@ -117,18 +117,22 @@ function treeDigest(repoRoot: string, relative: string): string {
 function sanitized(value: string, repoRoot: string): string {
   return value.replaceAll(path.resolve(repoRoot), '<repo>')
     .replace(/\/(Users|home|tmp)\/[A-Za-z0-9_./-]+/g, '<path>')
-    .replace(/(?:sk|key|token|secret)[_-]?[A-Za-z0-9]{12,}/gi, '<redacted>');
+    .replace(/(?:sk|pk|ghp|gho|ghs|ghu|github_pat|key|token|secret)[_-]?[A-Za-z0-9_-]{12,}/gi, '<redacted>');
 }
 function safeEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
-  for (const key of ['CODEX_PROXY_API_KEY', 'KILO_API_KEY', 'MINIMAX_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GOOGLE_API_KEY', 'GROK_API_KEY', 'GLM_API_KEY', 'KIMI_API_KEY', 'MOONSHOT_API_KEY', 'GEMINI_API_KEY', 'OPENROUTER_API_KEY', 'MISTRAL_API_KEY', 'DEEPSEEK_API_KEY', 'ZAI_API_KEY', 'LMSTUDIO_API_KEY', 'OLLAMA_API_KEY', 'LIMINAL_LLM_API_KEY', 'LIMINAL_HARNESS_API_KEY', 'LIMINAL_EVALUATOR_API_KEY', 'SINTER_LLM_API_KEY', 'SINTER_HARNESS_API_KEY', 'SINTER_EVALUATOR_API_KEY', 'LLM_API_KEY', 'HARNESS_API_KEY', 'EVALUATOR_API_KEY', 'RUN_CLOUD_MODEL_TESTS']) delete env[key];
+  for (const key of Object.keys(env)) {
+    if (/(?:_API_KEY|_AUTH_TOKEN|_TOKEN|_SECRET|_PASSWORD)$/i.test(key) || key === 'RUN_CLOUD_MODEL_TESTS') {
+      delete env[key];
+    }
+  }
   return env;
 }
 function commandPreflight(command: FixedUltraQACommand, repoRoot: string): string | undefined {
   if (command.argv[1] !== 'scripts/quality/wave8-safe-test-allowlist.mjs') return undefined;
   const mode = command.argv[3];
   const checked = spawnSync('node', ['scripts/quality/wave8-safe-test-allowlist.mjs', '--mode', mode, '--inspect'], {
-    cwd: repoRoot, env: safeEnv(), shell: false, encoding: 'utf8',
+    cwd: repoRoot, env: safeEnv(), shell: false, encoding: 'utf8', timeout: 30_000,
   });
   return checked.status === 0 ? undefined : (checked.stderr || checked.stdout || checked.error?.message || 'safe-test preflight rejected');
 }
@@ -137,14 +141,33 @@ function commandPreflight(command: FixedUltraQACommand, repoRoot: string): strin
 export async function executeFixedUltraQACommand(command: FixedUltraQACommand, repoRoot: string): Promise<UltraQACommandResult> {
   const startedAt = new Date().toISOString(); const [file, ...args] = command.argv;
   const completed = await new Promise<{ exitCode: number; stdout: string; stderr: string }>((resolve, reject) => {
-    const child = spawn(file, args, { cwd: repoRoot, env: safeEnv(), shell: false, stdio: ['ignore', 'pipe', 'pipe'] }); let stdout = ''; let stderr = '';
-    const timeoutHandle = setTimeout(() => { stderr += '\nCOMMAND_TIMEOUT_AFTER_600S'; child.kill('SIGTERM'); setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already exited */ } }, 5_000); }, 600_000);
+    const child = spawn(file, args, { cwd: repoRoot, env: safeEnv(), shell: false, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = ''; let stderr = '';
+    let killHandle: NodeJS.Timeout | undefined;
+    const killTree = (sig: NodeJS.Signals) => {
+      try {
+        if (child.pid && process.platform !== 'win32') process.kill(-child.pid, sig);
+        else child.kill(sig);
+      } catch { /* already exited */ }
+    };
+    const clearAll = () => { clearTimeout(timeoutHandle); if (killHandle) clearTimeout(killHandle); };
+    const timeoutHandle = setTimeout(() => {
+      stderr += '\nCOMMAND_TIMEOUT_AFTER_600S';
+      killTree('SIGTERM');
+      killHandle = setTimeout(() => killTree('SIGKILL'), 5_000);
+      killHandle.unref?.();
+    }, 600_000);
     child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8'); child.stdout.on('data', data => { stdout += data; }); child.stderr.on('data', data => { stderr += data; });
-    child.on('error', reject); child.on('close', code => { clearTimeout(timeoutHandle); resolve({ exitCode: code ?? 1, stdout, stderr }); });
+    child.on('error', (err) => { clearAll(); reject(err); });
+    child.on('close', code => { clearAll(); resolve({ exitCode: code ?? 1, stdout, stderr }); });
   });
   const toolVersion = await new Promise<string>(resolve => {
     const child = spawn(file, ['--version'], { cwd: repoRoot, env: safeEnv(), shell: false, stdio: ['ignore', 'pipe', 'ignore'] }); let output = '';
-    child.stdout.setEncoding('utf8'); child.stdout.on('data', data => { output += data; }); child.on('error', () => resolve('unavailable')); child.on('close', () => resolve(output.trim() || 'unavailable'));
+    const vTimer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* exited */ } resolve('unavailable'); }, 5_000);
+    vTimer.unref?.();
+    child.stdout.setEncoding('utf8'); child.stdout.on('data', data => { output += data; });
+    child.on('error', () => { clearTimeout(vTimer); resolve('unavailable'); });
+    child.on('close', () => { clearTimeout(vTimer); resolve(output.trim() || 'unavailable'); });
   });
   return { ...completed, startedAt, finishedAt: new Date().toISOString(), toolVersion };
 }

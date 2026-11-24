@@ -145,8 +145,12 @@ export class DreamQueue {
     let raw: string;
     try {
       raw = fs.readFileSync(persistPath, 'utf-8');
-    } catch {
-      return; // no file yet — start empty
+    } catch (readErr) {
+      const code = (readErr as NodeJS.ErrnoException | null)?.code;
+      if (!isEnoent(readErr) && code !== 'ENOTDIR') {
+        Logger.warn('DreamQueue', `could not read queue ${persistPath}:`, readErr);
+      }
+      return; // no file yet (or unreadable) — start empty
     }
     let tasks: DreamTask[];
     try {
@@ -188,10 +192,13 @@ export class DreamQueue {
 
   private persist(): void {
     if (!this.persistPath) return;
+    const tmpPath = `${this.persistPath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     try {
       fs.mkdirSync(path.dirname(this.persistPath), { recursive: true });
-      fs.writeFileSync(this.persistPath, JSON.stringify({ version: 1, tasks: this.queue }, null, 2), 'utf-8');
+      fs.writeFileSync(tmpPath, JSON.stringify({ version: 1, tasks: this.queue }, null, 2), 'utf-8');
+      fs.renameSync(tmpPath, this.persistPath);
     } catch (err) {
+      try { fs.rmSync(tmpPath, { force: true }); } catch { /* ignore */ }
       // The in-memory queue stays authoritative, but the on-disk copy is now stale.
       Logger.warn('DreamQueue', `queue persistence failed: ${this.persistPath}:`, err);
     }
@@ -342,7 +349,8 @@ export class DreamQueue {
       const idx = this.queue.indexOf(t);
       if (idx >= 0) this.queue.splice(idx, 1);
     }
+    const removed = before - this.queue.length;
     this.persist();
-    return before - this.queue.length;
+    return removed;
   }
 }

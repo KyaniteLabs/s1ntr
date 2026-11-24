@@ -208,8 +208,10 @@ function envTimeout(role: string): number | undefined {
     process.env.SINTER_LLM_TIMEOUT_MS ??
     process.env.LIMINAL_LLM_TIMEOUT_MS;
   if (raw === undefined) return undefined;
-  const value = Number.parseInt(raw, 10);
-  return Number.isFinite(value) && value > 0 ? value : undefined;
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return undefined;
+  const value = Number.parseInt(trimmed, 10);
+  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
 // ── Config Loading ──
@@ -747,17 +749,20 @@ function projectToRoleConfig(project: ProjectConfigLike): ProjectRoleConfig | nu
   }
 
   if (project.multiModel?.secondary) {
+    const sec = project.multiModel.secondary;
     roles.harness = {
-      baseUrl: project.multiModel.secondary.baseUrl || '',
-      model: project.multiModel.secondary.model || '',
-      temperature: project.multiModel.secondary.temperature,
-      maxTokens: project.multiModel.secondary.maxTokens,
+      ...(sec.baseUrl ? { baseUrl: sec.baseUrl } : {}),
+      ...(sec.model ? { model: sec.model } : {}),
+      ...(sec.temperature === undefined ? {} : { temperature: sec.temperature }),
+      ...(sec.maxTokens === undefined ? {} : { maxTokens: sec.maxTokens }),
     };
   }
 
   // Explicit `roles` entries are the most specific statement and win over the legacy llm/multiModel mapping.
   if (project.roles) {
+    const unsafeKeys = new Set(['__proto__', 'constructor', 'prototype']);
     for (const [name, value] of Object.entries(project.roles)) {
+      if (unsafeKeys.has(name)) continue;
       const entries = roles as Record<string, Partial<RoleProviderConfig>>;
       entries[name] = mergeRole(entries[name], value);
     }

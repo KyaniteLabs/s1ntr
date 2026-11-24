@@ -17,6 +17,23 @@ import os from 'os';
  * @returns Resolved absolute path under baseDir
  * @throws Error if result would be outside baseDir
  */
+function realpathWithExistingAncestor(target: string): string {
+  const missingSegments: string[] = [];
+  let cursor = path.resolve(target);
+  while (cursor.length > 0) {
+    try {
+      const resolved = fs.realpathSync(cursor);
+      return missingSegments.length > 0 ? path.join(resolved, ...missingSegments.reverse()) : resolved;
+    } catch {
+      const parent = path.dirname(cursor);
+      if (parent === cursor) return path.resolve(target);
+      missingSegments.push(path.basename(cursor));
+      cursor = parent;
+    }
+  }
+  return path.resolve(target);
+}
+
 export function normalizePath(baseDir: string, subPath: string): string {
   const baseAbs = path.resolve(baseDir);
   let baseReal: string;
@@ -30,6 +47,13 @@ export function normalizePath(baseDir: string, subPath: string): string {
   const full = path.resolve(baseReal, subPath);
   const rel = path.relative(baseReal, full);
   if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    throw new Error('Path traversal or escape not allowed');
+  }
+  // Also resolve symlinks on the target's deepest existing ancestor so a symlink
+  // inside baseDir cannot redirect reads/writes outside baseReal.
+  const fullReal = realpathWithExistingAncestor(full);
+  const realRel = path.relative(baseReal, fullReal);
+  if (realRel.startsWith('..') || path.isAbsolute(realRel)) {
     throw new Error('Path traversal or escape not allowed');
   }
   return full;
@@ -52,6 +76,7 @@ export function resolveOutputPath(baseDir: string, userPath: string): string {
     return normalizePath(baseDir, userPath);
   }
   const target = path.resolve(userPath);
+  const targetReal = realpathWithExistingAncestor(target);
   const allowedBases = [path.resolve(baseDir), path.join(os.homedir(), '.sinter')];
   for (const base of allowedBases) {
     // Compare against both spellings of the base: as given and realpathed
@@ -64,7 +89,11 @@ export function resolveOutputPath(baseDir: string, userPath: string): string {
     }
     for (const candidate of candidates) {
       const rel = path.relative(candidate, target);
-      if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) {
+      const realRel = path.relative(candidate, targetReal);
+      if (
+        (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel)))
+        && (realRel === '' || (!realRel.startsWith('..') && !path.isAbsolute(realRel)))
+      ) {
         return target;
       }
     }

@@ -267,7 +267,13 @@ export class TuiBridgeServer {
       return;
     }
 
-    const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+    let url: URL;
+    try {
+      url = new URL(req.url ?? '/', `http://${req.headers.host || 'localhost'}`);
+    } catch {
+      this.json(res, 400, { error: 'Invalid request URL' });
+      return;
+    }
     const path = url.pathname;
 
     try {
@@ -1611,8 +1617,8 @@ export class PreviewEndpoints {
     const baseDir = path.join(cwd, 'output');
     const defaultName = projectName || 'export';
     const requestedPath = reqPath || path.join(baseDir, `${defaultName}.${fmt === 'zip' ? 'zip' : fmt === 'html' ? 'html' : 'js'}`);
-    const resolvedPath = normalizePath(cwd, requestedPath);
     try {
+      const resolvedPath = normalizePath(cwd, requestedPath);
       if (fmt === 'zip') {
         const project = {
           name: projectName || 'project',

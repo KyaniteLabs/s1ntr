@@ -135,14 +135,15 @@ export class Exporter {
     // Write JavaScript file
     // If code is HTML-wrapped (e.g., Three.js), extract script content for .js file
     let jsContent = code;
-    if (code.trim().startsWith('<!DOCTYPE') || code.trim().startsWith('<html')) {
+    const trimmedLower = code.trim().toLowerCase();
+    if (trimmedLower.startsWith('<!doctype') || trimmedLower.startsWith('<html')) {
       // Extract content between <script> tags, excluding importmap and application/json
-      const scriptMatch = code.match(/<script[^>]*>([\s\S]*?)<\/script>/g);
+      const scriptMatch = code.match(/<script[^>]*>([\s\S]*?)<\/script>/gi);
       if (scriptMatch) {
         const scripts = scriptMatch
-          .filter(s => !/<script[^>]*type\s*=\s*["']importmap["']/.test(s.split('>')[0]))
-          .filter(s => !/<script[^>]*type\s*=\s*["']application\/json["']/.test(s.split('>')[0]))
-          .map(s => s.replace(/<script[^>]*>/, '').replace(/<\/script>/, ''))
+          .filter(s => !/<script[^>]*type\s*=\s*["']importmap["']/i.test(s.split('>')[0]))
+          .filter(s => !/<script[^>]*type\s*=\s*["']application\/json["']/i.test(s.split('>')[0]))
+          .map(s => s.replace(/<script[^>]*>/i, '').replace(/<\/script>/i, ''))
           .filter(s => s.trim().length > 0);
         if (scripts.length > 0) {
           jsContent = scripts.join('\n\n');
@@ -176,6 +177,14 @@ export class Exporter {
     validateProjectName(project.name);
     validateOutputPath(outputPath);
 
+    if (project.iterations && Array.isArray(project.iterations)) {
+      for (const iteration of project.iterations) {
+        if (typeof iteration.version !== 'number' || !Number.isInteger(iteration.version) || iteration.version <= 0) {
+          throw new ValidationError(`Invalid iteration version for ZIP export: ${String(iteration.version)}`);
+        }
+      }
+    }
+
     // Create directory if it doesn't exist
     const dir = path.dirname(outputPath);
     try {
@@ -193,19 +202,36 @@ export class Exporter {
       const archive = archiver('zip', {
         zlib: { level: 9 } // Maximum compression
       });
+      let settled = false;
+      const fail = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        try { archive.abort(); } catch { /* ignore */ }
+        output.destroy();
+        void fs.unlink(outputPath).catch(() => undefined);
+        reject(err);
+      };
 
-      // Handle archive errors
+      // Handle archive warnings and errors
+      archive.on('warning', (err) => {
+        if (err.code !== 'ENOENT') {
+          fail(new ExportError(`ZIP warning: ${err.message}`, { cause: err, path: outputPath, format: 'zip' }));
+        }
+      });
+
       archive.on('error', (err) => {
-        reject(new ExportError(`Failed to create ZIP: ${err.message}`, { cause: err, path: outputPath, format: 'zip' }));
+        fail(new ExportError(`Failed to create ZIP: ${err.message}`, { cause: err, path: outputPath, format: 'zip' }));
       });
 
       // Handle output stream errors
       output.on('error', (err) => {
-        reject(new ExportError(`Failed to write ZIP: ${err.message}`, { cause: err, path: outputPath, format: 'zip' }));
+        fail(new ExportError(`Failed to write ZIP: ${err.message}`, { cause: err, path: outputPath, format: 'zip' }));
       });
 
       // Finalize the archive when done
       output.on('close', () => {
+        if (settled) return;
+        settled = true;
         resolve();
       });
 
@@ -241,7 +267,9 @@ export class Exporter {
       }
 
       // Finalize the archive
-      archive.finalize().catch(reject);
+      archive.finalize().catch((err: unknown) => {
+        fail(err instanceof Error ? err : new ExportError(String(err), { path: outputPath, format: 'zip' }));
+      });
     });
   }
 

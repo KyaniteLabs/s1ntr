@@ -76,7 +76,7 @@ const DANGEROUS_MARKUP_PATTERNS: ReadonlyArray<{ pattern: RegExp; msg: string }>
 // code. A generated sketch that imports these is either malicious or broken.
 const FORBIDDEN_IMPORT_SPECIFIERS: ReadonlyArray<RegExp> = [
   /^node:/i,
-  /^(?:fs|path|child_process|os|net|http|https|crypto|process|vm|module|worker_threads|cluster|dgram|tls|repl)$/i,
+  /^(?:fs|path|child_process|os|net|http|https|crypto|process|vm|module|worker_threads|cluster|dgram|tls|repl|dns|stream|inspector|v8)(?:\/|$)/i,
 ];
 
 function validateJSSecurity(code: string, domain: Domain): string[] {
@@ -126,8 +126,13 @@ function validateImportSources(code: string): string[] {
     const isLocal = spec.startsWith('./') || spec.startsWith('../') || spec.startsWith('/');
     if (!isLocal || /^\/\//.test(spec) || /^[a-z]+:\/\//i.test(spec)) continue;
 
+    if (spec.startsWith('/')) {
+      errors.push(`Import Security: import path "${spec}" escapes the artifact root`);
+      continue;
+    }
+
     try {
-      validateImportPath(path.join(ARTIFACT_ROOT, spec), ARTIFACT_ROOT);
+      validateImportPath(path.resolve(ARTIFACT_ROOT, spec), ARTIFACT_ROOT);
     } catch (error) {
       if (error instanceof ImportValidationError) {
         errors.push(`Import Security: import path "${spec}" escapes the artifact root`);
@@ -213,7 +218,7 @@ function detectDomain(code: string): Domain {
   // Check for GLSL
   const hasVoidMain = /void\s+main\s*\(/.test(code);
   const hasMainImage = /void\s+mainImage\s*\(/.test(code);
-  const hasFragColor = /gl_FragColor|out\s+vec4\s+fragColor/.test(code);
+  const hasFragColor = /gl_FragColor|\bout\s+(?:(?:lowp|mediump|highp)\s+)?vec4\s+\w+\s*;/.test(code);
   const hasUniforms = /uniform\s+(vec2|vec3|vec4|float|int|mat)/.test(code);
   const hasPrecision = /\bprecision\s+(?:lowp|mediump|highp)\s+float\s*;/.test(code);
   const hasShaderBuiltins = /\b(?:gl_FragCoord|iResolution|iTime|fragCoord|fragColor)\b/.test(code);
@@ -257,14 +262,16 @@ function detectDomain(code: string): Domain {
 }
 
 function stripCommentsAndStringLiterals(code: string): string {
-  return code
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/\/\/.*$/gm, ' ')
-    .replace(/(["'`])(?:\\[\s\S]|(?!\1)[\s\S])*\1/g, ' ');
+  // Single-pass tokenization so `//` or `/*` inside string literals (e.g. https:// URLs)
+  // are consumed as part of the string rather than misread as comments.
+  return code.replace(
+    /(["'`])(?:\\[\s\S]|(?!\1)[\s\S])*\1|\/\*[\s\S]*?\*\/|\/\/[^\n]*/g,
+    ' ',
+  );
 }
 
 function validateNoGuaranteedRuntimeThrow(code: string, domain: Domain): string[] {
-  if (domain === 'shader' || domain === 'glsl' || domain === 'svg' || domain === 'ascii') {
+  if (domain === 'shader' || domain === 'glsl' || domain === 'svg' || domain === 'ascii' || domain === 'textgen' || domain === 'blender') {
     return [];
   }
 
