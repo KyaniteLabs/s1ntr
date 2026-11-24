@@ -852,6 +852,7 @@ export class HeadlessRenderer {
     };
     let page: Page | undefined;
     let ownedContext: BrowserContext | undefined;
+    let busyMeter: { read: () => Promise<number | null>; detach: () => Promise<void> } | undefined;
     let keepPage = false;
     let playback: RenderResult['playback'];
     let interaction: RenderResult['interaction'];
@@ -890,7 +891,8 @@ export class HeadlessRenderer {
       page = await renderContext.newPage();
       hold.page = page;
       signal.throwIfAborted();
-      const readBusyMs = await HeadlessRenderer.startBusyMeter(page);
+      busyMeter = await HeadlessRenderer.startBusyMeter(page);
+      const readBusyMs = busyMeter.read;
       // The clock goes in before the guards so the timer census wraps the fake
       // timers; the guards seal setTimeout, which would block a later install.
       const arcClock = await this.installArcClock(page, opts);
@@ -1254,6 +1256,9 @@ export class HeadlessRenderer {
         rendererEnvironmentDigest: this.rendererEnvironmentDigest,
       };
     } finally {
+      if (busyMeter) {
+        await busyMeter.detach();
+      }
       if ((ownedContext || page) && (!keepPage || signal.aborted)) {
         try {
           if (ownedContext) await ownedContext.close();
@@ -1271,6 +1276,7 @@ export class HeadlessRenderer {
           Logger.debug('HeadlessRenderer', 'Failed to close render page:', closeError);
         }
       } else if (!page) {
+        // eslint-disable-next-line require-atomic-updates -- containment is a per-render local; no other task can observe or mutate it
         containment.cleanupSucceeded = true;
       }
     }
@@ -1482,23 +1488,39 @@ export class HeadlessRenderer {
 
   /**
    * Starts Chromium's per-page performance counters and returns a reader for
-   * the page's main-thread busy time in ms, or null when CDP is unavailable.
+   * the page's main-thread busy time in ms plus an idempotent CDP session
+   * detacher so render runs never leak CDP sessions.
    */
-  private static async startBusyMeter(page: Page): Promise<() => Promise<number | null>> {
+  private static async startBusyMeter(
+    page: Page,
+  ): Promise<{ read: () => Promise<number | null>; detach: () => Promise<void> }> {
     try {
       const session = await page.context().newCDPSession(page);
       await session.send('Performance.enable');
-      return async () => {
-        try {
-          const { metrics } = await session.send('Performance.getMetrics');
-          const task = metrics.find((metric) => metric.name === 'TaskDuration');
-          return typeof task?.value === 'number' ? Math.round(task.value * 1000) : null;
-        } catch {
-          return null;
-        }
+      let detached = false;
+      return {
+        read: async () => {
+          if (detached) return null;
+          try {
+            const { metrics } = await session.send('Performance.getMetrics');
+            const task = metrics.find((metric) => metric.name === 'TaskDuration');
+            return typeof task?.value === 'number' ? Math.round(task.value * 1000) : null;
+          } catch {
+            return null;
+          }
+        },
+        detach: async () => {
+          if (detached) return;
+          detached = true;
+          try {
+            await session.detach();
+          } catch {
+            // Page/context may already be closed.
+          }
+        },
       };
     } catch {
-      return () => Promise.resolve(null);
+      return { read: () => Promise.resolve(null), detach: () => Promise.resolve() };
     }
   }
 

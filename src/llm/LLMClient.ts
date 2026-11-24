@@ -1452,34 +1452,74 @@ export class LLMClient {
       yield* provider.stream(req);
       return;
     }
-    const buffered: StreamEvent[] = [];
+    const contentParts: string[] = [];
+    let doneUsage: TokenUsage | undefined;
+    let failedError: string | undefined;
+    let streamError: unknown;
+    let streamDone = false;
+    let settled = false;
     const startedAt = Date.now();
-    try {
-      for await (const event of provider.stream(req, transport)) buffered.push(event);
-    } catch (error) {
+    const providerStream = provider.stream(req, transport);
+
+    const settleAttempt = async (success: boolean, terminalReason?: string): Promise<void> => {
+      if (settled) return;
+      settled = true;
       const completion = await this.finishHarnessAttempt(attempt, {
-        model: provider.getModel(), success: false,
+        model: provider.getModel(),
+        content: contentParts.join(''),
+        success,
+        usage: doneUsage,
         durationMs: Date.now() - startedAt,
-        terminalReason: error instanceof Error ? error.message : String(error),
+        terminalReason,
       });
       if (completion && collector) collector.push(completion.ref);
       if (completion && campaignDebit) await settleCurrentCampaignFunding(campaignDebit, completion.attestation);
+    };
+
+    try {
+      for (let next = await providerStream.next(); !next.done; next = await providerStream.next()) {
+        const event = next.value;
+        if (event.type === 'content') contentParts.push(event.content);
+        else if (event.type === 'done' && event.usage) doneUsage = event.usage;
+        else if (event.type === 'error' && failedError === undefined) failedError = event.error;
+
+        if (event.type === 'error') {
+          // Settle before yielding terminal error so callers that throw immediately
+          // observe the finalized attestation ref on activeRefs.
+          await settleAttempt(false, failedError);
+          yield event;
+          streamDone = true;
+          return;
+        }
+        yield event;
+      }
+      streamDone = true;
+      await settleAttempt(failedError === undefined, failedError);
+    } catch (error) {
+      streamError = error;
+      await settleAttempt(false, error instanceof Error ? error.message : String(error));
       throw error;
+    } finally {
+      if (!settled && streamError === undefined) {
+        // Consumer broke out early: drain any remaining events so signed usage
+        // and consumer-abort attestation bind to the completed provider call.
+        if (!streamDone) {
+          try {
+            for (let next = await providerStream.next(); !next.done; next = await providerStream.next()) {
+              const event = next.value;
+              if (event.type === 'content') contentParts.push(event.content);
+              else if (event.type === 'done' && event.usage) doneUsage = event.usage;
+              else if (event.type === 'error' && failedError === undefined) failedError = event.error;
+            }
+          } catch (drainError) {
+            if (failedError === undefined) {
+              failedError = drainError instanceof Error ? drainError.message : String(drainError);
+            }
+          }
+        }
+        await settleAttempt(failedError === undefined, failedError);
+      }
     }
-    const done = [...buffered].reverse().find(event => event.type === 'done');
-    const failed = buffered.find(event => event.type === 'error');
-    const completion = await this.finishHarnessAttempt(attempt, {
-      model: provider.getModel(),
-      content: buffered.filter(event => event.type === 'content')
-        .map(event => event.content).join(''),
-      success: failed === undefined,
-      usage: done?.type === 'done' ? done.usage : undefined,
-      durationMs: Date.now() - startedAt,
-      terminalReason: failed?.type === 'error' ? failed.error : undefined,
-    });
-    if (completion && collector) collector.push(completion.ref);
-    if (completion && campaignDebit) await settleCurrentCampaignFunding(campaignDebit, completion.attestation);
-    for (const event of buffered) yield event;
   }
 
   /**

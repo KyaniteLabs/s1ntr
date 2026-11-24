@@ -808,6 +808,45 @@ describe('W8C-04 attestation binding (#717) — public LLMClient + ledger seam',
     }
   });
 
+  it('streamWithThinking() yields live chunks before the provider stream finishes (real TTFT)', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'w8c04-stream-ttft-'));
+    try {
+      const ledgerRoot = join(root, 'ledger');
+      const ledger = new GenerationAttemptLedger(new FileGenerationAttemptPersistence(ledgerRoot));
+      const attempt = await ledger.beginPrimary({ runId: 'run', candidateId: 'stream-ttft' });
+      let releaseSecondChunk!: () => void;
+      const gate = new Promise<void>((resolve) => { releaseSecondChunk = resolve; });
+      const { client } = buildAttestingClient({
+        reservationsRoot: join(root, 'authority'),
+        generate: async () => ok({ content: '', model: SOL_IDENTITY.model, success: true }),
+        stream: async function* () {
+          yield { type: 'content', content: 'early-token' };
+          await gate;
+          yield { type: 'content', content: '-late-token' };
+          yield { type: 'done', usage: { inputTokens: 5, outputTokens: 4 } };
+        },
+      });
+      const received: string[] = [];
+      for await (const event of client.streamWithThinking('system', 'user', undefined, undefined, attempt)) {
+        if (event.type === 'content') {
+          received.push(event.content);
+          if (received.length === 1) {
+            // Proves chunk 1 arrived BEFORE chunk 2 was even released by the provider.
+            expect(event.content).toBe('early-token');
+            releaseSecondChunk();
+          }
+        }
+      }
+      expect(received).toEqual(['early-token', '-late-token']);
+      const snapshot = await new GenerationAttemptLedger(
+        new FileGenerationAttemptPersistence(ledgerRoot),
+      ).snapshot('run', 'stream-ttft');
+      expect(snapshot?.counters).toMatchObject({ providerCalls: 1, inputTokens: 5, outputTokens: 4 });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('overlapping primary and fallback transports charge exact signed per-call totals', async () => {
     const root = mkdtempSync(join(tmpdir(), 'w8c04-overlap-'));
     const oldRetries = process.env.SINTER_LLM_MAX_RETRIES;

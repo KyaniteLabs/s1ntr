@@ -310,17 +310,18 @@ export class QualityArchive {
    * @returns Filtered and sorted entries
    */
   query(domain: string, options: ArchiveQueryOptions = {}): ArchiveEntry[] {
-    let entries = (this.cache.get(domain) ?? []).map(entry => structuredClone(entry));
+    let entries = [...(this.cache.get(domain) ?? [])];
 
     // Filter by minimum quality
     if (options.minQuality !== undefined) {
-      entries = entries.filter(e => e.qualityScore >= options.minQuality!);
+      const floor = options.minQuality;
+      entries = entries.filter(e => e.qualityScore >= floor);
     }
 
     // Filter by recency
     if (options.since !== undefined) {
-      const sinceDate = new Date(options.since);
-      entries = entries.filter(e => new Date(e.createdAt) >= sinceDate);
+      const sinceMs = new Date(options.since).getTime();
+      entries = entries.filter(e => new Date(e.createdAt).getTime() >= sinceMs);
     }
 
     // Sort
@@ -331,12 +332,12 @@ export class QualityArchive {
       entries.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     }
 
-    // Apply limit
+    // Apply limit before cloning so only the returned slice is copied.
     if (options.limit !== undefined) {
       entries = entries.slice(0, options.limit);
     }
 
-    return entries;
+    return entries.map(entry => structuredClone(entry));
   }
 
   /** Governed reader; ordinary query remains an exploration/history projection. */

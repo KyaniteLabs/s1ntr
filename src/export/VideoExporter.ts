@@ -175,7 +175,11 @@ export class VideoExporter {
     const timeout = Math.min(300000, left);
     try {
       // SIGKILL: ffmpeg may ignore the default SIGTERM mid-encode, and a hung encoder must not outlive the budget.
-      return await execFileAsync(this.ffmpegPath, ['-nostdin', ...args], { timeout, killSignal: 'SIGKILL' });
+      return await execFileAsync(this.ffmpegPath, ['-nostdin', ...args], {
+        timeout,
+        killSignal: 'SIGKILL',
+        maxBuffer: 16 * 1024 * 1024,
+      });
     } catch (error: unknown) {
       const err = error as { code?: string; message?: string; killed?: boolean };
       if (err.killed) {
