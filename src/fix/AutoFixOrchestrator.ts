@@ -15,7 +15,7 @@ import { Logger } from '../utils/Logger.js';
 import { FixRequest, FixResult, FileChange } from './types.js';
 import { createLLMModeAgent, LLMTask } from '../harness/agent/index.js';
 import { Status } from '../types/status.js';
-import { readFileTool } from '../harness/tools/index.js';
+import { readFileTool, restoreBackupTool } from '../harness/tools/index.js';
 import { TestFailureDetector } from './TestFailureDetector.js';
 import { execSync } from 'child_process';
 
@@ -200,16 +200,19 @@ export class AutoFixOrchestrator {
     // Verify the fix if it succeeded
     let buildPassed = false;
     let testsPassed = false;
-    const rolledBack = session.status === Status.ROLLED_BACK;
+    let rolledBack = session.status === Status.ROLLED_BACK;
 
     if (session.status === Status.SUCCESS) {
       buildPassed = this.verifyBuild();
       testsPassed = buildPassed ? this.verifyTests() : false;
 
       if (!buildPassed) {
-        Logger.warn('AutoFixOrchestrator', `Build failed after fix — reporting failure`);
+        Logger.warn('AutoFixOrchestrator', `Build failed after fix — rolling back backups and reporting failure`);
       } else if (!testsPassed) {
-        Logger.warn('AutoFixOrchestrator', `Tests failed after fix — reporting failure`);
+        Logger.warn('AutoFixOrchestrator', `Tests failed after fix — rolling back backups and reporting failure`);
+      }
+      if ((!buildPassed || !testsPassed) && session.backups.length > 0) {
+        rolledBack = await this.rollbackBackups(session.backups);
       }
     }
 
@@ -359,11 +362,14 @@ export class AutoFixOrchestrator {
 
     let buildPassed = false;
     let testsPassed = false;
-    const rolledBack = session.status === Status.ROLLED_BACK;
+    let rolledBack = session.status === Status.ROLLED_BACK;
 
     if (session.status === Status.SUCCESS) {
       buildPassed = this.verifyBuild();
       testsPassed = buildPassed ? this.verifyTests() : false;
+      if ((!buildPassed || !testsPassed) && session.backups.length > 0) {
+        rolledBack = await this.rollbackBackups(session.backups);
+      }
     }
 
     const verified = session.status === Status.SUCCESS && buildPassed && testsPassed;
@@ -389,6 +395,33 @@ export class AutoFixOrchestrator {
     });
 
     return result;
+  }
+
+  /**
+   * Restore every backup recorded by the agent session in reverse order.
+   * Returns true only when at least one backup was restored and none failed.
+   */
+  private async rollbackBackups(backups: readonly string[]): Promise<boolean> {
+    if (backups.length === 0 || typeof restoreBackupTool?.execute !== 'function') {
+      return false;
+    }
+    let allRestored = true;
+    for (const backupPath of [...backups].reverse()) {
+      try {
+        const res = await restoreBackupTool.execute({ backupPath });
+        if (!res?.success) {
+          allRestored = false;
+          Logger.warn('AutoFixOrchestrator', `Failed to restore backup ${backupPath}: ${res?.error ?? 'unknown error'}`);
+        }
+      } catch (error) {
+        allRestored = false;
+        Logger.warn(
+          'AutoFixOrchestrator',
+          `Error restoring backup ${backupPath}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    return allRestored;
   }
 
   /**

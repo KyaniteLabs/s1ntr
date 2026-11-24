@@ -97,6 +97,11 @@ export class ArchiveLearning {
     });
   }
 
+  /** Load persisted archive entries from disk into memory. */
+  async load(): Promise<void> {
+    await this.archive.load();
+  }
+
   /**
    * Add an output to the archive if quality meets threshold.
    * @param prompt - The original prompt
@@ -370,8 +375,10 @@ export class ArchiveLearning {
         fragmentId: fragment.id,
         source: fragment.source,
         persona: fragment.persona,
+        mode: fragment.mode,
         round: fragment.round,
         tags: fragment.tags,
+        fragment,
       }
     );
   }
@@ -405,21 +412,40 @@ export class ArchiveLearning {
    * @returns Matching archived items that have fragment metadata
    */
   queryFragments(options?: { persona?: string; mode?: string; minScore?: number; domain?: string }): ArchivedItem[] {
-    // Search across all domains by using the search method with broad terms
-    const domains = ['p5', 'glsl', 'three', 'music', 'swarm', 'generative-art'];
+    const knownDomains = new Set([
+      'p5', 'glsl', 'three', 'music', 'swarm', 'generative-art',
+      ...Object.keys(this.archive.getStats().byDomain),
+    ]);
+    const domains = options?.domain ? [options.domain] : [...knownDomains];
     const results: ArchivedItem[] = [];
 
-    for (const domain of options?.domain ? [options.domain] : domains) {
-      const entries = this.archive.queryTeaching(domain, 'few-shot', {
+    for (const domain of domains) {
+      const entries = this.archive.query(domain, {
         limit: 100,
         minQuality: options?.minScore ?? 0,
       });
       for (const entry of entries) {
-        const item = entry as unknown as ArchivedItem;
-        if (!item.fragment) continue;
-        if (options?.persona && item.fragment.persona !== options.persona) continue;
-        if (options?.mode && item.fragment.mode !== options.mode) continue;
-        results.push(item);
+        const meta = entry.metadata ?? {};
+        const storedFragment = meta.fragment as MinedFragment | undefined;
+        const fragment: MinedFragment | undefined = storedFragment ?? (
+          typeof meta.fragmentId === 'string'
+            ? {
+                id: meta.fragmentId,
+                text: entry.output,
+                score: entry.qualityScore * 15,
+                source: (meta.source as MinedFragment['source']) ?? 'proposal',
+                persona: typeof meta.persona === 'string' ? meta.persona : undefined,
+                mode: typeof meta.mode === 'string' ? meta.mode : undefined,
+                round: typeof meta.round === 'number' ? meta.round : 0,
+                tags: Array.isArray(meta.tags) ? (meta.tags as string[]) : [],
+                sessionPrompt: entry.prompt,
+              } as MinedFragment
+            : undefined
+        );
+        if (!fragment) continue;
+        if (options?.persona && fragment.persona !== options.persona) continue;
+        if (options?.mode && fragment.mode !== options.mode) continue;
+        results.push({ ...(entry as unknown as ArchivedItem), fragment });
       }
     }
 

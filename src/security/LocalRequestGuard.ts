@@ -43,7 +43,22 @@ export function hostnameOf(hostHeader: string | undefined): string | null {
   }
 }
 
-/** True when a browser sent this write from another site. */
+/** Explicit port from a Host header ('' if omitted); null when absent or malformed. */
+export function portOf(hostHeader: string | undefined): string | null {
+  if (hostHeader === undefined) return null;
+  if (typeof hostHeader !== 'string' || hostHeader === '' || /\s/.test(hostHeader)) return null;
+  try {
+    const parsed = new URL(`http://${hostHeader}`);
+    if (parsed.username !== '' || parsed.password !== '' || parsed.pathname !== '/' || parsed.search !== '' || parsed.hash !== '') {
+      return null;
+    }
+    return parsed.port;
+  } catch {
+    return null;
+  }
+}
+
+/** True when a browser sent this write from another site (or another port on localhost). */
 export function isCrossSiteWrite(headers: IncomingHttpHeaders, allowedHosts: ReadonlySet<string> | null): boolean {
   const sfs = headers['sec-fetch-site'];
   const sfsValues = Array.isArray(sfs) ? sfs : sfs !== undefined ? [sfs] : [];
@@ -51,13 +66,32 @@ export function isCrossSiteWrite(headers: IncomingHttpHeaders, allowedHosts: Rea
   const origin = headers.origin;
   if (origin === undefined) return false;
   if (origin === 'null') return true;
-  let hostname: string;
+  let originUrl: URL;
   try {
-    hostname = normalize(new URL(origin).hostname);
+    originUrl = new URL(origin);
   } catch {
     return true;
   }
-  return allowedHosts !== null && !allowedHosts.has(hostname);
+  const originHost = normalize(originUrl.hostname);
+  if (allowedHosts !== null && !allowedHosts.has(originHost)) return true;
+
+  // Enforce Host match on wildcard binds (0.0.0.0 / ::) and port match on every
+  // request carrying a Host header (blocks cross-port localhost CSRF).
+  const hostHeader = headers.host;
+  if (hostHeader !== undefined) {
+    const targetHost = hostnameOf(hostHeader);
+    if (!targetHost) return true;
+    if (allowedHosts === null && originHost !== targetHost) return true;
+    const targetPort = portOf(hostHeader);
+    if (targetPort === null) return true;
+    const effectiveOriginPort = originUrl.port || (originUrl.protocol === 'https:' ? '443' : '80');
+    const effectiveTargetPort = targetPort || '80';
+    if (effectiveOriginPort !== effectiveTargetPort) return true;
+  } else if (allowedHosts === null) {
+    return true;
+  }
+
+  return false;
 }
 
 /**

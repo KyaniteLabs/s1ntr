@@ -13,6 +13,7 @@
  * - ASCIIValidator: src/core/validators/ASCIIValidator.ts
  */
 
+import { parse as parseBabel } from '@babel/parser';
 import { parseMoshPlan } from '../render/DatamoshPlan.js';
 import { FootageLibrary } from '../footage/FootageLibrary.js';
 import { EngineSettingsError, parseEngineReply } from '../generators/engine/EngineSettings.js';
@@ -273,14 +274,139 @@ function stripCommentsAndStringLiterals(code: string): string {
   );
 }
 
+const ENTRYPOINT_FUNCTION_NAMES = new Set([
+  'setup',
+  'draw',
+  'preload',
+  'init',
+  'main',
+  'render',
+  'animate',
+  'start',
+]);
+
+interface AstNodeLike {
+  type?: string;
+  body?: AstNodeLike | AstNodeLike[] | null;
+  declarations?: AstNodeLike[];
+  init?: AstNodeLike | null;
+  expression?: AstNodeLike | null;
+  callee?: AstNodeLike | null;
+  id?: { name?: string } | null;
+  block?: AstNodeLike | null;
+  handler?: AstNodeLike | null;
+  finalizer?: AstNodeLike | null;
+  test?: AstNodeLike | null;
+  consequent?: AstNodeLike | null;
+  alternate?: AstNodeLike | null;
+  value?: unknown;
+}
+
+function statementListHasUnconditionalThrow(statements: readonly AstNodeLike[] | undefined): boolean {
+  if (!Array.isArray(statements)) return false;
+  for (const stmt of statements) {
+    if (!stmt || typeof stmt !== 'object') continue;
+    if (stmt.type === 'ThrowStatement') return true;
+    if (stmt.type === 'ReturnStatement') return false;
+    if (stmt.type === 'BlockStatement' && Array.isArray(stmt.body)) {
+      if (statementListHasUnconditionalThrow(stmt.body)) return true;
+    }
+    if (stmt.type === 'TryStatement') {
+      // A try block with no catch handler does not catch throws; finalizer always runs.
+      if (!stmt.handler && stmt.block && Array.isArray(stmt.block.body) && statementListHasUnconditionalThrow(stmt.block.body)) {
+        return true;
+      }
+      if (stmt.finalizer && Array.isArray(stmt.finalizer.body) && statementListHasUnconditionalThrow(stmt.finalizer.body)) {
+        return true;
+      }
+    }
+    if (stmt.type === 'IfStatement' && stmt.test?.type === 'BooleanLiteral' && stmt.test.value === true) {
+      const cons = stmt.consequent;
+      if (cons?.type === 'ThrowStatement') return true;
+      if (cons?.type === 'BlockStatement' && Array.isArray(cons.body) && statementListHasUnconditionalThrow(cons.body)) {
+        return true;
+      }
+    }
+    if (stmt.type === 'FunctionDeclaration' && stmt.id?.name && ENTRYPOINT_FUNCTION_NAMES.has(stmt.id.name)) {
+      const fnBody = stmt.body as AstNodeLike | undefined;
+      if (fnBody && Array.isArray(fnBody.body) && statementListHasUnconditionalThrow(fnBody.body)) {
+        return true;
+      }
+    }
+    if (stmt.type === 'VariableDeclaration' && Array.isArray(stmt.declarations)) {
+      for (const decl of stmt.declarations) {
+        const name = decl.id?.name;
+        const init = decl.init;
+        if (name && ENTRYPOINT_FUNCTION_NAMES.has(name) && init && (init.type === 'ArrowFunctionExpression' || init.type === 'FunctionExpression')) {
+          const fnBody = init.body as AstNodeLike | undefined;
+          if (fnBody && Array.isArray(fnBody.body) && statementListHasUnconditionalThrow(fnBody.body)) {
+            return true;
+          }
+        }
+      }
+    }
+    if (stmt.type === 'ExpressionStatement' && stmt.expression?.type === 'CallExpression') {
+      // Unwrapped IIFE: (() => { throw ... })() or (function() { throw ... })()
+      const callee = stmt.expression.callee;
+      if (callee && (callee.type === 'ArrowFunctionExpression' || callee.type === 'FunctionExpression')) {
+        const fnBody = callee.body as AstNodeLike | undefined;
+        if (fnBody && Array.isArray(fnBody.body) && statementListHasUnconditionalThrow(fnBody.body)) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+function extractExecutableScriptBlocks(code: string): string[] {
+  if (!/<script\b/i.test(code)) return [code];
+  const scripts: string[] = [];
+  const scriptRe = /<script\b([^>]*)>([\s\S]*?)<\/script>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = scriptRe.exec(code)) !== null) {
+    const attrs = match[1] ?? '';
+    const typeMatch = attrs.match(/\btype\s*=\s*["']([^"']+)["']/i);
+    const mime = typeMatch?.[1]?.trim().toLowerCase() ?? '';
+    if (mime && !mime.includes('javascript') && !mime.includes('ecmascript') && mime !== 'module') {
+      continue;
+    }
+    scripts.push(match[2] ?? '');
+  }
+  return scripts.length > 0 ? scripts : [code];
+}
+
 function validateNoGuaranteedRuntimeThrow(code: string, domain: Domain): string[] {
   if (domain === 'shader' || domain === 'glsl' || domain === 'svg' || domain === 'ascii' || domain === 'textgen' || domain === 'blender') {
     return [];
   }
 
   const executableSurface = stripCommentsAndStringLiterals(code);
-  if (/\bthrow\b/.test(executableSurface)) {
-    return ['Generated code contains an explicit throw statement that would fail at runtime'];
+  if (!/\bthrow\b/.test(executableSurface)) {
+    return [];
+  }
+
+  // Distinguish unconditional runtime throws (top-level, IIFE, or directly inside
+  // lifecycle entrypoints like setup/draw/init/animate) from guarded defensive
+  // throws (e.g. `if (!gl.getShaderParameter(...)) throw new Error(...)`).
+  for (const script of extractExecutableScriptBlocks(code)) {
+    if (!/\bthrow\b/.test(stripCommentsAndStringLiterals(script))) continue;
+    try {
+      const ast = parseBabel(script, {
+        sourceType: 'unambiguous',
+        allowReturnOutsideFunction: true,
+        errorRecovery: true,
+        plugins: ['jsx', 'typescript'],
+      });
+      const body = (ast.program as unknown as { body?: AstNodeLike[] }).body;
+      if (statementListHasUnconditionalThrow(body)) {
+        return ['Generated code contains an explicit throw statement that would fail at runtime'];
+      }
+    } catch {
+      // Unparseable script: syntax validators already catch broken JS; only
+      // reject here if a raw unguarded throw appears without any enclosing if().
+      return ['Generated code contains an explicit throw statement that would fail at runtime'];
+    }
   }
 
   return [];

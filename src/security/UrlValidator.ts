@@ -67,20 +67,82 @@ const PRIVATE_IP_PATTERNS = [
   /^::1?$/,                         // IPv6 loopback and unspecified
   /^f[cd][0-9a-f]{2}:/,             // fc00::/7 (IPv6 unique local)
   /^fe[89ab][0-9a-f]:/,             // fe80::/10 (IPv6 link-local)
+  /^ff[0-9a-f]{2}:/,                // ff00::/8 (IPv6 multicast)
+  /^64:ff9b:/,                      // 64:ff9b::/96 (NAT64 well-known prefix)
 ];
 
+/** Expand a valid IPv6 literal to 8 16-bit integer groups, or null if not IPv6. */
+function parseIPv6Groups(address: string): number[] | null {
+  if (!address.includes(':')) return null;
+  let work = address;
+  // Convert trailing dotted IPv4 (e.g. ::ffff:127.0.0.1 or 64:ff9b::169.254.169.254)
+  const ipv4Tail = /^(.*:)(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(work);
+  if (ipv4Tail) {
+    const octets = ipv4Tail.slice(2, 6).map(Number);
+    if (octets.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+    work = `${ipv4Tail[1]}${((octets[0] << 8) | octets[1]).toString(16)}:${((octets[2] << 8) | octets[3]).toString(16)}`;
+  }
+  const halves = work.split('::');
+  if (halves.length > 2) return null;
+  const left = halves[0] ? halves[0].split(':') : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const missing = 8 - (left.length + right.length);
+  if (halves.length === 1 ? missing !== 0 : missing < 1) return null;
+  const parts = halves.length === 2 ? [...left, ...Array<string>(missing).fill('0'), ...right] : left;
+  if (parts.length !== 8) return null;
+  const groups: number[] = [];
+  for (const part of parts) {
+    if (!/^[0-9a-f]{1,4}$/i.test(part)) return null;
+    groups.push(parseInt(part, 16));
+  }
+  return groups;
+}
+
 /**
- * Lower-case an address, drop URL brackets and a zone id, and unwrap an
- * IPv4-mapped IPv6 address (::ffff:a.b.c.d or ::ffff:hhhh:hhhh) to its IPv4 form.
+ * Lower-case an address, drop URL brackets and a zone id, canonicalize
+ * expanded IPv6 loopback/unspecified, and unwrap IPv4-mapped (::ffff:0:0/96)
+ * and NAT64 (64:ff9b::/96) IPv6 addresses to their embedded IPv4 form.
  */
 function normalizeIP(ip: string): string {
   const bare = ip.toLowerCase().replace(/^\[|\]$/g, '').replace(/%.*$/, '').replace(/\.+$/, '');
-  const mapped = /^::ffff:(?:(\d+\.\d+\.\d+\.\d+)|([0-9a-f]{1,4}):([0-9a-f]{1,4}))$/.exec(bare);
-  if (!mapped) return bare;
-  if (mapped[1]) return mapped[1];
-  const high = parseInt(mapped[2], 16);
-  const low = parseInt(mapped[3], 16);
-  return `${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`;
+  const groups = parseIPv6Groups(bare);
+  if (groups) {
+    const allZeroPrefix6 = groups.slice(0, 6).every((g) => g === 0);
+    if (allZeroPrefix6 && groups[6] === 0 && groups[7] === 0) return '::';
+    if (allZeroPrefix6 && groups[6] === 0 && groups[7] === 1) return '::1';
+    const isMappedIPv4 = groups.slice(0, 5).every((g) => g === 0) && groups[5] === 0xffff;
+    const isNat64 = groups[0] === 0x0064 && groups[1] === 0xff9b && groups.slice(2, 6).every((g) => g === 0);
+    if (isMappedIPv4 || isNat64) {
+      const high = groups[6];
+      const low = groups[7];
+      return `${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`;
+    }
+    return groups.map((g) => g.toString(16)).join(':');
+  }
+  return bare;
+}
+
+/** Subdomain suffix matching is only valid for multi-label DNS names, never IP literals or localhost. */
+function isSubdomainWildcardEligible(host: string): boolean {
+  if (!host.includes('.') || host.includes(':')) return false;
+  if (host === 'localhost' || /^\d+\.\d+\.\d+\.\d+$/.test(host)) return false;
+  return true;
+}
+
+function assertAllowedHost(urlString: string, hostname: string, allowedHosts: readonly string[] | undefined): void {
+  if (!allowedHosts || allowedHosts.length === 0) return;
+  const allAllowedHosts = [...DEFAULT_ALLOWED_HOSTS, ...allowedHosts].map(normalizeIP);
+  const isAllowed = allAllowedHosts.some((allowed) => {
+    if (allowed === hostname) return true;
+    if (isSubdomainWildcardEligible(allowed) && hostname.endsWith(`.${allowed}`)) return true;
+    return false;
+  });
+  if (!isAllowed) {
+    logSSRFAttempt(urlString, {
+      details: { blockedHost: hostname, reason: 'not_in_allowlist' },
+    });
+    throw new SSRFError(`Host ${hostname} is not in the allowed list`);
+  }
 }
 
 /**
@@ -91,8 +153,10 @@ function isPrivateIP(ip: string): boolean {
   return PRIVATE_IP_PATTERNS.some(pattern => pattern.test(address));
 }
 
+const NORMALIZED_BLOCKED_HOSTS = new Set(BLOCKED_HOSTS.map(normalizeIP));
+
 function isBlockedHost(host: string): boolean {
-  return BLOCKED_HOSTS.includes(normalizeIP(host));
+  return NORMALIZED_BLOCKED_HOSTS.has(normalizeIP(host));
 }
 
 function isLocalhostName(hostname: string): boolean {
@@ -204,22 +268,7 @@ export async function validateUrl(
   }
 
   // Check whitelist (if any custom allowed hosts are specified)
-  if (allowedHosts.length > 0) {
-    const allAllowedHosts = [...DEFAULT_ALLOWED_HOSTS, ...allowedHosts].map(normalizeIP);
-    const isAllowed = allAllowedHosts.some(allowed => {
-      if (allowed === hostname) return true;
-      if (hostname.endsWith(`.${allowed}`)) return true;
-      return false;
-    });
-
-    // If we have a whitelist and this host isn't on it, block it
-    if (!isAllowed) {
-      logSSRFAttempt(urlString, {
-        details: { blockedHost: hostname, reason: 'not_in_allowlist' }
-      });
-      throw new SSRFError(`Host ${hostname} is not in the allowed list`);
-    }
-  }
+  assertAllowedHost(urlString, hostname, allowedHosts);
 }
 
 const MAX_REDIRECTS = 5;
@@ -272,9 +321,28 @@ export function pinnedFetch(
   options: UrlValidationOptions = {},
   lookupImpl: CallbackLookup = callbackDnsLookup,
 ): Promise<Response> {
-  const url = new URL(urlString);
+  let url: URL;
+  try {
+    url = new URL(urlString);
+  } catch {
+    return Promise.reject(new SSRFError(`Invalid URL: ${urlString}`));
+  }
   const client = url.protocol === 'https:' ? https : url.protocol === 'http:' ? http : null;
   if (!client) return Promise.reject(new SSRFError(`Unsupported protocol ${url.protocol}`));
+  const hostname = normalizeIP(url.hostname);
+  if (isBlockedHost(hostname)) {
+    logSSRFAttempt(urlString, { details: { blockedHost: hostname, reason: 'cloud_metadata' } });
+    return Promise.reject(new SSRFError(`Access to ${hostname} is blocked (cloud metadata endpoint)`));
+  }
+  if (isLocalhostName(hostname) && options.allowLocalhost === false) {
+    logSSRFAttempt(urlString, { details: { blockedHost: hostname, reason: 'localhost_blocked' } });
+    return Promise.reject(new SSRFError(`Access to localhost ${hostname} is blocked`));
+  }
+  try {
+    assertAllowedHost(urlString, hostname, options.allowedHosts);
+  } catch (error) {
+    return Promise.reject(error);
+  }
   return new Promise((resolve, reject) => {
     const req = client.get(url, { lookup: createPinnedLookup(options, lookupImpl) as never, timeout: 30_000 }, (res) => {
       const chunks: Buffer[] = [];
@@ -383,22 +451,7 @@ export function validateUrlSync(
   }
   
   // Check whitelist (if any custom allowed hosts are specified)
-  if (allowedHosts.length > 0) {
-    const allAllowedHosts = [...DEFAULT_ALLOWED_HOSTS, ...allowedHosts].map(normalizeIP);
-    const isAllowed = allAllowedHosts.some(allowed => {
-      if (allowed === hostname) return true;
-      if (hostname.endsWith(`.${allowed}`)) return true;
-      return false;
-    });
-    
-    // If we have a whitelist and this host isn't on it, block it
-    if (!isAllowed) {
-      logSSRFAttempt(urlString, { 
-        details: { blockedHost: hostname, reason: 'not_in_allowlist' } 
-      });
-      throw new SSRFError(`Host ${hostname} is not in the allowed list`);
-    }
-  }
+  assertAllowedHost(urlString, hostname, allowedHosts);
 }
 
 export function getAllowedHostsFromEnv(): string[] {

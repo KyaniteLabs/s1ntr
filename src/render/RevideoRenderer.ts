@@ -8,7 +8,7 @@ import fs from 'fs/promises';
 import { existsSync } from 'fs';
 import path from 'path';
 import os from 'os';
-import { execSync } from 'child_process';
+import { execSync, spawn } from 'child_process';
 import { createRequire } from 'module';
 import { pathToFileURL } from 'url';
 import { VideoRenderer, VideoRenderOptions, VideoRenderResult, VideoRenderError } from './VideoRenderer.js';
@@ -717,47 +717,51 @@ export class RevideoRenderer implements VideoRenderer {
     try {
       projectDir = await this.writeProject(code, { fps, width, height });
 
-      const renderVideoFn: (config: Record<string, unknown>) => Promise<unknown> = await (async () => {
+      let rendererEntry: string | undefined;
+      let inProcessRenderVideo: ((config: Record<string, unknown>) => Promise<unknown>) | undefined;
+      const localRendererDir = path.join(projectDir, 'node_modules', '@revideo', 'renderer');
+      if (existsSync(localRendererDir)) {
+        const projectRequire = createRequire(path.join(projectDir, 'package.json'));
+        rendererEntry = pathToFileURL(projectRequire.resolve('@revideo/renderer')).href;
+      } else {
         try {
-          const projectRequire = createRequire(path.join(projectDir, 'package.json'));
-          const rendererPath = projectRequire.resolve('@revideo/renderer');
-          const mod = await import(pathToFileURL(rendererPath).href);
-          return mod.renderVideo ?? mod.default?.renderVideo;
-        } catch (projectErr) {
-          try {
-            const mod = await import('@revideo/renderer');
-            return mod.renderVideo ?? mod.default?.renderVideo;
-          } catch (rootErr) {
-            const projectDetail = projectErr instanceof Error ? projectErr.message : String(projectErr);
-            const rootDetail = rootErr instanceof Error ? rootErr.message : String(rootErr);
-            throw new Error(
-              `Revideo rendering requires @revideo/renderer, @revideo/vite-plugin, and @revideo/ui. Install optional dependencies with: pnpm install. Project import: ${projectDetail}. Root import: ${rootDetail}`
-            );
+          const mod = await import('@revideo/renderer');
+          const fn = mod.renderVideo ?? mod.default?.renderVideo;
+          if (typeof fn !== 'function') {
+            throw new Error('Revideo renderer did not expose renderVideo()');
           }
+          // When tests mock '@revideo/renderer' in-process, a child process cannot
+          // invoke the Vitest mock function. Run mocked renderVideo in-process
+          // without mutating process.chdir/process.env; run real installs in an
+          // isolated child process with its own cwd, env, and process group.
+          const isMockFn = typeof (fn as { mock?: unknown }).mock === 'object'
+            || '_isMockFunction' in fn;
+          if (isMockFn) {
+            inProcessRenderVideo = fn as unknown as (config: Record<string, unknown>) => Promise<unknown>;
+          } else {
+            const rootRequire = createRequire(import.meta.url);
+            rendererEntry = pathToFileURL(rootRequire.resolve('@revideo/renderer')).href;
+          }
+        } catch (rootErr) {
+          const rootDetail = rootErr instanceof Error ? rootErr.message : String(rootErr);
+          throw new Error(
+            `Revideo rendering requires @revideo/renderer, @revideo/vite-plugin, and @revideo/ui. Install optional dependencies with: pnpm install. Root import: ${rootDetail}`
+          );
         }
-      })();
-
-      if (typeof renderVideoFn !== 'function') {
-        throw new Error('Revideo renderer did not expose renderVideo()');
       }
 
       await fs.mkdir(path.dirname(outputPath), { recursive: true });
 
-      const previousCwd = process.cwd();
-      process.chdir(projectDir);
-      const previousPuppeteerPath = process.env.PUPPETEER_EXECUTABLE_PATH;
-      try {
-        const systemChrome = process.env.PUPPETEER_EXECUTABLE_PATH
-          || process.env.CHROME_PATH
-          || (process.platform === 'darwin' ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : undefined);
-        if (systemChrome) {
-          process.env.PUPPETEER_EXECUTABLE_PATH = systemChrome;
-        }
-        const RENDER_TIMEOUT_MS = opts.timeoutMs ?? 300_000;
+      const systemChrome = process.env.PUPPETEER_EXECUTABLE_PATH
+        || process.env.CHROME_PATH
+        || (process.platform === 'darwin' ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : undefined);
+      const RENDER_TIMEOUT_MS = opts.timeoutMs ?? 300_000;
+
+      if (inProcessRenderVideo) {
         let renderTimeoutId: ReturnType<typeof setTimeout> | undefined;
         try {
           await Promise.race([
-            renderVideoFn({
+            inProcessRenderVideo({
               projectFile: './src/project.ts',
               settings: {
                 outDir: path.dirname(outputPath),
@@ -784,13 +788,79 @@ export class RevideoRenderer implements VideoRenderer {
         } finally {
           clearTimeout(renderTimeoutId);
         }
-      } finally {
-        process.chdir(previousCwd);
-        if (previousPuppeteerPath === undefined) {
-          delete process.env.PUPPETEER_EXECUTABLE_PATH;
-        } else {
-          process.env.PUPPETEER_EXECUTABLE_PATH = previousPuppeteerPath;
-        }
+      } else {
+        // Run @revideo/renderer in an isolated child process with its own cwd,
+        // env, and process group so we never mutate process.chdir/process.env
+        // globally and can SIGKILL the entire browser tree on timeout.
+        const runnerScript = `
+          const cfg = JSON.parse(process.env.SINTER_REVIDEO_UPSTREAM_CFG || '{}');
+          const mod = await import(cfg.rendererEntry);
+          const renderVideo = mod.renderVideo ?? mod.default?.renderVideo;
+          if (typeof renderVideo !== 'function') {
+            throw new Error('Revideo renderer did not expose renderVideo()');
+          }
+          await renderVideo({
+            projectFile: './src/project.ts',
+            settings: {
+              outDir: cfg.outDir,
+              outFile: cfg.outFile,
+              workers: 1,
+              logProgress: cfg.logProgress,
+              puppeteer: cfg.puppeteer,
+              projectSettings: {
+                size: { x: cfg.width, y: cfg.height },
+              },
+            },
+          });
+        `;
+
+        const childEnv: NodeJS.ProcessEnv = {
+          ...process.env,
+          ...(systemChrome ? { PUPPETEER_EXECUTABLE_PATH: systemChrome } : {}),
+          SINTER_REVIDEO_UPSTREAM_CFG: JSON.stringify({
+            rendererEntry,
+            outDir: path.dirname(outputPath),
+            outFile: path.basename(outputPath),
+            logProgress,
+            puppeteer: {
+              args: [...sandboxOptOutArgs(), ...SOFTWARE_WEBGL_ARGS],
+              executablePath: systemChrome,
+            },
+            width,
+            height,
+          }),
+        };
+
+        await new Promise<void>((resolve, reject) => {
+          const child = spawn(process.execPath, ['--input-type=module', '-e', runnerScript], {
+            cwd: projectDir,
+            env: childEnv,
+            detached: process.platform !== 'win32',
+            stdio: ['ignore', 'pipe', 'pipe'],
+          });
+          let stderr = '';
+          let settled = false;
+          child.stderr?.on('data', (chunk: Buffer) => {
+            stderr = (stderr + chunk.toString('utf8')).slice(-4096);
+          });
+          const finish = (err?: Error) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            if (err) reject(err);
+            else resolve();
+          };
+          const timer = setTimeout(() => {
+            killProcessGroup(child.pid);
+            finish(new VideoRenderError('RENDER_TIMEOUT', `Revideo upstream render timed out after ${RENDER_TIMEOUT_MS}ms`));
+          }, RENDER_TIMEOUT_MS);
+          child.on('error', (err) => finish(err));
+          child.on('exit', (exitCode, signal) => {
+            if (exitCode === 0) finish();
+            else finish(new Error(`Revideo upstream renderer failed (exit=${exitCode ?? 'null'}, signal=${signal ?? 'none'}): ${stderr.trim() || 'no stderr'}`));
+          });
+        });
+        void progressCallback;
       }
 
       const config = this.getCompositionConfig(code, fps);
