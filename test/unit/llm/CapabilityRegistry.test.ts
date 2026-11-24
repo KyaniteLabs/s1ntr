@@ -351,4 +351,22 @@ describe('CapabilityRegistry', () => {
       expect(CapabilityRegistry.isDecisionModel('')).toBe(false);
     });
   });
+
+  describe('Thinking Machines Inkling 2 family', () => {
+    it.each([
+      ['thinkingmachines/inkling-2-mini', 65_536],
+      ['inkling-2-mini', 65_536],
+      ['thinkingmachines/inkling-2-small', undefined],
+      ['inkling-2-small', undefined],
+    ])('%s registers native vision, 1M context, and effort_level reasoning', (model, expectedMaxOut) => {
+      const caps = CapabilityRegistry.getCapabilities(model);
+      expect(CapabilityRegistry.supportsVision(model)).toBe(true);
+      expect(caps.thinking).toBe(true);
+      expect(caps.thinkingStyle).toBe('effort_level');
+      expect(caps.maxContextTokens).toBe(1_048_576);
+      expect(caps.maxOutputTokens).toBe(expectedMaxOut);
+      expect(caps.inputModalities).toEqual(['text', 'image']);
+      expect(caps.outputModalities).toEqual(['text']);
+    });
+  });
 });

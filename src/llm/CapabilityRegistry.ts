@@ -100,6 +100,10 @@ const VISION_MODEL_PATTERNS: string[] = [
   // d1 decision models accept images (docs.liquid.ai/lfm/models). Leading '*'
   // admits vendor/GGUF prefixes such as 'liquidai/' or 'hf.co/LiquidAI/'.
   '*lfm3-omni*', '*d1-2b*', '*d1-omni*',
+  // Thinking Machines Inkling 2 (live probe 2026-11-24): thinkingmachines/inkling-2-mini
+  // read a 16x16 solid red PNG ("red") and passed 3/3 evaluator vision controls;
+  // gateway metadata declares text+image inputs for inkling-2-mini and inkling-2-small.
+  '*inkling-2*',
 ];
 
 // Static model database — update with new model releases
@@ -185,6 +189,12 @@ const MODEL_CAPABILITIES: Record<string, Partial<ModelCapabilities>> = {
   // Gemini 4.x (Neon, Hydrogen, Carbon, Argon) — multimodal + effort_level high reasoning, 1M context (live probe 2026-11-23).
   'gemini-4*':              { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 1048576, thinkingStyle: 'effort_level', streamingStyle: 'sse' },
   'google/gemini-4*':       { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 1048576, thinkingStyle: 'effort_level', streamingStyle: 'sse' },
+  // Thinking Machines Inkling 2 family (MoE looped transformers, live dogfood 2026-11-24):
+  // native vision, 1M context, effort_level reasoning (none..max); inkling-2-mini max_completion_tokens=65536.
+  'thinkingmachines/inkling-2-mini*':  { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 1048576, maxOutputTokens: 65_536, thinkingStyle: 'effort_level', streamingStyle: 'sse', inputModalities: ['text', 'image'], outputModalities: ['text'] },
+  'inkling-2-mini*':                   { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 1048576, maxOutputTokens: 65_536, thinkingStyle: 'effort_level', streamingStyle: 'sse', inputModalities: ['text', 'image'], outputModalities: ['text'] },
+  'thinkingmachines/inkling-2-small*': { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 1048576, thinkingStyle: 'effort_level', streamingStyle: 'sse', inputModalities: ['text', 'image'], outputModalities: ['text'] },
+  'inkling-2-small*':                  { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 1048576, thinkingStyle: 'effort_level', streamingStyle: 'sse', inputModalities: ['text', 'image'], outputModalities: ['text'] },
   // Gemini 3.x via OpenAI-compatible proxy (cliproxy / AGY; effort-level thinking)
   'gemini-3.6-flash-high*': { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 1048576, thinkingStyle: 'effort_level', streamingStyle: 'sse' },
   'gemini-3.1-pro-low*':    { thinking: true, streaming: true, jsonMode: true, toolUse: true, maxContextTokens: 1048576, thinkingStyle: 'effort_level', streamingStyle: 'sse' },
