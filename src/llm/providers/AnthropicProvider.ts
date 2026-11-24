@@ -16,6 +16,7 @@ import type {
 } from '../ProviderTypes.js';
 import { BaseProvider } from './BaseProvider.js';
 import { CapabilityRegistry } from '../CapabilityRegistry.js';
+import { acquireHostSlot } from '../hostConcurrency.js';
 import { TIMEOUT_DEFAULT_MS } from '../../constants/limits.js';
 import { extractAnthropicThinking } from '../ThinkingNormalizer.js';
 import { parseAnthropicStream } from '../StreamParser.js';
@@ -166,26 +167,33 @@ export class AnthropicProvider extends BaseProvider {
       );
       if (thinkingEnabled) body.thinking = { type: 'enabled', budget_tokens: budget };
 
-      const signal = this.withTimeout(req.signal, this.config.timeout || TIMEOUT_DEFAULT_MS);
+      const releaseSlot = await acquireHostSlot(url, req.signal);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let data: any;
+      try {
+        const signal = this.withTimeout(req.signal, this.config.timeout || TIMEOUT_DEFAULT_MS);
 
-      const response = await this.limitedFetch(url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body),
-        signal,
-      });
+        const response = await this.limitedFetch(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body),
+          signal,
+        });
 
-      if (!response.ok) {
-        return err(await createLLMHttpError({
-          provider: this.name,
-          model: this.config.model,
-          endpoint: url,
-          response,
-          label: 'Anthropic API error',
-        }));
+        if (!response.ok) {
+          return err(await createLLMHttpError({
+            provider: this.name,
+            model: this.config.model,
+            endpoint: url,
+            response,
+            label: 'Anthropic API error',
+          }));
+        }
+
+        data = await response.json();
+      } finally {
+        releaseSlot();
       }
-
-      const data = await response.json();
 
       // Extract thinking from content blocks
       const thinking: NormalizedThinking | undefined = extractAnthropicThinking(data);
@@ -294,26 +302,31 @@ export class AnthropicProvider extends BaseProvider {
     );
     if (thinkingEnabled) body.thinking = { type: 'enabled', budget_tokens: budget };
 
-    const signal = this.withTimeout(req.signal, this.config.timeout || TIMEOUT_DEFAULT_MS);
+    const releaseSlot = await acquireHostSlot(url, req.signal);
+    try {
+      const signal = this.withTimeout(req.signal, this.config.timeout || TIMEOUT_DEFAULT_MS);
 
-    const response = await this.limitedFetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal,
-    });
+      const response = await this.limitedFetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal,
+      });
 
-    if (!response.ok) {
-      yield { type: 'error', error: `Anthropic API error ${response.status}` };
-      return;
+      if (!response.ok) {
+        yield { type: 'error', error: `Anthropic API error ${response.status}` };
+        return;
+      }
+
+      if (!response.body) {
+        yield { type: 'error', error: 'No response body' };
+        return;
+      }
+
+      yield* parseAnthropicStream(response.body);
+    } finally {
+      releaseSlot();
     }
-
-    if (!response.body) {
-      yield { type: 'error', error: 'No response body' };
-      return;
-    }
-
-    yield* parseAnthropicStream(response.body);
   }
 }
 

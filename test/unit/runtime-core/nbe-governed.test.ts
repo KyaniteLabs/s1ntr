@@ -178,4 +178,30 @@ describe('governed nbe generate', () => {
     const { run } = makeEffects(['not json at all', 'still {nope']);
     await expect(run('anything')).rejects.toThrow(/LIMINAL_GENERATION_INVALID:nbe:.*NBE_SETTINGS/);
   });
+
+  it('validates raw and fenced NBE settings JSON directly via CodeValidator without demanding HTML', () => {
+    const rawJson = JSON.stringify(SETTINGS_A);
+    const direct = CodeValidator.validate(rawJson, 'nbe');
+    expect(direct.valid).toBe(true);
+    expect(direct.errors).toEqual([]);
+    expect(JSON.parse(direct.cleanedCode)).toMatchObject({
+      layout: 'ring',
+      emitters: 5,
+      reason: SETTINGS_A.reason,
+    });
+
+    const fenced = CodeValidator.validate(`\`\`\`json\n${rawJson}\n\`\`\``, 'nbe');
+    expect(fenced.valid).toBe(true);
+    expect(fenced.errors).toEqual([]);
+
+    const badJson = CodeValidator.validate(JSON.stringify({ palette: ['red'], layout: 'spiral', reason: '' }), 'nbe');
+    expect(badJson.valid).toBe(false);
+    expect(badJson.errors.some((e) => e.includes('NBE_SETTINGS: palette must be 3 to 6 hex colours'))).toBe(true);
+    expect(badJson.errors.some((e) => e.includes('NBE_SETTINGS: layout must be one of'))).toBe(true);
+    expect(badJson.errors.some((e) => e.includes('NBE_SETTINGS: reason must be one sentence'))).toBe(true);
+
+    const truncated = CodeValidator.validate('{"palette":["#000"', 'nbe');
+    expect(truncated.valid).toBe(false);
+    expect(truncated.errors.some((e) => e.includes('NBE_SETTINGS:'))).toBe(true);
+  });
 });

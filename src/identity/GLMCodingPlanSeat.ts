@@ -14,7 +14,7 @@ export const GLM_CODING_PLAN_MODEL = 'glm-5.3';
  *  model, and a client rides the plan only on the model its binding names.
  *  The owner's provenance attests the plan credential and keeps naming
  *  GLM_CODING_PLAN_MODEL as the plan's reference model. */
-export const GLM_CODING_PLAN_MODELS = [GLM_CODING_PLAN_MODEL, 'glm-5.3-flash'] as const;
+export const GLM_CODING_PLAN_MODELS = [GLM_CODING_PLAN_MODEL, 'glm-5.3-flash', 'glm-5.4'] as const;
 export type GLMCodingPlanModel = typeof GLM_CODING_PLAN_MODELS[number];
 export function isGLMCodingPlanModel(model: unknown): model is GLMCodingPlanModel {
   return (GLM_CODING_PLAN_MODELS as readonly unknown[]).includes(model);

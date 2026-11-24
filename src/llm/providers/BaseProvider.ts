@@ -345,3 +345,41 @@ export function mapNativeFinishReason(native: unknown, hasToolCalls: boolean): '
   const reason = typeof native === 'string' ? native.toLowerCase() : '';
   return reason === 'length' || reason === 'max_tokens' || reason === 'max_output_tokens' ? 'length' : 'stop';
 }
+
+/**
+ * Reasoning headroom (tokens) added on top of the caller's answer budget for
+ * `effort_level` thinking models (Gemini 4 Neon, GPT-5/6, o3/o4) on
+ * OpenAI-compatible gateways where `max_tokens` / `max_completion_tokens`
+ * counts reasoning + visible output combined.
+ *
+ * Empirical finding (2026-11-23 dogfooding): `google/gemini-4-neon` on
+ * `effort: 'high'` spent 8,910 reasoning tokens + 7,474 code tokens and
+ * truncated JS mid-line at `max_tokens: 16384`. Adding effort headroom gives
+ * 32,768 at `answerTokens = 16384` (and 20,480 at `answerTokens = 4096`).
+ */
+const EFFORT_REASONING_HEADROOM: Record<Effort, number> = {
+  low: 4_096,
+  medium: 8_192,
+  high: 16_384,
+  xhigh: 24_576,
+  max: 24_576,
+};
+
+export function effortReasoningWireMaxTokens(
+  answerTokens: number | undefined,
+  thinking: ProviderRequest['thinking'],
+  capabilities: { thinking?: boolean; thinkingStyle?: string; maxOutputTokens?: number },
+): number | undefined {
+  if (answerTokens === undefined) return undefined;
+  if (!thinking?.enabled || !capabilities.thinking || capabilities.thinkingStyle !== 'effort_level') {
+    return answerTokens;
+  }
+  const safeAnswer = Number.isFinite(answerTokens) && answerTokens >= 1 ? Math.trunc(answerTokens) : 4096;
+  const effort: Effort = thinking.effort ?? 'medium';
+  const headroom = EFFORT_REASONING_HEADROOM[effort] ?? EFFORT_REASONING_HEADROOM.medium;
+  let wire = safeAnswer + headroom;
+  if (capabilities.maxOutputTokens && Number.isFinite(capabilities.maxOutputTokens) && capabilities.maxOutputTokens >= 1) {
+    wire = Math.min(wire, Math.trunc(capabilities.maxOutputTokens));
+  }
+  return Math.max(1, wire);
+}

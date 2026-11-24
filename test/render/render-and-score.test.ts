@@ -104,7 +104,8 @@ describe('HeadlessRenderer rendering', () => {
   beforeAll(async () => {
     renderer = HeadlessRenderer.getInstance();
     await renderer.initialize();
-  });
+    // Cold Chromium launch on CI runners can exceed the 10s default hook timeout.
+  }, 60000);
 
   afterAll(async () => {
     await renderer.close();

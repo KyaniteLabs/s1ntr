@@ -15,6 +15,8 @@
  */
 
 /** Domains whose completion is judged by the same strategy. */
+import { answerCode } from '../llm/ModelOutput.js';
+
 type CompletionFamily = 'brace' | 'glsl' | 'audio' | 'markup' | 'text' | 'python' | 'structural';
 
 function classifyDomain(domain?: string): CompletionFamily {
@@ -119,6 +121,20 @@ export function isCodeComplete(code: string, domain?: string): boolean {
     }
 
     case 'markup': {
+      // NBE can arrive either as rendered HTML or as raw engine-settings JSON
+      // before renderNbeFromChoice(). Accept a complete JSON object for nbe.
+      if (String(domain ?? '').toLowerCase().trim() === 'nbe') {
+        const unfenced = answerCode(trimmed, ['json', 'jsonc', 'json5']).trim();
+        if (unfenced.startsWith('{')) {
+          if (!unfenced.endsWith('}')) return false;
+          try {
+            const parsed = JSON.parse(unfenced);
+            return Boolean(parsed && typeof parsed === 'object' && !Array.isArray(parsed));
+          } catch {
+            return false;
+          }
+        }
+      }
       // SVG/HTML are not brace-structured. Require a recognizable closing tag so a
       // truncated document (open tag with no close) is judged incomplete.
       const hasSvg = /<svg[\s>]/i.test(code) && /<\/svg>/i.test(code);

@@ -15,6 +15,9 @@
 
 import { parseMoshPlan } from '../render/DatamoshPlan.js';
 import { FootageLibrary } from '../footage/FootageLibrary.js';
+import { EngineSettingsError, parseEngineReply } from '../generators/engine/EngineSettings.js';
+import { validateNbeSettings } from '../generators/nbe/NbeSettings.js';
+import { answerCode } from '../llm/ModelOutput.js';
 import { repairRejected } from './recovery/DeterministicRepair.js';
 import path from 'path';
 import { P5Validator } from './validators/P5Validator.js';
@@ -530,6 +533,36 @@ function validateDatamoshPlan(code: string): ValidationResult {
   }
 }
 
+function looksLikeNbeSettingsJson(code: string): boolean {
+  const candidate = answerCode(code, ['json', 'jsonc', 'json5']).trim();
+  return candidate.startsWith('{');
+}
+
+function validateNbeSettingsJson(code: string): ValidationResult {
+  try {
+    const parsed = parseEngineReply('nbe', code);
+    const choice = validateNbeSettings(parsed);
+    return {
+      valid: true,
+      cleanedCode: JSON.stringify({ ...choice.settings, reason: choice.reason }),
+      errors: [],
+    };
+  } catch (error) {
+    if (error instanceof EngineSettingsError) {
+      return {
+        valid: false,
+        cleanedCode: code.trim(),
+        errors: error.problems.map((p) => `NBE_SETTINGS: ${p}`),
+      };
+    }
+    return {
+      valid: false,
+      cleanedCode: code.trim(),
+      errors: [`NBE_SETTINGS: ${error instanceof Error ? error.message : String(error)}`],
+    };
+  }
+}
+
 export class CodeValidator {
   static validate(code: string, domain?: string): ValidationResult {
     if (domain !== undefined) domain = canonicalDomainId(domain);
@@ -538,6 +571,10 @@ export class CodeValidator {
     }
     // Next-release domain (flag-gated): the artifact is a JSON plan, not code.
     if (domain === 'datamosh') return validateDatamoshPlan(code);
+    // NBE generator emits engine-settings JSON before renderNbeFromChoice() wraps it
+    // into a self-contained HTML page. Accept valid settings JSON directly while
+    // preserving HTML + canvas + convergence checks for rendered NBE documents.
+    if (domain === 'nbe' && looksLikeNbeSettingsJson(code)) return validateNbeSettingsJson(code);
 
     const explicitTextOutput = domain === 'textgen' || domain === 'ascii';
     const decontaminated = stripContamination(code, explicitTextOutput);

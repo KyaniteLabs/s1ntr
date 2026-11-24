@@ -267,6 +267,8 @@ describe('renderBlender', () => {
     expect(driver).toContain('builtins.open = _guarded_open');
     expect(driver).toContain('socket.socket.connect = _no_network');
     expect(driver).toContain("SINTER_BLENDER_MAX_SAMPLES");
+    expect(driver).toContain('OpenImageDenoise');
+    expect(driver).toContain('scene.cycles.use_denoising = False');
     expect(driver).toContain('write_still=True');
   });
 });

@@ -98,6 +98,12 @@ describe('isCodeComplete — shared domain-aware helper (D8)', () => {
       const code = '<!DOCTYPE html><html><body><canvas id="stage">';
       expect(isCodeComplete(code, 'nbe')).toBe(false);
     });
+
+    it('accepts complete nbe settings JSON and rejects truncated JSON', () => {
+      expect(isCodeComplete('{"palette":["#000","#333","#fff"],"layout":"ring","reason":"Ring of embers."}', 'nbe')).toBe(true);
+      expect(isCodeComplete('```json\n{"layout":"ring","reason":"Ring of embers."}\n```', 'nbe')).toBe(true);
+      expect(isCodeComplete('{"palette":["#000","#333"', 'nbe')).toBe(false);
+    });
   });
 
   describe('text domains (ascii / textgen)', () => {

@@ -25,6 +25,7 @@ import { projectExecutorAttemptHistory, toExecutorAttestationRef,
   toExecutorAttemptRecord, type ExecutorAttemptRecord,
   type HarnessTransportAuthority } from '../identity/harnessTransportGuard.js';
 import type { LLMResponse } from './LLMClient.js';
+import { TIMEOUT_DEFAULT_MS } from '../constants/limits.js';
 import { providerRequestDigest } from './ProviderRequestDigest.js';
 import type { ProviderRequest } from './ProviderTypes.js';
 import {
@@ -78,7 +79,7 @@ export type GLMCodingPlanCommandExecutor = (input: {
 
 const productionExecutor: GLMCodingPlanCommandExecutor = async ({ file, args, env }) => {
   const result = await executeFile(file, [...args], {
-    env, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024, timeout: 180_000,
+    env, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024, timeout: TIMEOUT_DEFAULT_MS,
   });
   return { stdout: result.stdout };
 };

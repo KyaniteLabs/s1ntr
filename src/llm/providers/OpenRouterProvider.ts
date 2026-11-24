@@ -14,7 +14,7 @@ import type {
   ProviderCapabilities,
   StreamEvent,
 } from '../ProviderTypes.js';
-import { BaseProvider, mapNativeFinishReason, usesMaxCompletionTokens } from './BaseProvider.js';
+import { BaseProvider, effortReasoningWireMaxTokens, mapNativeFinishReason, usesMaxCompletionTokens } from './BaseProvider.js';
 import { CapabilityRegistry } from '../CapabilityRegistry.js';
 import { TIMEOUT_DEFAULT_MS } from '../../constants/limits.js';
 import { extractOpenRouterThinking } from '../ThinkingNormalizer.js';
@@ -94,7 +94,14 @@ export class OpenRouterProvider extends BaseProvider {
       const url = `${this.config.baseUrl}/chat/completions`;
       const headers = this.getHeaders();
 
-      const maxTokensValue = req.maxTokens ?? this.config.maxTokens;
+      const thinkingForBudget = req.thinking?.enabled
+        ? { ...req.thinking, effort: req.thinking.effort || 'high' }
+        : req.thinking;
+      const maxTokensValue = effortReasoningWireMaxTokens(
+        req.maxTokens ?? this.config.maxTokens,
+        thinkingForBudget,
+        this.capabilities,
+      );
       const body: Record<string, unknown> = {
         model: this.config.model,
         messages: [
@@ -219,7 +226,14 @@ export class OpenRouterProvider extends BaseProvider {
     const url = `${this.config.baseUrl}/chat/completions`;
     const headers = this.getHeaders();
 
-    const maxTokensValueStream = req.maxTokens ?? this.config.maxTokens;
+    const thinkingForBudgetStream = req.thinking?.enabled
+      ? { ...req.thinking, effort: req.thinking.effort || 'high' }
+      : req.thinking;
+    const maxTokensValueStream = effortReasoningWireMaxTokens(
+      req.maxTokens ?? this.config.maxTokens,
+      thinkingForBudgetStream,
+      this.capabilities,
+    );
     const body: Record<string, unknown> = {
       model: this.config.model,
       messages: [

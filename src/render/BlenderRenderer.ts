@@ -155,6 +155,12 @@ try:
 except Exception:
     pass
 try:
+    import _cycles
+    if not getattr(_cycles, "with_openimagedenoise", True):
+        scene.cycles.use_denoising = False
+except Exception:
+    pass
+try:
     scene.cycles.samples = max(1, min(int(scene.cycles.samples), _MAX_SAMPLES))
     scene.cycles.preview_samples = max(1, min(int(scene.cycles.preview_samples), _MAX_SAMPLES))
 except Exception:
@@ -167,7 +173,14 @@ scene.render.resolution_percentage = 100
 scene.render.image_settings.file_format = "PNG"
 scene.render.use_file_extension = False
 scene.render.filepath = os.path.join(_OUT, "${OUTPUT_NAME}")
-bpy.ops.render.render(write_still=True)
+try:
+    bpy.ops.render.render(write_still=True)
+except RuntimeError as _render_err:
+    if "OpenImageDenoise" in str(_render_err) and getattr(scene.cycles, "use_denoising", False):
+        scene.cycles.use_denoising = False
+        bpy.ops.render.render(write_still=True)
+    else:
+        raise
 `;
 
 function tail(text: string, max = LOG_TAIL_BYTES): string {

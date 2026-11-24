@@ -12,8 +12,9 @@ import type {
   ProviderCapabilities,
   StreamEvent,
 } from '../ProviderTypes.js';
-import { BaseProvider, usesMaxCompletionTokens } from './BaseProvider.js';
+import { BaseProvider, effortReasoningWireMaxTokens, usesMaxCompletionTokens } from './BaseProvider.js';
 import { CapabilityRegistry } from '../CapabilityRegistry.js';
+import { acquireHostSlot } from '../hostConcurrency.js';
 import { TIMEOUT_DEFAULT_MS } from '../../constants/limits.js';
 import { normalizeThinking } from '../ThinkingNormalizer.js';
 import { parseOpenAIStream } from '../StreamParser.js';
@@ -209,7 +210,9 @@ export class OpenAIProvider extends BaseProvider {
       // Never send blank system content — OpenAI-compatible gateways (Kilo) 400.
       const baseSystem = (req.systemPrompt || '').trim() || 'You are a helpful assistant.';
       const lfm3 = await this.lfm3For(req, baseSystem);
-      const maxTokensValue = lfm3 ? lfm3.maxTokens : req.maxTokens ?? this.config.maxTokens;
+      const maxTokensValue = lfm3
+        ? lfm3.maxTokens
+        : effortReasoningWireMaxTokens(req.maxTokens ?? this.config.maxTokens, req.thinking, this.capabilities);
       const systemContent = lfm3?.systemContent ?? baseSystem;
       const body: Record<string, unknown> = {
         model: this.config.model,
@@ -288,26 +291,34 @@ export class OpenAIProvider extends BaseProvider {
         }
       }
 
-      const signal = this.withTimeout(req.signal, this.config.timeout || TIMEOUT_DEFAULT_MS);
+      const releaseSlot = await acquireHostSlot(url, req.signal);
+      let response: Response;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let data: any;
+      try {
+        const signal = this.withTimeout(req.signal, this.config.timeout || TIMEOUT_DEFAULT_MS);
 
-      const response = await this.limitedFetch(url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body),
-        signal,
-      });
+        response = await this.limitedFetch(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body),
+          signal,
+        });
 
-      if (!response.ok) {
-        return err(await createLLMHttpError({
-          provider: this.name,
-          model: this.config.model,
-          endpoint: url,
-          response,
-          label: 'OpenAI API error',
-        }));
+        if (!response.ok) {
+          return err(await createLLMHttpError({
+            provider: this.name,
+            model: this.config.model,
+            endpoint: url,
+            response,
+            label: 'OpenAI API error',
+          }));
+        }
+
+        data = await response.json();
+      } finally {
+        releaseSlot();
       }
-
-      const data = await response.json();
       const thinking = normalizeThinking(data, 'openai');
       const thinkingText = typeof thinking.text === 'string' ? thinking.text : '';
 
@@ -419,7 +430,9 @@ export class OpenAIProvider extends BaseProvider {
 
     const baseSystemStream = (req.systemPrompt || '').trim() || 'You are a helpful assistant.';
     const lfm3 = await this.lfm3For(req, baseSystemStream);
-    const maxTokensValueStream = lfm3 ? lfm3.maxTokens : req.maxTokens ?? this.config.maxTokens;
+    const maxTokensValueStream = lfm3
+      ? lfm3.maxTokens
+      : effortReasoningWireMaxTokens(req.maxTokens ?? this.config.maxTokens, req.thinking, this.capabilities);
     const systemContentStream = lfm3?.systemContent ?? baseSystemStream;
     const body: Record<string, unknown> = {
       model: this.config.model,
@@ -448,26 +461,31 @@ export class OpenAIProvider extends BaseProvider {
       }
     }
 
-    const signal = this.withTimeout(req.signal, this.config.timeout || TIMEOUT_DEFAULT_MS);
+    const releaseSlot = await acquireHostSlot(url, req.signal);
+    try {
+      const signal = this.withTimeout(req.signal, this.config.timeout || TIMEOUT_DEFAULT_MS);
 
-    const response = await this.limitedFetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal,
-    });
+      const response = await this.limitedFetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal,
+      });
 
-    if (!response.ok) {
-      yield { type: 'error', error: `OpenAI API error ${response.status}` };
-      return;
+      if (!response.ok) {
+        yield { type: 'error', error: `OpenAI API error ${response.status}` };
+        return;
+      }
+
+      if (!response.body) {
+        yield { type: 'error', error: 'No response body' };
+        return;
+      }
+
+      const events = parseOpenAIStream(response.body);
+      yield* this.isLFM3 ? finalLFM3Content(events) : events;
+    } finally {
+      releaseSlot();
     }
-
-    if (!response.body) {
-      yield { type: 'error', error: 'No response body' };
-      return;
-    }
-
-    const events = parseOpenAIStream(response.body);
-    yield* this.isLFM3 ? finalLFM3Content(events) : events;
   }
 }
